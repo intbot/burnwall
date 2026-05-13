@@ -1,0 +1,27 @@
+{
+  "id": "chatcmpl-abc123def456",
+  "object": "chat.completion",
+  "created": 1715443200,
+  "model": "gpt-5.4-2026-01-15",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Here is the refactored code."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 2048,
+    "completion_tokens": 512,
+    "total_tokens": 2560,
+    "prompt_tokens_details": {
+      "cached_tokens": 1536
+    },
+    "completion_tokens_details": {
+      "reasoning_tokens": 0
+    }
+  }
+}

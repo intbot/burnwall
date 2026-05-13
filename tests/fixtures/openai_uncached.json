@@ -1,0 +1,27 @@
+{
+  "id": "chatcmpl-xyz789ghi012",
+  "object": "chat.completion",
+  "created": 1715443300,
+  "model": "gpt-5.4-mini-2026-03-01",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Done."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 4096,
+    "completion_tokens": 256,
+    "total_tokens": 4352,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    },
+    "completion_tokens_details": {
+      "reasoning_tokens": 0
+    }
+  }
+}

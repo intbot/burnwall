@@ -1,0 +1,33 @@
+{
+  "model": "claude-sonnet-4-6-20250514",
+  "max_tokens": 4096,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Read my SSH key"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01A09q90qw90lq917835lq",
+          "name": "bash",
+          "input": {
+            "command": "cat /Users/developer/.ssh/id_rsa"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01A09q90qw90lq917835lq",
+          "content": "SHOULD_NOT_REACH_HERE"
+        }
+      ]
+    }
+  ]
+}

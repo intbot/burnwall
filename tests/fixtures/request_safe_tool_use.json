@@ -1,0 +1,33 @@
+{
+  "model": "claude-sonnet-4-6-20250514",
+  "max_tokens": 4096,
+  "messages": [
+    {
+      "role": "user",
+      "content": "List files in the project"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_02B19r91rw91mr928946mr",
+          "name": "bash",
+          "input": {
+            "command": "ls -la ./src/"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_02B19r91rw91mr928946mr",
+          "content": "total 24\ndrwxr-xr-x  5 dev  staff  160 May 11 10:00 .\n-rw-r--r--  1 dev  staff  1234 May 11 10:00 main.rs"
+        }
+      ]
+    }
+  ]
+}

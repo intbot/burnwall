@@ -1,0 +1,114 @@
+//! Tests for the TOML-backed user config layer.
+
+use burnwall::config::{self, Config};
+
+#[test]
+fn default_config_has_sensible_values() {
+    let c = Config::default();
+    assert_eq!(c.proxy.port, 4100);
+    assert_eq!(c.proxy.host, "127.0.0.1");
+    assert!((c.budget.daily - 50.0).abs() < 1e-9);
+    assert_eq!(c.budget.warn_percent, 80);
+    assert!(c.security.enabled);
+    assert!(c.security.block_network_mounts);
+    assert!(c.security.detect_secrets);
+    assert!(!c.security.deny_paths.is_empty());
+}
+
+#[test]
+fn load_returns_default_when_file_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let cfg = config::load_or_default(&path).expect("load");
+    assert_eq!(cfg, Config::default());
+}
+
+#[test]
+fn save_then_load_roundtrips() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let mut cfg = Config::default();
+    cfg.budget.daily = 12.5;
+    cfg.security.deny_paths.push("~/secret".to_string());
+
+    config::save(&path, &cfg).expect("save");
+    let read = config::load_or_default(&path).expect("load");
+    assert_eq!(cfg, read);
+}
+
+#[test]
+fn save_creates_missing_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nested").join("dir").join("config.toml");
+    config::save(&path, &Config::default()).expect("save creates parents");
+    assert!(path.exists());
+}
+
+#[test]
+fn set_dotted_key_handles_numeric_fields() {
+    let mut c = Config::default();
+    config::set_dotted_key(&mut c, "budget.daily", "20").unwrap();
+    assert!((c.budget.daily - 20.0).abs() < 1e-9);
+    config::set_dotted_key(&mut c, "budget.warn_percent", "90").unwrap();
+    assert_eq!(c.budget.warn_percent, 90);
+    config::set_dotted_key(&mut c, "proxy.port", "8080").unwrap();
+    assert_eq!(c.proxy.port, 8080);
+}
+
+#[test]
+fn set_dotted_key_handles_string_fields() {
+    let mut c = Config::default();
+    config::set_dotted_key(&mut c, "proxy.host", "0.0.0.0").unwrap();
+    assert_eq!(c.proxy.host, "0.0.0.0");
+    config::set_dotted_key(&mut c, "logging.level", "debug").unwrap();
+    assert_eq!(c.logging.level, "debug");
+}
+
+#[test]
+fn set_dotted_key_handles_boolean_fields() {
+    let mut c = Config::default();
+    config::set_dotted_key(&mut c, "security.block_network_mounts", "false").unwrap();
+    assert!(!c.security.block_network_mounts);
+    config::set_dotted_key(&mut c, "security.detect_secrets", "true").unwrap();
+    assert!(c.security.detect_secrets);
+}
+
+#[test]
+fn set_dotted_key_parses_csv_lists() {
+    let mut c = Config::default();
+    config::set_dotted_key(&mut c, "security.deny_paths", "~/.ssh, ~/.aws, /etc/passwd").unwrap();
+    assert_eq!(
+        c.security.deny_paths,
+        vec!["~/.ssh", "~/.aws", "/etc/passwd"]
+    );
+}
+
+#[test]
+fn set_dotted_key_rejects_unknown_keys() {
+    let mut c = Config::default();
+    let err = config::set_dotted_key(&mut c, "no.such.key", "x").unwrap_err();
+    assert!(matches!(err, config::ConfigError::UnknownKey(_)));
+}
+
+#[test]
+fn set_dotted_key_rejects_invalid_values() {
+    let mut c = Config::default();
+    let err = config::set_dotted_key(&mut c, "budget.daily", "not-a-number").unwrap_err();
+    assert!(matches!(err, config::ConfigError::InvalidValue { .. }));
+}
+
+#[test]
+fn budget_config_converts_to_runtime_type() {
+    let c = Config::default();
+    let runtime: burnwall::budget::BudgetConfig = (&c.budget).into();
+    assert!((runtime.daily_usd - c.budget.daily).abs() < 1e-9);
+    assert_eq!(runtime.warn_percent, c.budget.warn_percent);
+}
+
+#[test]
+fn security_config_converts_to_runtime_ruleset() {
+    let c = Config::default();
+    let rules: burnwall::security::Ruleset = (&c.security).into();
+    assert_eq!(rules.deny_paths, c.security.deny_paths);
+    assert_eq!(rules.block_network_mounts, c.security.block_network_mounts);
+}

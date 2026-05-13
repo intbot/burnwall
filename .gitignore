@@ -1,0 +1,41 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Cargo.lock IS committed here -- Burnwall ships as a binary, so reproducible
+# builds matter. (Library-only crates would gitignore it.)
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local Claude Code state (per-machine permissions, etc.)
+.claude/
+
+# Secrets / env files -- never commit
+.env
+.env.*
+*.pem
+*.key
+
+# Local-only config overrides (keep matching positive patterns out of git)
+*.local.toml
+*.local.json
+config.local.*
+
+# Burnwall runtime data (these only appear if a user runs the binary inside
+# the repo with the default data dir overridden -- defensive)
+burnwall.db
+burnwall.log
+burnwall.pid
+*.db-journal
+*.db-wal
+*.db-shm

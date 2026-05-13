@@ -1,0 +1,111 @@
+[package]
+name = "burnwall"
+version = "0.1.0"
+edition = "2021"
+description = "AI agent firewall and cost tracker. Security + budget enforcement for AI coding tools."
+license = "FSL-1.1-MIT"
+repository = "https://github.com/[OWNER]/burnwall"
+readme = "README.md"
+keywords = ["ai", "llm", "security", "proxy", "cost-tracking"]
+categories = ["command-line-utilities", "network-programming"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP proxy
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "http1", "http2"] }
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+
+# HTTP client for forwarding
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# JSON parsing
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Config
+toml = "0.8"
+
+# SQLite
+rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Utilities
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"                           # Cross-platform home directory
+regex = "1"                          # Pattern matching for security rules
+dashmap = "6"                        # Concurrent hashmap for loop detection
+uuid = { version = "1", features = ["v4"] }
+futures-util = "0.3"                 # Stream adapters for SSE response pass-through
+
+# Daemonize (Unix)
+[target.'cfg(unix)'.dependencies]
+daemonize = "0.5"
+
+[dev-dependencies]
+# Testing
+tokio-test = "0.4"
+tempfile = "3"
+wiremock = "0.6"                     # Mock HTTP server for integration tests
+assert_cmd = "2"                     # CLI testing
+predicates = "3"                     # Assertion helpers
+
+[[test]]
+name = "proxy_test"
+path = "tests/integration/proxy_test.rs"
+
+[[test]]
+name = "parser_test"
+path = "tests/unit/parser_test.rs"
+
+[[test]]
+name = "pricing_test"
+path = "tests/unit/pricing_test.rs"
+
+[[test]]
+name = "storage_test"
+path = "tests/unit/storage_test.rs"
+
+[[test]]
+name = "security_test"
+path = "tests/integration/security_test.rs"
+
+[[test]]
+name = "budget_test"
+path = "tests/integration/budget_test.rs"
+
+[[test]]
+name = "pipeline_test"
+path = "tests/integration/pipeline_test.rs"
+
+[[test]]
+name = "config_test"
+path = "tests/unit/config_test.rs"
+
+[[test]]
+name = "cli_test"
+path = "tests/integration/cli_test.rs"
+
+[[test]]
+name = "init_test"
+path = "tests/integration/init_test.rs"
+
+[profile.release]
+opt-level = "z"                      # Optimize for size
+lto = true                          # Link-time optimization
+codegen-units = 1                    # Single codegen unit for better optimization
+strip = true                         # Strip debug symbols
