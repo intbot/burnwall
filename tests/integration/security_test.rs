@@ -189,7 +189,7 @@ fn secret_detection_can_be_disabled() {
 
 #[test]
 fn non_json_body_returns_none() {
-    // Fail-open per D9: non-chat endpoints may not have JSON bodies.
+    // Fail-open: non-chat endpoints may not have JSON bodies.
     assert!(engine().scan(b"<html>").is_none());
     assert!(engine().scan(b"").is_none());
 }

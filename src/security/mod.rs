@@ -13,8 +13,8 @@
 //!
 //! ### Fail-open
 //! If the request body isn't valid JSON, [`SecurityEngine::scan`] returns
-//! `None` (no violation) and the proxy forwards. Per D9: breaking the user's
-//! workflow is worse than missing one scan, and non-JSON bodies are
+//! `None` (no violation) and the proxy forwards. Rationale: breaking the
+//! user's workflow is worse than missing one scan, and non-JSON bodies are
 //! typically non-chat endpoints (e.g. health checks).
 
 pub mod rules;
