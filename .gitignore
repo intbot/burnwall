@@ -20,6 +20,9 @@ desktop.ini
 # Local Claude Code state (per-machine permissions, etc.)
 .claude/
 
+# Local-only files (not part of the published repo)
+internal/
+
 # Secrets / env files -- never commit
 .env
 .env.*
