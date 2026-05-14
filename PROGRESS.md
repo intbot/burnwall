@@ -2,11 +2,31 @@
 
 Update this file after every Claude Code session.
 
-## Status: v0.1 Ready
+## Status: v0.2 in progress (~50%)
 
-All v0.1 features shipped — proxy + security + budget + cost tracking + CLI. 120/120 tests green, clippy clean, rustfmt clean, release binary verified locally. Ready to tag v0.1.0 and let CI ship binaries.
+- **v0.1**: fully shipped on `main`. 120 tests. Tagged-and-ship ready (no `v0.1.0` tag pushed yet — `[OWNER]` placeholders still in Cargo.toml/LICENSE).
+- **v0.2**: active on the `v0.2` branch. 5 feature commits landed, 143 tests passing, `cargo fmt` + `clippy` clean. Roughly half the milestone done.
+- **Current branch:** `v0.2`. Both branches pushed to `origin`.
+
+### Fresh-session orientation
+
+- The **v0.2 plan** (replanned after a competitive-research pass) lives in `internal/ROADMAP.md` — `internal/` is gitignored/local-only. It has checkboxes for what's done vs remaining.
+- Next planned feature: **per-project security profiles (`.burnwall.yaml`)** — highest-impact remaining v0.2 item.
+- Competitive landscape research is in `internal/COMPETITORS.md`.
+- User preferences are in the auto-loaded memory files (no `Co-Authored-By` trailer; no meta-commentary about hidden/scrubbed content).
 
 ## Session Log
+
+### v0.2 — Stop Wasting My Money (2026-05-13/14, `v0.2` branch)
+- [x] Loop detection — `LoopDetector` (per-hash sliding-window + cost-spiral), wired into the proxy pipeline between budget check and forward; `request_hash` column populated
+- [x] `burnwall security` command — table + `--json` view of `security_events`
+- [x] Pricing freshness warning — `PRICING_LAST_UPDATED` const + `pricing_age_days()`; `status` warns if >30 days old
+- [x] `config show --json` — completes `--json` coverage across all commands
+- [x] Shell completions — `burnwall completions <shell>` for bash/zsh/fish/powershell/elvish (`clap_complete`)
+- [x] Path redaction — `security.log_redact_details` config; storage rows redact the matched-rule detail, 403 response unaffected (D13 mitigation)
+- [x] Competitive research pass — ~50 new competitors catalogued in `internal/COMPETITORS.md`; v0.2 replanned in `internal/ROADMAP.md`
+- [x] Repo hygiene — relocated internal planning docs to gitignored `internal/`, scrubbed history of strategy-doc content + names, removed `Co-Authored-By` trailers
+- [ ] Remaining v0.2 work — see `internal/ROADMAP.md` (per-project profiles, Tier-2 log-file cost tracking, MCP disclaimer, local-time "today", daemon mode + real `stop`, Homebrew formula, README comparison page, positioning copy, Show HN prep)
 
 ### Session 0 — Planning (May 2026)
 - [x] CLAUDE.md — project rules and structure
@@ -135,37 +155,12 @@ All v0.1 features shipped — proxy + security + budget + cost tracking + CLI. 1
 - [x] `cargo test` — 8/8 passing
 - [x] `cargo build` clean, `cargo run` prints stub banner
 
-## Next Sessions (Suggested Order)
+## Next Steps
 
-### Session 1 — Project Scaffold
-"Read CLAUDE.md and docs/ARCHITECTURE.md. Set up the Cargo workspace with all crates listed in the project structure. Add all dependencies to Cargo.toml. Create empty mod.rs files for every module. Make sure `cargo build` succeeds."
-
-### Session 2 — Proxy Server (Forward Only)
-"Read docs/SPEC.md 'Proxy Behavior' section and docs/ARCHITECTURE.md. Implement the proxy server in src/proxy/. It should listen on localhost:4100 with two route prefixes: /anthropic/* forwards to api.anthropic.com and /openai/* forwards to api.openai.com. Handle both non-streaming and SSE streaming responses. For now just forward and return — no parsing or storage. Write integration tests with a mock upstream server."
-
-### Session 3 — Response Parsers
-"Read docs/SPEC.md 'Provider API Response Formats' and 'Pricing Database' sections. Implement Anthropic and OpenAI response parsers in src/providers/. They read the usage block from API responses and calculate cost using the pricing tables. Handle all token types including cache_creation and cache_read. Write unit tests using the fixture files in tests/fixtures/."
-
-### Session 4 — SQLite Storage
-"Read docs/SPEC.md 'SQLite Schema' section. Implement storage in src/storage/. Create the database, run migrations, implement insert and query methods. Write the repository layer that the proxy and CLI commands will use. Write tests."
-
-### Session 5 — Security Engine
-"Read docs/SPEC.md 'Security Scanning' section and docs/ARCHITECTURE.md 'Security Engine Design'. Implement the security scanner in src/security/. It scans JSON request bodies for denied file paths, blocked commands, network mount paths, and secret patterns. Write tests with the blocked_path fixture."
-
-### Session 6 — Budget Enforcement
-"Read docs/SPEC.md 'Budget Enforcement' section and docs/ARCHITECTURE.md 'Budget Tracking'. Implement budget tracking in src/budget/. Use AtomicU64 for fast in-memory tracking, sync with SQLite. Return 429 when budget exceeded. Write tests."
-
-### Session 7 — Wire Everything Together
-"Connect all components: proxy → security check → budget check → forward → parse response → calculate cost → store in SQLite. Implement the `burnwall start` command. Test the full pipeline with mock upstream."
-
-### Session 8 — CLI Commands
-"Implement `burnwall status`, `burnwall history`, `burnwall config set/show` commands. Read from SQLite, format output as shown in SPEC.md. Write tests."
-
-### Session 9 — Config and Init
-"Implement TOML config loading, `burnwall init` auto-detection, and shell configuration. Handle ~/.burnwall/ directory creation. Write tests."
-
-### Session 10 — Polish and Release
-"Cross-compilation setup. README with screenshots. GitHub Actions CI. Release binaries for macOS/Windows/Linux. Final integration test pass."
+Remaining v0.2 work is tracked with checkboxes in `internal/ROADMAP.md`
+(gitignored, local-only). Suggested next feature: **per-project security
+profiles (`.burnwall.yaml`)** — see that file for the full ordered list
+and rationale.
 
 ## Bugs / Tech Debt
 
