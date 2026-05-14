@@ -1,8 +1,8 @@
 //! `burnwall stop` — placeholder.
 //!
 //! v0.1 runs the proxy in the foreground (Ctrl-C to stop). Background
-//! daemon mode + a real PID-file-aware `stop` lands in v0.2 (see
-//! `docs/ROADMAP.md`).
+//! daemon mode + a real PID-file-aware `stop` is planned for a later
+//! release.
 
 use clap::Args;
 

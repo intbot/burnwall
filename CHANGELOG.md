@@ -16,8 +16,8 @@ All notable changes to Burnwall.
 - Cache-aware cost calculator (`cost`, `cost_without_cache`, `cache_savings`).
 - SQLite storage (`~/.burnwall/burnwall.db`) for `requests`,
   `security_events`, and `daily_summary`. `0700`/`0600` permissions on
-  Unix; user-profile ACL on Windows. Unencrypted on disk by design (see
-  D13 in `docs/DECISIONS.md`).
+  Unix; user-profile ACL on Windows. Unencrypted on disk by design — it
+  holds only metadata (no API keys, no prompt content).
 - Security engine — schema-agnostic JSON walker matching denied paths
   (with `~/`, expanded-Unix, and Windows-UNC tolerance), denied commands,
   network mounts (`/Volumes/`, `\\`, `smb://`, `nfs://`), and secret

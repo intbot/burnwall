@@ -9,10 +9,10 @@
 //! are idempotent (every statement is `IF NOT EXISTS`). Future schema changes
 //! will need a real migration runner — out of scope for v0.1.
 //!
-//! Storage is unencrypted on disk. See D13 in `docs/DECISIONS.md` for the
-//! threat-model reasoning. The default `open_default()` path applies
-//! `0700`/`0600` permissions on Unix and relies on the user-profile ACL on
-//! Windows.
+//! Storage is unencrypted on disk by design — it holds only metadata
+//! (timestamps, token counts, costs, model names), never API keys or
+//! prompt content. The default `open_default()` path applies `0700`/`0600`
+//! permissions on Unix and relies on the user-profile ACL on Windows.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;

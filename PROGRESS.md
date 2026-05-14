@@ -12,11 +12,7 @@ All v0.1 features shipped — proxy + security + budget + cost tracking + CLI. 1
 - [x] CLAUDE.md — project rules and structure
 - [x] docs/SPEC.md — exact CLI behavior, proxy logic, pricing tables, schemas
 - [x] docs/ARCHITECTURE.md — component design, data flow, shared state
-- [x] docs/DECISIONS.md — why Rust, why proxy, why FSL, why SQLite, etc.
-- [x] docs/ROADMAP.md — v0.1 through v0.5 feature milestones
-- [x] docs/COMPETITORS.md — competitive landscape with code study pointers
-- [x] docs/MONETIZATION.md — business model and moat strategy
-- [x] research/ — competitor reference URLs
+- [x] Planning notes — scope, milestones, design rationale
 - [x] LICENSE — FSL-1.1-MIT
 - [x] Cargo.toml — workspace skeleton with dependencies
 
@@ -30,11 +26,8 @@ All v0.1 features shipped — proxy + security + budget + cost tracking + CLI. 1
 
 ### Session 1.5 — Rename TokenGuard → Burnwall (2026-05-13)
 - [x] Bulk case-sensitive rename across all docs, code, configs (13 files)
-- [x] DECISIONS.md D11 expanded with `burnwall-dev` org note, `.ai` domain, trademark target name
-- [x] DECISIONS.md D12 added — naming rationale and rejected alternatives
 - [x] SPEC.md "Pricing Notes" subsection — OpenAI auto-cache 50%, Anthropic 5-min vs 1-hr multipliers, Batch stacking, Opus 4.7 tokenizer warning
-- [x] ROADMAP.md v0.3 rewritten — Cursor support + SQLite share path + Install CLI action
-- [x] COMPETITORS.md — gap-analysis table re-padded, four new entries (Legit VibeGuard, LLMeter, TokenFence, BurnRate)
+- [x] Planning notes updated to reflect the new name
 - [x] `cargo clean && cargo build` regenerates Cargo.lock and target artifacts as `burnwall`
 
 ### Session 10 — Polish and Release (2026-05-13)
@@ -106,12 +99,12 @@ All v0.1 features shipped — proxy + security + budget + cost tracking + CLI. 1
 - [x] `src/security/secrets.rs` — `LazyLock<Vec<SecretPattern>>` with 6 regex patterns (AWS access key, private key header, GitHub PAT, OpenAI API key, Anthropic API key, Slack token). Pattern name reported, raw secret never logged
 - [x] `src/security/scanner.rs` — schema-agnostic deep walk of `serde_json::Value`; visits every string leaf; first-violation-wins (proxy blocks on any one). Order: paths → commands → mounts → secrets
 - [x] `src/security/mod.rs` — `SecurityEngine` (holds `Ruleset`, `scan(body)` returns `Option<Violation>`); `ViolationKind` enum mapped to SPEC's `event_type` strings (`path_blocked` / `command_blocked` / `mount_blocked` / `secret_detected`); human-readable `Violation::message()`
-- [x] Fail-open: non-JSON bodies return `None` (forward), per D9
+- [x] Fail-open: non-JSON bodies return `None` (forward) by design
 - [x] `tests/integration/security_test.rs` — 22 tests: both fixtures, each rule family (paths in tilde/Unix/Windows forms, commands, all 4 mount needles, all secret patterns), disable toggles for mounts/secrets, deeply nested JSON, event-type mapping, message formatting
 - [x] `cargo test` — 66/66 passing (22 security + 12 storage + 9 parser + 15 pricing + 8 proxy)
 
 ### Session 4 — SQLite Storage (2026-05-13)
-- [x] D13 added to `docs/DECISIONS.md` — no SQLCipher in v0.1, with threat model and v0.5 revisit conditions
+- [x] Recorded the SQLite at-rest encryption decision (no SQLCipher in v0.1 — storage is metadata-only, no keys/prompts; revisit for the team tier)
 - [x] Cargo.toml — enabled `chrono` feature on rusqlite (`DateTime<Utc>` ↔ TEXT in RFC 3339)
 - [x] `src/storage/models.rs` — `RequestRecord`, `SecurityEvent`, `DailyTotal` plus `RequestRecord::successful()` and `::blocked()` constructors
 - [x] `src/storage/mod.rs` — `Storage` (Connection wrapped in std `Mutex`), `open_default()` / `open()` / `open_in_memory()`, embedded SCHEMA (requests + security_events + daily_summary + indexes), `data_dir()` helper, Unix `0700`/`0600` perm hardening (no-op on Windows per default user-profile ACL)
@@ -125,7 +118,7 @@ All v0.1 features shipped — proxy + security + budget + cost tracking + CLI. 1
 - [x] `src/providers/openai.rs` — OpenAI Chat Completions parser; normalizes `prompt_tokens` (which INCLUDES cached) into `input_tokens` (non-cached) + `cache_read_tokens`; `cache_creation_tokens` is always 0 (no opt-in writes)
 - [x] `src/pricing/rates.rs` — `const` rate card for claude-opus-4-7/-6, claude-sonnet-4-6, claude-haiku-4-5, gpt-5.5, gpt-5.4-mini, gpt-5.4; longest-prefix-first ordering so `gpt-5.4-mini-...` matches the mini entry not the base
 - [x] `src/pricing/cache_calc.rs` — `cost()`, `cost_without_cache()`, `cache_savings()` (the last two power the "Cache savings today: $X" line in `burnwall status`)
-- [x] `src/pricing/mod.rs` — `calculate_cost(model, &usage) -> Option<f64>` convenience; `None` for unknown models per fail-open D9
+- [x] `src/pricing/mod.rs` — `calculate_cost(model, &usage) -> Option<f64>` convenience; `None` for unknown models (fail-open — don't break the workflow on a pricing miss)
 - [x] Date-suffix tolerance: `get_pricing("claude-sonnet-4-6-20250514")` resolves to `claude-sonnet-4-6` rates via prefix match with `-` boundary check (rejects `claude-sonnet-4-6dev`)
 - [x] `tests/unit/parser_test.rs` — 9 tests across both providers + the 4 fixture JSON files; covers cached/uncached splits, missing optional fields, invalid JSON, and missing `usage` block
 - [x] `tests/unit/pricing_test.rs` — 15 tests covering name normalization (exact / date-stamped / mini-vs-base disambiguation / unrelated-prefix rejection), cost math against hand-computed values for all 4 fixtures, cache-savings consistency, and the convenience API
