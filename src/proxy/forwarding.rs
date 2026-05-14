@@ -48,6 +48,7 @@ pub async fn forward(
     body: Bytes,
     state: &Arc<AppState>,
     provider: &'static str,
+    request_hash_hex: String,
 ) -> Result<Response<ProxyBody>, BoxError> {
     debug!("→ {} {} ({} bytes)", method, upstream_uri, body.len());
 
@@ -72,11 +73,14 @@ pub async fn forward(
     debug!("← {} {}", status.as_u16(), upstream_uri);
 
     // Tee callback: parse the full body once the stream finishes and record
-    // a `requests` row + bump the budget tracker. Fire-and-forget — the
-    // proxy response is returned to the client before this callback runs.
+    // a `requests` row + bump the budget tracker + feed the loop detector's
+    // cost-spiral window. Fire-and-forget — the proxy response is returned
+    // to the client before this callback runs.
     let storage = state.storage.clone();
     let budget = state.budget.clone();
+    let loop_detector = state.loop_detector.clone();
     let provider_str = provider.to_string();
+    let hash_hex = request_hash_hex;
 
     let teed = streaming::tee_stream(upstream_resp.bytes_stream(), move |chunks| {
         let mut total = Vec::with_capacity(chunks.iter().map(|b| b.len()).sum());
@@ -88,12 +92,14 @@ pub async fn forward(
         match parsed {
             Some(p) => {
                 let cost = pricing::calculate_cost(&p.model, &p.usage).unwrap_or(0.0);
-                let record =
+                let mut record =
                     RequestRecord::successful(&provider_str, &p.model, &p.usage, cost, None);
+                record.request_hash = Some(hash_hex.clone());
                 if let Err(e) = storage.insert_request(&record) {
                     error!("requests insert failed: {}", e);
                 }
                 budget.record(cost);
+                let _ = loop_detector.record_cost(cost);
                 debug!(
                     "recorded {} {}: ${:.6} ({} in / {} out / {} cache_read / {} cache_write)",
                     provider_str,

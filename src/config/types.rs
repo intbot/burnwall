@@ -138,3 +138,19 @@ impl From<&SecurityConfig> for crate::security::Ruleset {
         }
     }
 }
+
+/// Convert the persistent loop_detection block into the runtime
+/// [`crate::budget::LoopConfig`]. `hash_prefix_bytes` keeps its built-in
+/// default (200) — we don't expose it as a TOML knob in v0.2.
+impl From<&LoopDetectionConfig> for crate::budget::LoopConfig {
+    fn from(c: &LoopDetectionConfig) -> Self {
+        let defaults = crate::budget::LoopConfig::default();
+        Self {
+            enabled: c.enabled,
+            max_identical_requests: c.max_identical_requests,
+            window_seconds: c.window_seconds,
+            max_cost_per_window: c.max_cost_per_window,
+            hash_prefix_bytes: defaults.hash_prefix_bytes,
+        }
+    }
+}

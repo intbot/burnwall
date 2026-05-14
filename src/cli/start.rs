@@ -8,7 +8,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::Args;
 
-use crate::budget::BudgetTracker;
+use crate::budget::{BudgetTracker, LoopDetector};
 use crate::config;
 use crate::proxy::{run, AppState};
 use crate::security::SecurityEngine;
@@ -40,6 +40,8 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
     let storage = Arc::new(Storage::open_default().context("opening default storage")?);
     let security = Arc::new(SecurityEngine::new((&user_config.security).into()));
     let budget = Arc::new(BudgetTracker::new((&user_config.budget).into()));
+    let loop_detector =
+        Arc::new(LoopDetector::new((&user_config.loop_detection).into()));
 
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
     budget
@@ -60,6 +62,7 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
         http_client: reqwest::Client::new(),
         security,
         budget,
+        loop_detector,
         storage,
     };
 

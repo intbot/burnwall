@@ -11,7 +11,7 @@ use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 use tracing::warn;
 
-use crate::budget::BudgetStatus;
+use crate::budget::{BudgetStatus, LoopVerdict};
 use crate::storage::{RequestRecord, SecurityEvent};
 
 use super::{forwarding, streaming, AppState, ProxyBody};
@@ -129,6 +129,25 @@ pub async fn handle(
         BudgetStatus::Ok => {}
     }
 
+    // ─── loop detection ───
+    let request_hash = state.loop_detector.hash(&body_bytes);
+    let request_hash_hex = format!("{:016x}", request_hash);
+    let verdict = state.loop_detector.check_request(request_hash);
+    if verdict.is_blocking() {
+        warn!("🔄 LOOP BLOCKED {}: {}", provider, verdict.message());
+        let mut record =
+            RequestRecord::blocked(provider, &model, &verdict.message(), None);
+        record.request_hash = Some(request_hash_hex.clone());
+        if let Err(e) = state.storage.insert_request(&record) {
+            tracing::error!("blocked-request insert failed: {}", e);
+        }
+        return Ok(error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "loop_detected",
+            &verdict.message(),
+        ));
+    }
+
     // ─── forward + tee-parse ───
     match forwarding::forward(
         parts.method,
@@ -137,6 +156,7 @@ pub async fn handle(
         body_bytes,
         &state,
         provider,
+        request_hash_hex,
     )
     .await
     {

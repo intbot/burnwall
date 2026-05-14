@@ -281,11 +281,63 @@ try {
         Fail "body missing budget_exceeded"
     }
 
+    Section "Test 4: loop detection blocks repeated identical requests"
+    Info "stopping burnwall, configuring loop_detection.max_identical_requests=3, restarting"
+    Stop-BurnwallProxy
+    Reset-Sandbox
+    # Tighten the loop threshold and disable cost-spiral so this test is deterministic.
+    & $script:Bin config set loop_detection.max_identical_requests 3 | Out-Null
+    & $script:Bin config set loop_detection.window_seconds 60 | Out-Null
+    & $script:Bin config set loop_detection.max_cost_per_window 0.0 | Out-Null
+    & $script:Bin config set budget.daily 50.0 | Out-Null
+    Start-BurnwallProxy
+
+    # Send the SAME body 3 times. First 2 should pass, 3rd should be loop-blocked.
+    Info "sending 2 identical requests (should pass)"
+    $loopBody = '{"model":"claude-haiku-4-5","max_tokens":50,"messages":[{"role":"user","content":"identical"}]}'
+    for ($i = 1; $i -le 2; $i++) {
+        $resp = Invoke-Proxy -Path "/anthropic/v1/messages" -Body $loopBody -Headers @{ "x-api-key" = "fake" }
+        if ($resp.Status -eq 200) {
+            Pass ("identical request {0}/2 passed" -f $i)
+        } else {
+            Fail ("identical request {0}/2 returned {1}" -f $i, $resp.Status)
+        }
+    }
+
+    Info "sending 3rd identical request (should be loop-blocked)"
+    $loopResp = Invoke-Proxy -Path "/anthropic/v1/messages" -Body $loopBody -Headers @{ "x-api-key" = "fake" }
+    if ($loopResp.Status -eq 429) {
+        Pass "3rd identical request returned 429"
+    } else {
+        Fail ("expected 429, got {0}" -f $loopResp.Status)
+    }
+    if ($loopResp.Body -like '*loop_detected*') {
+        Pass "body has loop_detected error type"
+    } else {
+        Fail ("body missing loop_detected: {0}" -f $loopResp.Body)
+    }
+    if ($loopResp.Body -like '*identical*') {
+        Pass "body explains the loop count"
+    } else {
+        Fail "body missing loop count detail"
+    }
+
+    # Distinct body should still pass even within the same window.
+    Info "sending a DIFFERENT body (should pass)"
+    $distinctBody = '{"model":"claude-haiku-4-5","max_tokens":50,"messages":[{"role":"user","content":"distinct"}]}'
+    $distinctResp = Invoke-Proxy -Path "/anthropic/v1/messages" -Body $distinctBody -Headers @{ "x-api-key" = "fake" }
+    if ($distinctResp.Status -eq 200) {
+        Pass "distinct body passed (loop counter is per-hash)"
+    } else {
+        Fail ("distinct body returned {0}, expected 200" -f $distinctResp.Status)
+    }
+
     # -------------- Claude Code diagnostic --------------
-    # Bring budget back up so the diagnostic isn't immediately blocked.
+    # Bring budget back up + relax loop detection so the diagnostic isn't immediately blocked.
     Stop-BurnwallProxy
     Reset-Sandbox
     & $script:Bin config set budget.daily 50.0 | Out-Null
+    & $script:Bin config set loop_detection.max_identical_requests 5 | Out-Null
     Start-BurnwallProxy
 
     Section "Diagnostic: does Claude Code route through Burnwall?"

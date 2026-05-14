@@ -17,7 +17,7 @@ use hyper_util::server::conn::auto::Builder;
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
-use crate::budget::BudgetTracker;
+use crate::budget::{BudgetTracker, LoopDetector};
 use crate::security::SecurityEngine;
 use crate::storage::Storage;
 
@@ -37,13 +37,15 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub security: Arc<SecurityEngine>,
     pub budget: Arc<BudgetTracker>,
+    pub loop_detector: Arc<LoopDetector>,
     pub storage: Arc<Storage>,
 }
 
 impl AppState {
     /// Test-friendly constructor: upstream URLs + default security and
-    /// budget + an in-memory SQLite. Production code (the `start` command)
-    /// constructs `AppState` directly with a real `Storage::open_default()`.
+    /// budget + loop detector + an in-memory SQLite. Production code (the
+    /// `start` command) constructs `AppState` directly with a real
+    /// `Storage::open_default()` and a config-derived `LoopDetector`.
     pub fn new(upstream_anthropic: String, upstream_openai: String) -> Self {
         Self {
             upstream_anthropic,
@@ -51,6 +53,7 @@ impl AppState {
             http_client: reqwest::Client::new(),
             security: Arc::new(SecurityEngine::with_defaults()),
             budget: Arc::new(BudgetTracker::with_defaults()),
+            loop_detector: Arc::new(LoopDetector::with_defaults()),
             storage: Arc::new(Storage::open_in_memory().expect("in-memory storage cannot fail")),
         }
     }
