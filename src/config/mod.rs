@@ -11,7 +11,8 @@ pub mod project;
 pub mod types;
 
 pub use types::{
-    BudgetConfig, Config, LoggingConfig, LoopDetectionConfig, ProxyConfig, SecurityConfig,
+    BudgetConfig, Config, LogScrapeConfig, LoggingConfig, LoopDetectionConfig, ProxyConfig,
+    SecurityConfig,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -118,6 +119,7 @@ pub fn set_dotted_key(config: &mut Config, key: &str, value: &str) -> Result<()>
         }
         "logging.level" => config.logging.level = value.to_string(),
         "logging.file" => config.logging.file = value.to_string(),
+        "log_scrape.enabled" => config.log_scrape.enabled = parse(key, value)?,
         _ => return Err(ConfigError::UnknownKey(key.to_string())),
     }
     Ok(())

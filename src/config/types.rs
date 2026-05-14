@@ -16,6 +16,8 @@ pub struct Config {
     pub loop_detection: LoopDetectionConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub log_scrape: LogScrapeConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -117,6 +119,20 @@ impl Default for LoggingConfig {
             level: "info".to_string(),
             file: "~/.burnwall/burnwall.log".to_string(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LogScrapeConfig {
+    /// When true, `burnwall status` also scrapes local tool session logs
+    /// (Claude Code, Codex) to show cross-tool spend that did not go
+    /// through the proxy. Read-only — never writes to the database.
+    pub enabled: bool,
+}
+
+impl Default for LogScrapeConfig {
+    fn default() -> Self {
+        Self { enabled: true }
     }
 }
 

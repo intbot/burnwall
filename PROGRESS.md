@@ -2,16 +2,16 @@
 
 Update this file after every Claude Code session.
 
-## Status: v0.2 in progress (~60%)
+## Status: v0.2 in progress (~70%)
 
 - **v0.1**: fully shipped on `main`. 120 tests. Tagged-and-ship ready (no `v0.1.0` tag pushed yet — `[OWNER]` placeholders still in Cargo.toml/LICENSE).
-- **v0.2**: active on the `v0.2` branch. 5 feature commits landed + per-project profiles in the working tree (uncommitted), 167 tests passing, `cargo fmt` + `clippy` clean.
+- **v0.2**: active on the `v0.2` branch. 6 feature commits landed (per-project profiles pushed) + Tier-2 log scraping in the working tree (uncommitted), 178 tests passing, `cargo fmt` + `clippy` clean.
 - **Current branch:** `v0.2`. Both branches pushed to `origin`.
 
 ### Fresh-session orientation
 
 - The **v0.2 plan** (replanned after a competitive-research pass) lives in `internal/ROADMAP.md` — `internal/` is gitignored/local-only. It has checkboxes for what's done vs remaining.
-- Next planned feature: **Tier-2 cost tracking via local log-file parsing** — see `internal/ROADMAP.md`. (Per-project security profiles just landed.)
+- Next planned feature: **MCP awareness disclaimer + planning note** — see `internal/ROADMAP.md`. (Per-project security profiles and Tier-2 log-file cost tracking just landed.)
 - Competitive landscape research is in `internal/COMPETITORS.md`.
 - User preferences are in the auto-loaded memory files (no `Co-Authored-By` trailer; no meta-commentary about hidden/scrubbed content).
 
@@ -27,7 +27,8 @@ Update this file after every Claude Code session.
 - [x] Competitive research pass — ~50 new competitors catalogued in `internal/COMPETITORS.md`; v0.2 replanned in `internal/ROADMAP.md`
 - [x] Repo hygiene — relocated internal planning docs to gitignored `internal/`, scrubbed history of strategy-doc content + names, removed `Co-Authored-By` trailers
 - [x] Per-project security profiles (`.burnwall.yaml`) — new `config::project` module: `ProjectProfile` (`allow_paths` / `deny_paths` / `budget.daily_max_usd`), walk-up `discover()` from cwd (`.yaml`/`.yml`), YAML via `serde_norway`. `allow_paths` is an exception list — a string leaf matching one skips path-deny checks, but command/mount/secret checks still run; `deny_paths` extend the global denylist; `budget.daily_max_usd` is a cap that can only tighten the daily limit (global `0.0`/unlimited → cap wins). `Ruleset` gained an `allow_paths` field; scanner `check_string` honors it. Merged into the runtime `Ruleset`/`BudgetConfig` in `cli::start` (before `SecurityEngine`/`BudgetTracker` construction) and surfaced in the startup banner. 24 new tests (20 unit in `project_profile_test.rs` covering parse/discover/merge + 4 `allow_paths` scanner cases in `security_test.rs`). Also fixed two pre-existing clippy lints surfaced by clippy 1.95 (`unwrap_or_default` in `loop_detector`, `write_literal` in `cli::security`)
-- [ ] Remaining v0.2 work — see `internal/ROADMAP.md` (Tier-2 log-file cost tracking, MCP disclaimer, local-time "today", daemon mode + real `stop`, Homebrew formula, README comparison page, positioning copy, Show HN prep)
+- [x] Tier-2 cost tracking via local log-file parsing (Claude Code + Codex CLI) — new `logscrape` module: `claude_code.rs` parses `~/.claude/projects/**/*.jsonl` (`type:assistant` lines, deduped across files by `message.id`+`requestId`); `codex.rs` parses `~/.codex/sessions/**/*.jsonl` (stateful — `turn_context`/`session_meta` model attached to following `token_count` events, `last_token_usage` normalized OpenAI-style, per-line timestamp with `YYYY/MM/DD` path-date fallback). Read-only on-the-fly scrape, no SQLite writes, fail-open throughout. `scrape_for_date` aggregates by tool+model via the existing pricing table. `burnwall status` gained a "Tracked via log files (not proxied)" section + combined-total line; `--json` gained a `log_scrape` key + `combined_total_usd`. New `log_scrape.enabled` config (default true). JSONL parsed line-by-line via `serde_json`. Env overrides `BURNWALL_CLAUDE_LOG_DIR` / `BURNWALL_CODEX_LOG_DIR` for tests. 11 new tests + 2 fixtures (`tests/fixtures/{claude_code,codex}_session.jsonl`). Codex format verified against the openai/codex `RolloutItem` / `TokenUsageInfo` source
+- [ ] Remaining v0.2 work — see `internal/ROADMAP.md` (MCP disclaimer, local-time "today", daemon mode + real `stop`, Homebrew formula, README comparison page, positioning copy, Show HN prep)
 
 ### Session 0 — Planning (May 2026)
 - [x] CLAUDE.md — project rules and structure

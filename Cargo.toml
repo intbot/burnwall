@@ -103,6 +103,10 @@ name = "project_profile_test"
 path = "tests/unit/project_profile_test.rs"
 
 [[test]]
+name = "logscrape_test"
+path = "tests/unit/logscrape_test.rs"
+
+[[test]]
 name = "cli_test"
 path = "tests/integration/cli_test.rs"
 
