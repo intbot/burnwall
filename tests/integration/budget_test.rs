@@ -270,7 +270,11 @@ fn loop_detector_blocks_on_nth_identical_request() {
     assert_eq!(det.check_request(h), LoopVerdict::Ok, "1st should pass");
     assert_eq!(det.check_request(h), LoopVerdict::Ok, "2nd should pass");
     let v = det.check_request(h);
-    assert!(matches!(v, LoopVerdict::Repeated { count: 3, .. }), "3rd should block, got {:?}", v);
+    assert!(
+        matches!(v, LoopVerdict::Repeated { count: 3, .. }),
+        "3rd should block, got {:?}",
+        v
+    );
 }
 
 #[test]

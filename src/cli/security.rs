@@ -64,8 +64,8 @@ pub fn run_cmd(args: SecurityArgs) -> anyhow::Result<()> {
 
     writeln!(
         out,
-        "   {:<19}  {:<17}  {:<28}  {}",
-        "Time (UTC)", "Type", "Provider/Model", "Detail"
+        "   {:<19}  {:<17}  {:<28}  Detail",
+        "Time (UTC)", "Type", "Provider/Model"
     )?;
     writeln!(out, "   {}", "-".repeat(85))?;
     for e in &events {

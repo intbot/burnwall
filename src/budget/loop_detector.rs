@@ -140,8 +140,7 @@ impl LoopDetector {
         let cutoff = now - window;
 
         let count = {
-            let mut entry =
-                self.hash_history.entry(hash).or_insert_with(VecDeque::new);
+            let mut entry = self.hash_history.entry(hash).or_default();
             while let Some(front) = entry.front() {
                 if *front < cutoff {
                     entry.pop_front();

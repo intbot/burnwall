@@ -145,8 +145,7 @@ pub async fn handle(
     let verdict = state.loop_detector.check_request(request_hash);
     if verdict.is_blocking() {
         warn!("🔄 LOOP BLOCKED {}: {}", provider, verdict.message());
-        let mut record =
-            RequestRecord::blocked(provider, &model, &verdict.message(), None);
+        let mut record = RequestRecord::blocked(provider, &model, &verdict.message(), None);
         record.request_hash = Some(request_hash_hex.clone());
         if let Err(e) = state.storage.insert_request(&record) {
             tracing::error!("blocked-request insert failed: {}", e);

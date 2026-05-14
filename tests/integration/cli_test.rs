@@ -148,8 +148,8 @@ fn config_show_json_emits_valid_json() {
         .output()
         .expect("run");
     assert!(output.status.success());
-    let v: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .expect("config show --json must emit valid JSON");
+    let v: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("config show --json must emit valid JSON");
     assert_eq!(v["proxy"]["port"], 4100);
     assert_eq!(v["budget"]["daily"], 50.0);
     assert!(v["security"]["enabled"].as_bool().unwrap());

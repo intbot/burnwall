@@ -418,7 +418,8 @@ async fn loop_detection_blocks_after_threshold_identical_requests() {
     };
     let addr = spawn_proxy(state).await;
 
-    let body = json!({"model": "claude-haiku-4-5", "messages": [{"role": "user", "content": "hi"}]});
+    let body =
+        json!({"model": "claude-haiku-4-5", "messages": [{"role": "user", "content": "hi"}]});
 
     // First two: forwarded
     for i in 1..=2 {
@@ -439,7 +440,11 @@ async fn loop_detection_blocks_after_threshold_identical_requests() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 429, "3rd identical request should be loop-blocked");
+    assert_eq!(
+        resp.status(),
+        429,
+        "3rd identical request should be loop-blocked"
+    );
     let body_text: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body_text["error"]["type"], "loop_detected");
     assert!(body_text["error"]["message"]
@@ -524,11 +529,7 @@ async fn security_log_redact_details_strips_rule_from_storage() {
     let rows = storage.requests_for_date(&today()).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].block_reason.as_deref(), Some("path_blocked"));
-    assert!(!rows[0]
-        .block_reason
-        .as_ref()
-        .unwrap()
-        .contains("ssh"));
+    assert!(!rows[0].block_reason.as_ref().unwrap().contains("ssh"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

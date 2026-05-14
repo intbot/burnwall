@@ -38,8 +38,8 @@ pub fn run_cmd(args: ConfigArgs) -> anyhow::Result<()> {
             let cfg = config::load_or_default(&path).context("loading config")?;
             let mut out = std::io::stdout().lock();
             if json {
-                let text = serde_json::to_string_pretty(&cfg)
-                    .context("serializing config as JSON")?;
+                let text =
+                    serde_json::to_string_pretty(&cfg).context("serializing config as JSON")?;
                 writeln!(out, "{}", text)?;
             } else {
                 let toml_text =

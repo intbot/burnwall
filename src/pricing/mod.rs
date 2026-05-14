@@ -25,7 +25,6 @@ pub fn calculate_cost(model: &str, usage: &TokenUsage) -> Option<f64> {
 /// the constant is malformed (parse failure) -- callers should treat this
 /// as "freshness unknown" rather than panicking.
 pub fn pricing_age_days(today: chrono::NaiveDate) -> Option<i64> {
-    let updated =
-        chrono::NaiveDate::parse_from_str(PRICING_LAST_UPDATED, "%Y-%m-%d").ok()?;
+    let updated = chrono::NaiveDate::parse_from_str(PRICING_LAST_UPDATED, "%Y-%m-%d").ok()?;
     Some((today - updated).num_days())
 }
