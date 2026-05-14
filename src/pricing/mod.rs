@@ -15,7 +15,8 @@ use crate::providers::TokenUsage;
 
 /// Look up `model` and compute billed cost in USD. Returns `None` when the
 /// model is unknown — callers should treat this as "cost unknown, log and
-/// proceed" per the fail-open policy in `docs/DECISIONS.md` D9.
+/// proceed" per the fail-open policy (never break the user's workflow over
+/// a pricing miss).
 pub fn calculate_cost(model: &str, usage: &TokenUsage) -> Option<f64> {
     get_pricing(model).map(|p| cost(usage, p))
 }

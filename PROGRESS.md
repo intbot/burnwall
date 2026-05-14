@@ -12,11 +12,7 @@ All v0.1 features shipped — proxy + security + budget + cost tracking + CLI. 1
 - [x] CLAUDE.md — project rules and structure
 - [x] docs/SPEC.md — exact CLI behavior, proxy logic, pricing tables, schemas
 - [x] docs/ARCHITECTURE.md — component design, data flow, shared state
-- [x] docs/DECISIONS.md — why Rust, why proxy, why FSL, why SQLite, etc.
-- [x] docs/ROADMAP.md — v0.1 through v0.5 feature milestones
-- [x] docs/COMPETITORS.md — competitive landscape with code study pointers
-- [x] docs/MONETIZATION.md — business model and moat strategy
-- [x] research/ — competitor reference URLs
+- [x] Planning notes — scope, milestones, design rationale
 - [x] LICENSE — FSL-1.1-MIT
 - [x] Cargo.toml — workspace skeleton with dependencies
 
@@ -111,7 +107,7 @@ All v0.1 features shipped — proxy + security + budget + cost tracking + CLI. 1
 - [x] `cargo test` — 66/66 passing (22 security + 12 storage + 9 parser + 15 pricing + 8 proxy)
 
 ### Session 4 — SQLite Storage (2026-05-13)
-- [x] D13 added to `docs/DECISIONS.md` — no SQLCipher in v0.1, with threat model and v0.5 revisit conditions
+- [x] Recorded the SQLite at-rest encryption decision (no SQLCipher in v0.1 — storage is metadata-only, no keys/prompts; revisit for the team tier)
 - [x] Cargo.toml — enabled `chrono` feature on rusqlite (`DateTime<Utc>` ↔ TEXT in RFC 3339)
 - [x] `src/storage/models.rs` — `RequestRecord`, `SecurityEvent`, `DailyTotal` plus `RequestRecord::successful()` and `::blocked()` constructors
 - [x] `src/storage/mod.rs` — `Storage` (Connection wrapped in std `Mutex`), `open_default()` / `open()` / `open_in_memory()`, embedded SCHEMA (requests + security_events + daily_summary + indexes), `data_dir()` helper, Unix `0700`/`0600` perm hardening (no-op on Windows per default user-profile ACL)

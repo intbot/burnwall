@@ -87,8 +87,8 @@ pub struct SecurityEvent {
     /// `mount_blocked`. Free-form string; the scanner sets it.
     pub event_type: String,
     /// What was blocked — e.g. the path, command, or matched pattern. This
-    /// can leak filesystem layout (see D13); v0.2 will add a redaction
-    /// option.
+    /// can leak filesystem layout, so the `log_redact_details` config
+    /// option strips it down to the event-type label when set.
     pub details: String,
     pub provider: Option<String>,
     pub model: Option<String>,

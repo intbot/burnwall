@@ -21,7 +21,7 @@ pub struct Ruleset {
     /// When true, storage rows for blocked requests strip the matched-rule
     /// detail (e.g. "~/.ssh") and keep only the event-type label. The 403
     /// response to the agent is unaffected so legitimate users still see
-    /// what was blocked. See D13 in `docs/DECISIONS.md`.
+    /// what was blocked — only persisted data is redacted.
     pub log_redact_details: bool,
 }
 

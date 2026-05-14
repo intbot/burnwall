@@ -156,10 +156,6 @@ $ burnwall status
 
 We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-## Roadmap
-
-See [docs/ROADMAP.md](docs/ROADMAP.md) for the full feature roadmap.
-
 ---
 
 *Built with Rust. No telemetry. No compromises.*

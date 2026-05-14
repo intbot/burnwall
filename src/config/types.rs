@@ -61,7 +61,8 @@ pub struct SecurityConfig {
     pub block_network_mounts: bool,
     pub detect_secrets: bool,
     /// Redact the `details` field in `security_events` rows and the
-    /// `block_reason` in blocked `requests` rows. See D13 mitigation.
+    /// `block_reason` in blocked `requests` rows — keeps filesystem paths
+    /// out of stored data for users who sync or share the database.
     #[serde(default)]
     pub log_redact_details: bool,
 }

@@ -177,8 +177,7 @@ Scan `tool_use` / `function_call` blocks in the REQUEST body (before forwarding)
 ## Important Notes for Claude Code Sessions
 
 - Read `docs/SPEC.md` for exact CLI behavior and output formats
-- Read `docs/DECISIONS.md` before suggesting alternative approaches
-- Read `docs/COMPETITORS.md` for reference implementations
+- Read `docs/ARCHITECTURE.md` for component design and data flow
 - Read `PROGRESS.md` for current project state
 - Work in focused, scoped sessions — one component at a time
 - Write tests FIRST for any new parser or calculator logic
