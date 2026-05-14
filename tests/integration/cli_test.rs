@@ -191,6 +191,53 @@ fn config_set_rejects_unknown_key() {
         .stderr(predicate::str::contains("unknown config key"));
 }
 
+// ============================ completions ============================
+
+#[test]
+fn completions_bash_emits_a_compinit_script() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    burnwall(&path)
+        .args(["completions", "bash"])
+        .assert()
+        .success()
+        // bash completion scripts always declare _<binary>() and call complete
+        .stdout(predicate::str::contains("_burnwall()"))
+        .stdout(predicate::str::contains("complete -F _burnwall"));
+}
+
+#[test]
+fn completions_zsh_emits_compdef_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    burnwall(&path)
+        .args(["completions", "zsh"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("#compdef burnwall"));
+}
+
+#[test]
+fn completions_powershell_emits_argument_completer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    burnwall(&path)
+        .args(["completions", "powershell"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Register-ArgumentCompleter"));
+}
+
+#[test]
+fn completions_rejects_unknown_shell() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    burnwall(&path)
+        .args(["completions", "csh"])
+        .assert()
+        .failure();
+}
+
 // =============================== security ===============================
 
 #[test]

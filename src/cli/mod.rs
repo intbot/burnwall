@@ -2,6 +2,7 @@
 
 use clap::{Parser, Subcommand};
 
+pub mod completions;
 pub mod config_cmd;
 pub mod history;
 pub mod init;
@@ -37,6 +38,8 @@ pub enum Command {
     Init(init::InitArgs),
     /// Inspect security events (blocked attempts).
     Security(security::SecurityArgs),
+    /// Print a shell-completion script to stdout.
+    Completions(completions::CompletionsArgs),
 }
 
 impl Cli {
@@ -49,6 +52,7 @@ impl Cli {
             Command::Config(args) => config_cmd::run_cmd(args),
             Command::Init(args) => init::run_cmd(args),
             Command::Security(args) => security::run_cmd(args),
+            Command::Completions(args) => completions::run_cmd(args),
         }
     }
 }

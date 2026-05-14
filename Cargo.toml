@@ -24,6 +24,7 @@ reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], defau
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"                  # Shell completion script generator
 
 # JSON parsing
 serde = { version = "1", features = ["derive"] }

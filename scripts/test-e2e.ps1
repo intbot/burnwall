@@ -170,7 +170,21 @@ Pass "burnwall listening"
 # ---------------------------------- tests ----------------------------------
 
 try {
-    Section "Test 1: safe request is forwarded, parsed, cached pricing applied, savings reported"
+    Section "Smoke: shell-completion generator"
+$bashOut = & $script:Bin completions bash 2>&1 | Out-String
+if ($bashOut -like '*_burnwall()*' -and $bashOut -like '*complete -F*') {
+    Pass "completions bash emits compinit-style script"
+} else {
+    Fail "completions bash output unexpected"
+}
+$psOut = & $script:Bin completions powershell 2>&1 | Out-String
+if ($psOut -like '*Register-ArgumentCompleter*') {
+    Pass "completions powershell emits Register-ArgumentCompleter"
+} else {
+    Fail "completions powershell output unexpected"
+}
+
+Section "Test 1: safe request is forwarded, parsed, cached pricing applied, savings reported"
     $body = '{"model":"claude-haiku-4-5","max_tokens":50,"messages":[{"role":"user","content":"hi"}]}'
     $r = Invoke-Proxy -Path "/anthropic/v1/messages" -Body $body -Headers @{ "x-api-key" = "fake" }
     if ($r.Status -eq 200) { Pass "200 OK" } else { Fail ("expected 200, got {0}" -f $r.Status) }
