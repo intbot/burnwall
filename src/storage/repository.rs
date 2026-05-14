@@ -220,6 +220,33 @@ impl Storage {
         })
     }
 
+    /// All security events from the last `days` UTC days, newest first.
+    /// `days = 1` = today only.
+    pub fn security_events_since_days(&self, days: i64) -> Result<Vec<SecurityEvent>> {
+        self.with_conn(|conn| {
+            let offset = format!("-{} days", days - 1);
+            let mut stmt = conn.prepare(
+                "SELECT id, timestamp, event_type, details, provider, model
+                 FROM security_events
+                 WHERE DATE(timestamp) >= DATE('now', ?1)
+                 ORDER BY timestamp DESC",
+            )?;
+            let rows: rusqlite::Result<Vec<SecurityEvent>> = stmt
+                .query_map(params![offset], |row| {
+                    Ok(SecurityEvent {
+                        id: Some(row.get(0)?),
+                        timestamp: row.get::<_, DateTime<Utc>>(1)?,
+                        event_type: row.get(2)?,
+                        details: row.get(3)?,
+                        provider: row.get(4)?,
+                        model: row.get(5)?,
+                    })
+                })?
+                .collect();
+            Ok(rows?)
+        })
+    }
+
     /// Count of security events for a UTC date — used by `burnwall status`.
     pub fn security_events_for_date(&self, date: &str) -> Result<Vec<SecurityEvent>> {
         self.with_conn(|conn| {

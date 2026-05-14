@@ -260,6 +260,27 @@ try {
         Fail ("blocked_requests={0}" -f $status.blocked_requests)
     }
 
+    Info "verifying 'burnwall security' surfaces the event"
+    $secOut = & $script:Bin security 2>&1 | Out-String
+    if ($secOut -like '*path_blocked*' -and $secOut -like '*~/.ssh*' -and $secOut -like '*Total: 1 event*') {
+        Pass "burnwall security shows the path_blocked entry"
+    } else {
+        Fail ("burnwall security output unexpected:`n{0}" -f $secOut)
+    }
+
+    Info "verifying 'burnwall security --json' parses and counts"
+    $secJsonOut = & $script:Bin security --json 2>&1 | Out-String
+    try {
+        $secJson = $secJsonOut | ConvertFrom-Json
+        if ($secJson.count -eq 1 -and $secJson.events[0].event_type -eq 'path_blocked') {
+            Pass "JSON output: count=1, event_type=path_blocked"
+        } else {
+            Fail ("JSON unexpected: count={0}, type={1}" -f $secJson.count, $secJson.events[0].event_type)
+        }
+    } catch {
+        Fail ("could not parse security --json output: {0}" -f $secJsonOut)
+    }
+
     Section "Test 3: budget enforcement returns 429"
     Info "stopping burnwall, dropping budget to 0.0001 USD, restarting"
     Stop-BurnwallProxy
