@@ -102,6 +102,9 @@ pub fn set_dotted_key(config: &mut Config, key: &str, value: &str) -> Result<()>
             config.security.block_network_mounts = parse(key, value)?
         }
         "security.detect_secrets" => config.security.detect_secrets = parse(key, value)?,
+        "security.log_redact_details" => {
+            config.security.log_redact_details = parse(key, value)?
+        }
         "loop_detection.enabled" => config.loop_detection.enabled = parse(key, value)?,
         "loop_detection.max_identical_requests" => {
             config.loop_detection.max_identical_requests = parse(key, value)?

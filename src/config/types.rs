@@ -60,6 +60,10 @@ pub struct SecurityConfig {
     pub deny_commands: Vec<String>,
     pub block_network_mounts: bool,
     pub detect_secrets: bool,
+    /// Redact the `details` field in `security_events` rows and the
+    /// `block_reason` in blocked `requests` rows. See D13 mitigation.
+    #[serde(default)]
+    pub log_redact_details: bool,
 }
 
 impl Default for SecurityConfig {
@@ -76,6 +80,7 @@ impl Default for SecurityConfig {
                 .collect(),
             block_network_mounts: true,
             detect_secrets: true,
+            log_redact_details: false,
         }
     }
 }
@@ -135,6 +140,7 @@ impl From<&SecurityConfig> for crate::security::Ruleset {
             deny_commands: c.deny_commands.clone(),
             block_network_mounts: c.block_network_mounts,
             detect_secrets: c.detect_secrets,
+            log_redact_details: c.log_redact_details,
         }
     }
 }

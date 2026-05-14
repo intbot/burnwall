@@ -467,6 +467,71 @@ async fn loop_detection_blocks_after_threshold_identical_requests() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn security_log_redact_details_strips_rule_from_storage() {
+    use burnwall::security::{Ruleset, SecurityEngine};
+
+    // SecurityEngine with redaction on. The rest of the ruleset is the default.
+    let rules = Ruleset {
+        log_redact_details: true,
+        ..Ruleset::default()
+    };
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = AppState {
+        upstream_anthropic: "http://127.0.0.1:1".to_string(),
+        upstream_openai: "http://127.0.0.1:1".to_string(),
+        http_client: reqwest::Client::new(),
+        security: Arc::new(SecurityEngine::new(rules)),
+        budget: Arc::new(BudgetTracker::with_defaults()),
+        loop_detector: Arc::new(LoopDetector::with_defaults()),
+        storage: storage.clone(),
+    };
+    let addr = spawn_proxy(state).await;
+
+    let resp = client()
+        .post(format!("http://{}/anthropic/v1/messages", addr))
+        .json(&serde_json::json!({
+            "model": "claude-sonnet-4-6",
+            "messages": [{
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "name": "bash",
+                    "input": {"command": "cat ~/.ssh/id_rsa"}
+                }]
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // 403 to the agent is unaffected -- still mentions the rule.
+    assert_eq!(resp.status(), 403);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("~/.ssh"));
+
+    settle().await;
+
+    // Storage rows DO redact: details = "<redacted>", block_reason = "path_blocked".
+    let events = storage.security_events_for_date(&today()).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].details, "<redacted>");
+    assert!(!events[0].details.contains("ssh"));
+
+    let rows = storage.requests_for_date(&today()).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].block_reason.as_deref(), Some("path_blocked"));
+    assert!(!rows[0]
+        .block_reason
+        .as_ref()
+        .unwrap()
+        .contains("ssh"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn distinct_requests_dont_trip_loop_detector() {
     let mock = MockServer::start().await;
     Mock::given(method("POST"))

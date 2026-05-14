@@ -78,17 +78,27 @@ pub async fn handle(
     if let Some(violation) = state.security.scan(&body_bytes) {
         warn!("🛡️ BLOCKED {}: {}", provider, violation.message());
 
-        let event = SecurityEvent::new(violation.kind.event_type(), &violation.matched)
+        // When log_redact_details is on, storage rows strip the matched-rule
+        // detail and keep only the event-type label. The 403 below stays
+        // informative -- legitimate users still see what was blocked.
+        let redact = state.security.rules().log_redact_details;
+        let stored_details = if redact {
+            "<redacted>".to_string()
+        } else {
+            violation.matched.clone()
+        };
+        let stored_reason = if redact {
+            violation.kind.event_type().to_string()
+        } else {
+            format!("{}: {}", violation.kind.event_type(), violation.matched)
+        };
+
+        let event = SecurityEvent::new(violation.kind.event_type(), &stored_details)
             .with_provider(provider, &model);
         if let Err(e) = state.storage.insert_security_event(&event) {
             tracing::error!("security_event insert failed: {}", e);
         }
-        let record = RequestRecord::blocked(
-            provider,
-            &model,
-            &format!("{}: {}", violation.kind.event_type(), violation.matched),
-            None,
-        );
+        let record = RequestRecord::blocked(provider, &model, &stored_reason, None);
         if let Err(e) = state.storage.insert_request(&record) {
             tracing::error!("blocked-request insert failed: {}", e);
         }

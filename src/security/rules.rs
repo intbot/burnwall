@@ -18,6 +18,11 @@ pub struct Ruleset {
     pub deny_commands: Vec<String>,
     pub block_network_mounts: bool,
     pub detect_secrets: bool,
+    /// When true, storage rows for blocked requests strip the matched-rule
+    /// detail (e.g. "~/.ssh") and keep only the event-type label. The 403
+    /// response to the agent is unaffected so legitimate users still see
+    /// what was blocked. See D13 in `docs/DECISIONS.md`.
+    pub log_redact_details: bool,
 }
 
 impl Default for Ruleset {
@@ -30,6 +35,7 @@ impl Default for Ruleset {
                 .collect(),
             block_network_mounts: true,
             detect_secrets: true,
+            log_redact_details: false,
         }
     }
 }

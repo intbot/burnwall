@@ -343,6 +343,42 @@ Section "Test 1: safe request is forwarded, parsed, cached pricing applied, savi
         Fail "body missing budget_exceeded"
     }
 
+    Section "Test 3.5: log_redact_details strips rule names from storage"
+    Info "stopping burnwall, enabling security.log_redact_details, restarting"
+    Stop-BurnwallProxy
+    Reset-Sandbox
+    & $script:Bin config set security.log_redact_details true | Out-Null
+    & $script:Bin config set budget.daily 50.0 | Out-Null
+    Start-BurnwallProxy
+
+    $redactBody = '{"model":"claude-haiku-4-5","messages":[{"role":"assistant","content":[{"type":"tool_use","name":"bash","input":{"command":"cat ~/.ssh/id_rsa"}}]}]}'
+    $rResp = Invoke-Proxy -Path "/anthropic/v1/messages" -Body $redactBody
+    if ($rResp.Status -eq 403) {
+        Pass "403 returned with redaction enabled"
+    } else {
+        Fail ("expected 403, got {0}" -f $rResp.Status)
+    }
+    # The 403 BODY (sent to agent) must STILL mention the rule -- redaction is storage-only.
+    if ($rResp.Body -like '*~/.ssh*') {
+        Pass "403 body still surfaces the rule for the agent"
+    } else {
+        Fail "403 body should not redact -- agent needs the detail"
+    }
+
+    # The STORED detail must be "<redacted>" (no path string).
+    Start-Sleep -Milliseconds 300
+    $secOut = & $script:Bin security 2>&1 | Out-String
+    if ($secOut -like '*<redacted>*') {
+        Pass "stored security_events.details = <redacted>"
+    } else {
+        Fail ("storage was NOT redacted:`n{0}" -f $secOut)
+    }
+    if ($secOut -notlike '*~/.ssh*' -and $secOut -notlike '*id_rsa*') {
+        Pass "storage contains no path strings"
+    } else {
+        Fail ("storage leaked path data:`n{0}" -f $secOut)
+    }
+
     Section "Test 4: loop detection blocks repeated identical requests"
     Info "stopping burnwall, configuring loop_detection.max_identical_requests=3, restarting"
     Stop-BurnwallProxy
