@@ -2,16 +2,16 @@
 
 Update this file after every Claude Code session.
 
-## Status: v0.2 in progress (~50%)
+## Status: v0.2 in progress (~60%)
 
 - **v0.1**: fully shipped on `main`. 120 tests. Tagged-and-ship ready (no `v0.1.0` tag pushed yet — `[OWNER]` placeholders still in Cargo.toml/LICENSE).
-- **v0.2**: active on the `v0.2` branch. 5 feature commits landed, 143 tests passing, `cargo fmt` + `clippy` clean. Roughly half the milestone done.
+- **v0.2**: active on the `v0.2` branch. 5 feature commits landed + per-project profiles in the working tree (uncommitted), 167 tests passing, `cargo fmt` + `clippy` clean.
 - **Current branch:** `v0.2`. Both branches pushed to `origin`.
 
 ### Fresh-session orientation
 
 - The **v0.2 plan** (replanned after a competitive-research pass) lives in `internal/ROADMAP.md` — `internal/` is gitignored/local-only. It has checkboxes for what's done vs remaining.
-- Next planned feature: **per-project security profiles (`.burnwall.yaml`)** — highest-impact remaining v0.2 item.
+- Next planned feature: **Tier-2 cost tracking via local log-file parsing** — see `internal/ROADMAP.md`. (Per-project security profiles just landed.)
 - Competitive landscape research is in `internal/COMPETITORS.md`.
 - User preferences are in the auto-loaded memory files (no `Co-Authored-By` trailer; no meta-commentary about hidden/scrubbed content).
 
@@ -26,7 +26,8 @@ Update this file after every Claude Code session.
 - [x] Path redaction — `security.log_redact_details` config; storage rows redact the matched-rule detail, 403 response unaffected (D13 mitigation)
 - [x] Competitive research pass — ~50 new competitors catalogued in `internal/COMPETITORS.md`; v0.2 replanned in `internal/ROADMAP.md`
 - [x] Repo hygiene — relocated internal planning docs to gitignored `internal/`, scrubbed history of strategy-doc content + names, removed `Co-Authored-By` trailers
-- [ ] Remaining v0.2 work — see `internal/ROADMAP.md` (per-project profiles, Tier-2 log-file cost tracking, MCP disclaimer, local-time "today", daemon mode + real `stop`, Homebrew formula, README comparison page, positioning copy, Show HN prep)
+- [x] Per-project security profiles (`.burnwall.yaml`) — new `config::project` module: `ProjectProfile` (`allow_paths` / `deny_paths` / `budget.daily_max_usd`), walk-up `discover()` from cwd (`.yaml`/`.yml`), YAML via `serde_norway`. `allow_paths` is an exception list — a string leaf matching one skips path-deny checks, but command/mount/secret checks still run; `deny_paths` extend the global denylist; `budget.daily_max_usd` is a cap that can only tighten the daily limit (global `0.0`/unlimited → cap wins). `Ruleset` gained an `allow_paths` field; scanner `check_string` honors it. Merged into the runtime `Ruleset`/`BudgetConfig` in `cli::start` (before `SecurityEngine`/`BudgetTracker` construction) and surfaced in the startup banner. 24 new tests (20 unit in `project_profile_test.rs` covering parse/discover/merge + 4 `allow_paths` scanner cases in `security_test.rs`). Also fixed two pre-existing clippy lints surfaced by clippy 1.95 (`unwrap_or_default` in `loop_detector`, `write_literal` in `cli::security`)
+- [ ] Remaining v0.2 work — see `internal/ROADMAP.md` (Tier-2 log-file cost tracking, MCP disclaimer, local-time "today", daemon mode + real `stop`, Homebrew formula, README comparison page, positioning copy, Show HN prep)
 
 ### Session 0 — Planning (May 2026)
 - [x] CLAUDE.md — project rules and structure
@@ -158,8 +159,8 @@ Update this file after every Claude Code session.
 ## Next Steps
 
 Remaining v0.2 work is tracked with checkboxes in `internal/ROADMAP.md`
-(gitignored, local-only). Suggested next feature: **per-project security
-profiles (`.burnwall.yaml`)** — see that file for the full ordered list
+(gitignored, local-only). Suggested next feature: **Tier-2 cost tracking
+via local log-file parsing** — see that file for the full ordered list
 and rationale.
 
 ## Bugs / Tech Debt

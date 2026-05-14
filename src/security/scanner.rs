@@ -40,12 +40,22 @@ fn check_string(s: &str, rules: &Ruleset) -> Option<Violation> {
     // Order: paths → commands → mounts → secrets. Paths are the highest-
     // signal category; secrets last so a path-blocked SSH key dump doesn't
     // also accidentally trip the private-key regex.
-    for rule in &rules.deny_paths {
-        if rules::path_matches(s, rule) {
-            return Some(Violation {
-                kind: ViolationKind::Path,
-                matched: rule.clone(),
-            });
+    //
+    // A leaf matching a project `allow_paths` exception skips the path-deny
+    // checks entirely — but command, mount, and secret checks below still
+    // run, so `allow_paths` can never green-light a dangerous command.
+    let path_allowed = rules
+        .allow_paths
+        .iter()
+        .any(|allow| rules::path_matches(s, allow));
+    if !path_allowed {
+        for rule in &rules.deny_paths {
+            if rules::path_matches(s, rule) {
+                return Some(Violation {
+                    kind: ViolationKind::Path,
+                    matched: rule.clone(),
+                });
+            }
         }
     }
     for rule in &rules.deny_commands {

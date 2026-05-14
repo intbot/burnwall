@@ -138,6 +138,10 @@ impl From<&SecurityConfig> for crate::security::Ruleset {
     fn from(c: &SecurityConfig) -> Self {
         Self {
             deny_paths: c.deny_paths.clone(),
+            // `allow_paths` is project-profile-only — the global config has
+            // no allow list. A discovered `.burnwall.yaml` merges into this
+            // afterwards (see `cli::start`).
+            allow_paths: Vec::new(),
             deny_commands: c.deny_commands.clone(),
             block_network_mounts: c.block_network_mounts,
             detect_secrets: c.detect_secrets,

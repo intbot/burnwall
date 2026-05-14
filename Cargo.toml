@@ -32,6 +32,7 @@ serde_json = "1"
 
 # Config
 toml = "0.8"
+serde_norway = "0.9"                 # YAML for per-project .burnwall.yaml profiles
 
 # SQLite
 rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
@@ -96,6 +97,10 @@ path = "tests/integration/pipeline_test.rs"
 [[test]]
 name = "config_test"
 path = "tests/unit/config_test.rs"
+
+[[test]]
+name = "project_profile_test"
+path = "tests/unit/project_profile_test.rs"
 
 [[test]]
 name = "cli_test"

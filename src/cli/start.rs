@@ -38,10 +38,30 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
         .with_context(|| format!("loading config from {}", cfg_path.display()))?;
 
     let storage = Arc::new(Storage::open_default().context("opening default storage")?);
-    let security = Arc::new(SecurityEngine::new((&user_config.security).into()));
-    let budget = Arc::new(BudgetTracker::new((&user_config.budget).into()));
-    let loop_detector =
-        Arc::new(LoopDetector::new((&user_config.loop_detection).into()));
+
+    let mut ruleset: crate::security::Ruleset = (&user_config.security).into();
+    let mut budget_cfg: crate::budget::BudgetConfig = (&user_config.budget).into();
+
+    // Per-project profile: discover a `.burnwall.yaml` by walking up from the
+    // working directory and layer its rules onto the global config. deny_paths
+    // extend the denylist, allow_paths add exceptions, and budget.daily_max_usd
+    // can only tighten the daily limit. See `config::project`.
+    let project_profile = match std::env::current_dir() {
+        Ok(cwd) => config::project::discover_and_load(&cwd)
+            .context("loading per-project .burnwall.yaml")?,
+        Err(e) => {
+            tracing::warn!("could not determine working directory: {e}");
+            None
+        }
+    };
+    if let Some((_, profile)) = &project_profile {
+        profile.apply_to_ruleset(&mut ruleset);
+        profile.apply_to_budget(&mut budget_cfg);
+    }
+
+    let security = Arc::new(SecurityEngine::new(ruleset));
+    let budget = Arc::new(BudgetTracker::new(budget_cfg));
+    let loop_detector = Arc::new(LoopDetector::new((&user_config.loop_detection).into()));
 
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
     budget
@@ -54,7 +74,15 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
         .clone()
         .unwrap_or_else(|| user_config.proxy.host.clone());
 
-    print_banner(&host_str, port, &args, &storage, &security, &budget);
+    print_banner(
+        &host_str,
+        port,
+        &args,
+        &storage,
+        &security,
+        &budget,
+        project_profile.as_ref(),
+    );
 
     let state = AppState {
         upstream_anthropic: args.upstream_anthropic.clone(),
@@ -85,6 +113,7 @@ fn init_tracing() {
         .try_init();
 }
 
+#[allow(clippy::too_many_arguments)]
 fn print_banner(
     host: &str,
     port: u16,
@@ -92,6 +121,7 @@ fn print_banner(
     storage: &Arc<Storage>,
     security: &Arc<SecurityEngine>,
     budget: &Arc<BudgetTracker>,
+    project_profile: Option<&(std::path::PathBuf, config::project::ProjectProfile)>,
 ) {
     let _ = storage;
     println!("🛡️  Burnwall v{}", env!("CARGO_PKG_VERSION"));
@@ -100,8 +130,9 @@ fn print_banner(
     println!("     /anthropic/* → {}", args.upstream_anthropic);
     println!("     /openai/*    → {}", args.upstream_openai);
     println!(
-        "   Security: {} deny paths, {} deny commands, mounts={}, secrets={}",
+        "   Security: {} deny paths, {} allow paths, {} deny commands, mounts={}, secrets={}",
         security.rules().deny_paths.len(),
+        security.rules().allow_paths.len(),
         security.rules().deny_commands.len(),
         security.rules().block_network_mounts,
         security.rules().detect_secrets,
@@ -115,6 +146,19 @@ fn print_banner(
         );
     } else {
         println!("   Budget:   unlimited");
+    }
+    if let Some((path, profile)) = project_profile {
+        let cap = match profile.budget.daily_max_usd {
+            Some(c) if c.is_finite() && c > 0.0 => format!("budget cap ${:.2}/day", c),
+            _ => "no budget cap".to_string(),
+        };
+        println!(
+            "   Project:  {} ({} allow, {} deny paths; {})",
+            path.display(),
+            profile.allow_paths.len(),
+            profile.deny_paths.len(),
+            cap,
+        );
     }
     println!("   Ready. Press Ctrl-C to stop.");
 }

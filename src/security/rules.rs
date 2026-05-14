@@ -11,10 +11,20 @@
 //!
 //! Secret detection lives in [`super::secrets`] and is also toggled by a
 //! single boolean.
+//!
+//! `allow_paths` is an exception list, populated only from a per-project
+//! `.burnwall.yaml` profile (see [`crate::config::project`]). A string leaf
+//! that matches an allow path is exempt from *path* deny rules — command,
+//! mount, and secret checks still apply. It is empty for the global config;
+//! a project can carve out exceptions but never the other way around.
 
 #[derive(Debug, Clone)]
 pub struct Ruleset {
     pub deny_paths: Vec<String>,
+    /// Path exceptions from a project profile. A leaf matching one of these
+    /// skips the path-deny checks. Empty unless a `.burnwall.yaml` was
+    /// discovered at startup.
+    pub allow_paths: Vec<String>,
     pub deny_commands: Vec<String>,
     pub block_network_mounts: bool,
     pub detect_secrets: bool,
@@ -29,6 +39,7 @@ impl Default for Ruleset {
     fn default() -> Self {
         Self {
             deny_paths: DEFAULT_DENY_PATHS.iter().map(|s| s.to_string()).collect(),
+            allow_paths: Vec::new(),
             deny_commands: DEFAULT_DENY_COMMANDS
                 .iter()
                 .map(|s| s.to_string())
