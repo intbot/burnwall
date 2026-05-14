@@ -212,6 +212,11 @@ fn write_table(
             )?;
         }
     }
+    writeln!(w)?;
+    writeln!(
+        w,
+        "   ℹ️  Scope: Burnwall guards LLM API traffic. MCP tool calls flow through unfiltered."
+    )?;
     Ok(())
 }
 

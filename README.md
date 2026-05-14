@@ -87,6 +87,14 @@ Every API call flows through Burnwall:
 
 Responses are **never modified** — Burnwall reads them, logs the cost, and passes them through unchanged.
 
+## Scope: What Burnwall Guards
+
+Burnwall sits on the **LLM API path** — the HTTP traffic between your AI tool and Anthropic/OpenAI. Security scanning, budget enforcement, and cost tracking all operate on that traffic.
+
+It does **not** intercept **MCP** (Model Context Protocol) traffic. When your agent calls an MCP server's tools, that traffic flows through your AI tool directly — Burnwall never sees it, so it can't scan or block it. If MCP-layer protection is what you need, [MCP Defender](https://github.com/MCP-Defender/MCP-Defender), [Pipelock](https://github.com/luckyPipewrench/pipelock), and [SentinelGate](https://github.com/Sentinel-Gate/Sentinelgate) are complementary to Burnwall — run them alongside it.
+
+MCP-aware monitoring is on the roadmap for v0.3+.
+
 ## Supported Tools
 
 | Tool | Support | Configuration |
