@@ -15,8 +15,12 @@ pub struct ConfigArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum ConfigAction {
-    /// Print the current configuration as TOML.
-    Show,
+    /// Print the current configuration. TOML by default, `--json` for JSON.
+    Show {
+        /// Emit JSON instead of TOML.
+        #[arg(long)]
+        json: bool,
+    },
     /// Set a configuration value: `set <key> <value>` (e.g.
     /// `set budget.daily 20`).
     Set {
@@ -30,11 +34,18 @@ pub enum ConfigAction {
 pub fn run_cmd(args: ConfigArgs) -> anyhow::Result<()> {
     let path = config::default_path()?;
     match args.action {
-        ConfigAction::Show => {
+        ConfigAction::Show { json } => {
             let cfg = config::load_or_default(&path).context("loading config")?;
-            let toml_text = toml::to_string_pretty(&cfg).context("serializing config")?;
             let mut out = std::io::stdout().lock();
-            writeln!(out, "{}", toml_text)?;
+            if json {
+                let text = serde_json::to_string_pretty(&cfg)
+                    .context("serializing config as JSON")?;
+                writeln!(out, "{}", text)?;
+            } else {
+                let toml_text =
+                    toml::to_string_pretty(&cfg).context("serializing config as TOML")?;
+                writeln!(out, "{}", toml_text)?;
+            }
         }
         ConfigAction::Set { key, value } => {
             let mut cfg = config::load_or_default(&path).context("loading config")?;

@@ -192,3 +192,26 @@ fn calculate_cost_returns_none_for_unknown_model() {
     let usage = TokenUsage::default();
     assert!(calculate_cost("never-heard-of-this", &usage).is_none());
 }
+
+#[test]
+fn pricing_age_days_zero_when_today_equals_last_updated() {
+    use chrono::NaiveDate;
+    let updated = NaiveDate::parse_from_str(
+        burnwall::pricing::PRICING_LAST_UPDATED,
+        "%Y-%m-%d",
+    )
+    .expect("PRICING_LAST_UPDATED parses");
+    assert_eq!(burnwall::pricing::pricing_age_days(updated), Some(0));
+}
+
+#[test]
+fn pricing_age_days_positive_when_future() {
+    use chrono::NaiveDate;
+    let updated = NaiveDate::parse_from_str(
+        burnwall::pricing::PRICING_LAST_UPDATED,
+        "%Y-%m-%d",
+    )
+    .unwrap();
+    let later = updated + chrono::Duration::days(45);
+    assert_eq!(burnwall::pricing::pricing_age_days(later), Some(45));
+}

@@ -33,6 +33,7 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
     let blocked_count = storage.blocked_count_for_date(&today)?;
     let security_events = storage.security_event_count_for_date(&today)?;
     let today_cost = storage.total_cost_for_date(&today)?;
+    let pricing_age = pricing::pricing_age_days(chrono::Utc::now().date_naive());
 
     let cache_savings_total: f64 = breakdown.iter().map(model_cache_savings).sum();
     let cost_without_cache_total: f64 = breakdown.iter().map(model_cost_without_cache).sum();
@@ -53,6 +54,7 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
             &budget,
             cache_savings_total,
             cost_without_cache_total,
+            pricing_age,
         )?;
     } else {
         write_table(
@@ -66,6 +68,7 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
             &budget,
             cache_savings_total,
             cost_without_cache_total,
+            pricing_age,
         )?;
     }
     Ok(())
@@ -83,6 +86,7 @@ fn write_table(
     budget: &BudgetTracker,
     cache_savings: f64,
     cost_without_cache: f64,
+    pricing_age_days: Option<i64>,
 ) -> std::io::Result<()> {
     writeln!(w, "📊 Today (UTC {})", date)?;
     writeln!(
@@ -150,6 +154,16 @@ fn write_table(
             cost_without_cache
         )?;
     }
+    if let Some(age) = pricing_age_days {
+        if age > 30 {
+            writeln!(w)?;
+            writeln!(
+                w,
+                "   ⚠️  Pricing data is {} days old (>30). Update Burnwall or override via ~/.burnwall/pricing.toml.",
+                age
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -165,6 +179,7 @@ fn write_json(
     budget: &BudgetTracker,
     cache_savings: f64,
     cost_without_cache: f64,
+    pricing_age_days: Option<i64>,
 ) -> std::io::Result<()> {
     use serde_json::json;
     let bcfg = budget.config();
@@ -176,6 +191,8 @@ fn write_json(
         "security_events": security_events,
         "cache_savings_usd": cache_savings,
         "cost_without_cache_usd": cost_without_cache,
+        "pricing_age_days": pricing_age_days,
+        "pricing_stale": pricing_age_days.map(|d| d > 30).unwrap_or(false),
         "budget": {
             "daily_limit_usd": bcfg.daily_usd,
             "spent_today_usd": today_cost,

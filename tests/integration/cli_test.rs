@@ -138,6 +138,24 @@ fn config_show_prints_default_when_no_file() {
 }
 
 #[test]
+fn config_show_json_emits_valid_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+
+    let output = burnwall(&path)
+        .args(["config", "show", "--json"])
+        .output()
+        .expect("run");
+    assert!(output.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("config show --json must emit valid JSON");
+    assert_eq!(v["proxy"]["port"], 4100);
+    assert_eq!(v["budget"]["daily"], 50.0);
+    assert!(v["security"]["enabled"].as_bool().unwrap());
+}
+
+#[test]
 fn config_set_writes_to_file_and_persists() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_path_buf();

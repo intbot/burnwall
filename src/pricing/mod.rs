@@ -9,7 +9,7 @@ pub mod cache_calc;
 pub mod rates;
 
 pub use cache_calc::{cache_savings, cost, cost_without_cache};
-pub use rates::{get_pricing, ModelPricing, KNOWN_MODELS};
+pub use rates::{get_pricing, ModelPricing, KNOWN_MODELS, PRICING_LAST_UPDATED};
 
 use crate::providers::TokenUsage;
 
@@ -18,4 +18,13 @@ use crate::providers::TokenUsage;
 /// proceed" per the fail-open policy in `docs/DECISIONS.md` D9.
 pub fn calculate_cost(model: &str, usage: &TokenUsage) -> Option<f64> {
     get_pricing(model).map(|p| cost(usage, p))
+}
+
+/// Days since [`PRICING_LAST_UPDATED`] vs the supplied "today". `None` if
+/// the constant is malformed (parse failure) -- callers should treat this
+/// as "freshness unknown" rather than panicking.
+pub fn pricing_age_days(today: chrono::NaiveDate) -> Option<i64> {
+    let updated =
+        chrono::NaiveDate::parse_from_str(PRICING_LAST_UPDATED, "%Y-%m-%d").ok()?;
+    Some((today - updated).num_days())
 }

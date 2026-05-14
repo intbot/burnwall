@@ -232,6 +232,33 @@ try {
         Fail ("cache_savings = {0}, expected {1}" -f $status.cache_savings_usd, $expectedSavings)
     }
 
+    # Pricing freshness — value depends on PRICING_LAST_UPDATED, but the
+    # field must always be present and numeric.
+    if ($null -ne $status.pricing_age_days) {
+        Pass ("status JSON exposes pricing_age_days = {0}" -f $status.pricing_age_days)
+    } else {
+        Fail "status JSON missing pricing_age_days"
+    }
+    if ($null -ne $status.pricing_stale) {
+        Pass ("status JSON exposes pricing_stale = {0}" -f $status.pricing_stale)
+    } else {
+        Fail "status JSON missing pricing_stale"
+    }
+
+    # config show --json should round-trip into a JSON object exposing all top-level sections.
+    Info "verifying 'config show --json' emits a parseable JSON config"
+    $cfgJsonOut = & $script:Bin config show --json 2>&1 | Out-String
+    try {
+        $cfgJson = $cfgJsonOut | ConvertFrom-Json
+        if ($cfgJson.proxy.port -eq 4100 -and $cfgJson.budget.daily -gt 0 -and $cfgJson.security.enabled) {
+            Pass "config show --json contains proxy/budget/security sections"
+        } else {
+            Fail ("config show --json structure unexpected: {0}" -f ($cfgJson | ConvertTo-Json -Compress))
+        }
+    } catch {
+        Fail ("could not parse config show --json: {0}" -f $cfgJsonOut)
+    }
+
     Reset-Sandbox
     Section "Test 2: security violation returns 403 and writes audit rows"
     $blockedBody = '{"model":"claude-haiku-4-5","messages":[{"role":"assistant","content":[{"type":"tool_use","name":"bash","input":{"command":"cat ~/.ssh/id_rsa"}}]}]}'
