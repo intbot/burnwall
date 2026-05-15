@@ -5,8 +5,8 @@ Update this file after every Claude Code session.
 ## Status: v0.2 in progress (~78%)
 
 - **v0.1**: fully shipped on `main`. 120 tests. Tagged-and-ship ready (no `v0.1.0` tag pushed yet — `[OWNER]` placeholders still in Cargo.toml/LICENSE).
-- **v0.2**: active on the `v0.2` branch. 8 feature commits landed (through the MCP disclaimer) + local-time "today" in the working tree (uncommitted), 178 tests passing, `cargo fmt` + `clippy` clean.
-- **Current branch:** `v0.2`. Both branches pushed to `origin`.
+- **v0.2**: active on the `v0.2` branch. 9 feature commits landed (most recent: local-time "today" — commit `de13147`), 178 tests passing, `cargo fmt` + `clippy` clean. Working tree clean.
+- **Current branch:** `v0.2`. Both branches pushed to `origin` (`v0.2` is in sync).
 
 ### Fresh-session orientation
 
