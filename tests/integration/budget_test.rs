@@ -157,8 +157,15 @@ fn sample_usage() -> TokenUsage {
 #[test]
 fn hydrate_loads_todays_total_from_storage() {
     let storage = Storage::open_in_memory().expect("storage");
-    // Insert two requests on the same date.
-    let date = "2026-05-13";
+    // Two requests at the same instant. `total_cost_for_date` matches in
+    // local time, so derive the query date the same way.
+    let when = chrono::DateTime::parse_from_rfc3339("2026-05-13T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let date = when
+        .with_timezone(&chrono::Local)
+        .format("%Y-%m-%d")
+        .to_string();
     for cost in &[0.75, 1.50] {
         let mut r = RequestRecord::successful(
             "anthropic",
@@ -167,14 +174,12 @@ fn hydrate_loads_todays_total_from_storage() {
             *cost,
             None,
         );
-        r.timestamp = chrono::DateTime::parse_from_rfc3339("2026-05-13T12:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+        r.timestamp = when;
         storage.insert_request(&r).unwrap();
     }
 
     let tracker = BudgetTracker::new(cfg(50.0, 80));
-    tracker.hydrate_for_date(&storage, date).expect("hydrate");
+    tracker.hydrate_for_date(&storage, &date).expect("hydrate");
     assert!((tracker.today_spent() - 2.25).abs() < 1e-6);
 }
 
@@ -191,16 +196,20 @@ fn hydrate_replaces_existing_counter_value() {
     // Background: counter has some accumulated value, then we re-hydrate
     // (e.g. on date rollover). Hydration must REPLACE, not ADD.
     let storage = Storage::open_in_memory().unwrap();
-    let date = "2026-05-13";
-    let mut r = RequestRecord::successful("openai", "gpt-5.4", &sample_usage(), 3.00, None);
-    r.timestamp = chrono::DateTime::parse_from_rfc3339("2026-05-13T12:00:00Z")
+    let when = chrono::DateTime::parse_from_rfc3339("2026-05-13T12:00:00Z")
         .unwrap()
         .with_timezone(&chrono::Utc);
+    let date = when
+        .with_timezone(&chrono::Local)
+        .format("%Y-%m-%d")
+        .to_string();
+    let mut r = RequestRecord::successful("openai", "gpt-5.4", &sample_usage(), 3.00, None);
+    r.timestamp = when;
     storage.insert_request(&r).unwrap();
 
     let tracker = BudgetTracker::new(cfg(50.0, 80));
     tracker.record(99.0); // pretend it had stale state
-    tracker.hydrate_for_date(&storage, date).unwrap();
+    tracker.hydrate_for_date(&storage, &date).unwrap();
     assert!((tracker.today_spent() - 3.00).abs() < 1e-6);
 }
 

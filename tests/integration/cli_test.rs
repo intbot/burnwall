@@ -50,7 +50,7 @@ fn status_table_shows_seeded_data() {
         .arg("status")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Today (UTC"))
+        .stdout(predicate::str::contains("Today ("))
         .stdout(predicate::str::contains("anthropic/claude-sonnet-4-6"))
         .stdout(predicate::str::contains("$0.01"))
         .stdout(predicate::str::contains("Security: 1 blocked attempt"));

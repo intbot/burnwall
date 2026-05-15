@@ -63,7 +63,10 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
     let budget = Arc::new(BudgetTracker::new(budget_cfg));
     let loop_detector = Arc::new(LoopDetector::new((&user_config.loop_detection).into()));
 
-    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    // Hydrate from the user's local "today" — storage queries match
+    // timestamps in local time, so the budget counter restarts on the
+    // local day boundary, not UTC midnight.
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     budget
         .hydrate_for_date(&storage, &today)
         .context("hydrating today's spend")?;

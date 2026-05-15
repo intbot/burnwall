@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Duration, Local, NaiveDate, Utc};
 
 use burnwall::logscrape::{self, claude_code, codex, UsageEntry};
 use burnwall::providers::TokenUsage;
@@ -19,6 +19,28 @@ fn dt(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s)
         .expect("valid rfc3339")
         .with_timezone(&Utc)
+}
+
+/// A timestamp at local noon, `offset_days` from today, as a UTC value.
+/// `aggregate` buckets entries by their *local* date, so anchoring at noon
+/// keeps the date stable regardless of the machine timezone.
+fn local_noon(offset_days: i64) -> DateTime<Utc> {
+    (Local::now() + Duration::days(offset_days))
+        .date_naive()
+        .and_hms_opt(12, 0, 0)
+        .unwrap()
+        .and_local_timezone(Local)
+        .single()
+        .unwrap()
+        .with_timezone(&Utc)
+}
+
+/// The local `YYYY-MM-DD` date string `offset_days` from today.
+fn local_date(offset_days: i64) -> String {
+    (Local::now() + Duration::days(offset_days))
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string()
 }
 
 // `collect()` reads a process-global env var to find its log root. Serialize
@@ -132,10 +154,18 @@ fn codex_parse_str_falls_back_to_path_date_when_line_has_no_timestamp() {
     let fallback = NaiveDate::from_ymd_opt(2026, 5, 10);
 
     // With a fallback date the timestamp-less event is dated and kept.
+    // The fallback anchors at noon-local, so check the local calendar date
+    // rather than an exact instant.
     let with_fallback = codex::parse_str(contents, fallback);
     assert_eq!(with_fallback.len(), 1);
     assert_eq!(with_fallback[0].model, "gpt-5.4");
-    assert_eq!(with_fallback[0].timestamp, dt("2026-05-10T00:00:00Z"));
+    assert_eq!(
+        with_fallback[0]
+            .timestamp
+            .with_timezone(&Local)
+            .date_naive(),
+        NaiveDate::from_ymd_opt(2026, 5, 10).unwrap()
+    );
 
     // Without one it cannot be dated, so it is dropped (fail-open).
     assert!(codex::parse_str(contents, None).is_empty());
@@ -162,11 +192,17 @@ fn codex_collect_reads_rollout_files() {
 
 // ──────────────────────── Aggregation ────────────────────────
 
-fn entry(tool: &'static str, model: &str, ts: &str, input: u64, output: u64) -> UsageEntry {
+fn entry(
+    tool: &'static str,
+    model: &str,
+    timestamp: DateTime<Utc>,
+    input: u64,
+    output: u64,
+) -> UsageEntry {
     UsageEntry {
         tool,
         model: model.to_string(),
-        timestamp: dt(ts),
+        timestamp,
         usage: TokenUsage {
             input_tokens: input,
             output_tokens: output,
@@ -179,31 +215,25 @@ fn entry(tool: &'static str, model: &str, ts: &str, input: u64, output: u64) -> 
 #[test]
 fn aggregate_filters_by_date_and_groups_by_tool_model() {
     let entries = vec![
+        entry("claude-code", "claude-opus-4-7", local_noon(0), 100, 50),
         entry(
             "claude-code",
             "claude-opus-4-7",
-            "2026-05-14T01:00:00Z",
-            100,
-            50,
-        ),
-        entry(
-            "claude-code",
-            "claude-opus-4-7",
-            "2026-05-14T02:00:00Z",
+            local_noon(0) + Duration::hours(1),
             200,
             80,
         ),
-        entry("codex", "gpt-5.5", "2026-05-14T03:00:00Z", 500, 120),
-        // Different day — must be filtered out.
         entry(
-            "claude-code",
-            "claude-opus-4-7",
-            "2026-05-13T23:00:00Z",
-            999,
-            999,
+            "codex",
+            "gpt-5.5",
+            local_noon(0) + Duration::hours(2),
+            500,
+            120,
         ),
+        // Different day — must be filtered out.
+        entry("claude-code", "claude-opus-4-7", local_noon(-1), 999, 999),
     ];
-    let rows = logscrape::aggregate(entries, "2026-05-14");
+    let rows = logscrape::aggregate(entries, &local_date(0));
     assert_eq!(rows.len(), 2);
 
     let cc = rows
@@ -225,11 +255,11 @@ fn aggregate_unknown_model_costs_zero() {
     let entries = vec![entry(
         "codex",
         "some-unreleased-model",
-        "2026-05-14T01:00:00Z",
+        local_noon(0),
         1000,
         1000,
     )];
-    let rows = logscrape::aggregate(entries, "2026-05-14");
+    let rows = logscrape::aggregate(entries, &local_date(0));
     assert_eq!(rows.len(), 1);
     // Fail-open: a pricing miss yields cost 0, not an error.
     assert_eq!(rows[0].cost, 0.0);
@@ -237,23 +267,23 @@ fn aggregate_unknown_model_costs_zero() {
 
 #[test]
 fn aggregate_empty_input_is_empty() {
-    assert!(logscrape::aggregate(Vec::new(), "2026-05-14").is_empty());
+    assert!(logscrape::aggregate(Vec::new(), &local_date(0)).is_empty());
 }
 
 #[test]
 fn subtotal_sums_row_costs() {
     let rows = logscrape::aggregate(
         vec![
+            entry("claude-code", "claude-opus-4-7", local_noon(0), 1000, 500),
             entry(
-                "claude-code",
-                "claude-opus-4-7",
-                "2026-05-14T01:00:00Z",
+                "codex",
+                "gpt-5.5",
+                local_noon(0) + Duration::hours(1),
                 1000,
                 500,
             ),
-            entry("codex", "gpt-5.5", "2026-05-14T02:00:00Z", 1000, 500),
         ],
-        "2026-05-14",
+        &local_date(0),
     );
     let expected: f64 = rows.iter().map(|r| r.cost).sum();
     assert!((logscrape::subtotal(&rows) - expected).abs() < 1e-12);

@@ -26,7 +26,7 @@ pub mod codex;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 
 use crate::pricing;
 use crate::providers::TokenUsage;
@@ -80,19 +80,28 @@ pub fn collect_all() -> Vec<UsageEntry> {
 }
 
 /// Scrape every supported tool's logs and aggregate the entries that fall
-/// on `date` (a UTC `YYYY-MM-DD` string) by tool + model.
+/// on `date` (a *local* `YYYY-MM-DD` string) by tool + model.
 pub fn scrape_for_date(date: &str) -> Vec<ScrapeBreakdown> {
     aggregate(collect_all(), date)
 }
 
 /// Pure aggregation step, split out so tests can feed synthetic entries.
-/// Keeps only entries whose UTC date equals `date`, groups by tool + model,
-/// sums token buckets, costs each group via the pricing table, and sorts
-/// rows by cost descending (ties broken by tool then model).
+/// Keeps only entries whose *local* date equals `date`, groups by tool +
+/// model, sums token buckets, costs each group via the pricing table, and
+/// sorts rows by cost descending (ties broken by tool then model).
+///
+/// Entry timestamps are stored in UTC but compared in local time so this
+/// stays consistent with `burnwall status`, whose "today" is local.
 pub fn aggregate(entries: Vec<UsageEntry>, date: &str) -> Vec<ScrapeBreakdown> {
     let mut groups: BTreeMap<(&'static str, String), (TokenUsage, usize)> = BTreeMap::new();
     for entry in entries {
-        if entry.timestamp.format("%Y-%m-%d").to_string() != date {
+        if entry
+            .timestamp
+            .with_timezone(&Local)
+            .format("%Y-%m-%d")
+            .to_string()
+            != date
+        {
             continue;
         }
         let slot = groups

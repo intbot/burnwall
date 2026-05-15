@@ -1,6 +1,6 @@
 //! `burnwall security` -- inspect blocked attempts.
 //!
-//! Lists rows from the `security_events` table from the last N UTC days.
+//! Lists rows from the `security_events` table from the last N local days.
 //! Default is today only (`--days 1`). `--json` for machine output.
 
 use std::io::Write;
@@ -65,7 +65,7 @@ pub fn run_cmd(args: SecurityArgs) -> anyhow::Result<()> {
     writeln!(
         out,
         "   {:<19}  {:<17}  {:<28}  Detail",
-        "Time (UTC)", "Type", "Provider/Model"
+        "Time", "Type", "Provider/Model"
     )?;
     writeln!(out, "   {}", "-".repeat(85))?;
     for e in &events {
@@ -77,7 +77,10 @@ pub fn run_cmd(args: SecurityArgs) -> anyhow::Result<()> {
         writeln!(
             out,
             "   {:<19}  {:<17}  {:<28}  {}",
-            e.timestamp.format("%Y-%m-%d %H:%M:%S"),
+            // Stored UTC, displayed in the user's local time.
+            e.timestamp
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S"),
             e.event_type,
             truncate(&provider_model, 28),
             truncate(&e.details, 60),

@@ -27,14 +27,17 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
     let config = config::load_or_default(&cfg_path).context("loading config")?;
 
     let storage = Arc::new(Storage::open_default()?);
-    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    // "Today" is the user's local calendar day — storage queries match
+    // timestamps in local time (see `storage::repository`).
+    let now_local = chrono::Local::now();
+    let today = now_local.format("%Y-%m-%d").to_string();
 
     let breakdown = storage.breakdown_for_date(&today)?;
     let total_requests = storage.request_count_for_date(&today)?;
     let blocked_count = storage.blocked_count_for_date(&today)?;
     let security_events = storage.security_event_count_for_date(&today)?;
     let today_cost = storage.total_cost_for_date(&today)?;
-    let pricing_age = pricing::pricing_age_days(chrono::Utc::now().date_naive());
+    let pricing_age = pricing::pricing_age_days(now_local.date_naive());
 
     let cache_savings_total: f64 = breakdown.iter().map(model_cache_savings).sum();
     let cost_without_cache_total: f64 = breakdown.iter().map(model_cost_without_cache).sum();
@@ -101,7 +104,7 @@ fn write_table(
     pricing_age_days: Option<i64>,
     log_scrape: Option<&[ScrapeBreakdown]>,
 ) -> std::io::Result<()> {
-    writeln!(w, "📊 Today (UTC {})", date)?;
+    writeln!(w, "📊 Today ({})", date)?;
     writeln!(
         w,
         "   Total: ${:.2} across {} request{}",

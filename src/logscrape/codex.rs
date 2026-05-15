@@ -25,7 +25,7 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Local, NaiveDate, Utc};
 use serde_json::Value;
 
 use super::UsageEntry;
@@ -137,15 +137,22 @@ fn json_i64(obj: &Value, key: &str) -> i64 {
     obj.get(key).and_then(Value::as_i64).unwrap_or(0)
 }
 
-/// Per-line `timestamp` (RFC 3339) when present, else midnight UTC of the
-/// session date recovered from the file path.
+/// Per-line `timestamp` (RFC 3339) when present, else noon-local of the
+/// session date recovered from the file path. Codex names session dirs by
+/// local date; anchoring the fallback at noon local keeps that date stable
+/// when `logscrape::aggregate` later re-derives it in local time.
 fn line_timestamp(value: &Value, fallback_date: Option<NaiveDate>) -> Option<DateTime<Utc>> {
     if let Some(ts) = value.get("timestamp").and_then(Value::as_str) {
         if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
             return Some(dt.with_timezone(&Utc));
         }
     }
-    fallback_date.map(|d| d.and_hms_opt(0, 0, 0).unwrap().and_utc())
+    fallback_date.and_then(|d| {
+        d.and_hms_opt(12, 0, 0)?
+            .and_local_timezone(Local)
+            .single()
+            .map(|local| local.with_timezone(&Utc))
+    })
 }
 
 /// Recover the session date from a `.../YYYY/MM/DD/rollout-*.jsonl` path.

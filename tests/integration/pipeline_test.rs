@@ -35,7 +35,8 @@ fn client() -> reqwest::Client {
 }
 
 fn today() -> String {
-    chrono::Utc::now().format("%Y-%m-%d").to_string()
+    // Storage date queries match in local time, so "today" is local.
+    chrono::Local::now().format("%Y-%m-%d").to_string()
 }
 
 /// Wait briefly for the tee callback to fire — it runs in a spawned task
