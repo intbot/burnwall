@@ -96,6 +96,7 @@ pub fn set_dotted_key(config: &mut Config, key: &str, value: &str) -> Result<()>
     match key {
         "proxy.port" => config.proxy.port = parse(key, value)?,
         "proxy.host" => config.proxy.host = value.to_string(),
+        "proxy.cache_injection" => config.proxy.cache_injection = parse(key, value)?,
         "budget.daily" => config.budget.daily = parse(key, value)?,
         "budget.monthly" => config.budget.monthly = parse(key, value)?,
         "budget.warn_percent" => config.budget.warn_percent = parse(key, value)?,

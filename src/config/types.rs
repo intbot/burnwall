@@ -24,6 +24,12 @@ pub struct Config {
 pub struct ProxyConfig {
     pub port: u16,
     pub host: String,
+    /// Auto-inject Anthropic `cache_control` markers (ephemeral) onto
+    /// the system prompt and the first message of outbound requests
+    /// that have none. Off by default — Burnwall does not modify
+    /// request bodies silently.
+    #[serde(default)]
+    pub cache_injection: bool,
 }
 
 impl Default for ProxyConfig {
@@ -31,6 +37,7 @@ impl Default for ProxyConfig {
         Self {
             port: 4100,
             host: "127.0.0.1".to_string(),
+            cache_injection: false,
         }
     }
 }

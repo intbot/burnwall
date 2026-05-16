@@ -14,7 +14,7 @@ use tracing::warn;
 use crate::budget::{BudgetStatus, LoopVerdict};
 use crate::storage::{RequestRecord, SecurityEvent};
 
-use super::{forwarding, streaming, AppState, ProxyBody};
+use super::{cache_injection, forwarding, streaming, AppState, ProxyBody};
 
 pub async fn handle(
     req: Request<Incoming>,
@@ -157,12 +157,30 @@ pub async fn handle(
         ));
     }
 
+    // ─── cache injection (Anthropic only, opt-in) ───
+    // Replaces `body_bytes` with a rewritten body that has `cache_control`
+    // ephemeral markers on the system prompt and first message. Triggers
+    // only when the operator opted in AND the request is destined for the
+    // Messages API (no other Anthropic endpoint accepts these markers).
+    let forward_body = if state.cache_injection
+        && provider == "anthropic"
+        && cache_injection::is_messages_path(&rest)
+    {
+        let outcome = cache_injection::inject_if_eligible(&body_bytes);
+        if outcome.modified {
+            tracing::debug!("cache_control injected on Anthropic request");
+        }
+        outcome.body
+    } else {
+        body_bytes
+    };
+
     // ─── forward + tee-parse ───
     match forwarding::forward(
         parts.method,
         &upstream_uri,
         parts.headers,
-        body_bytes,
+        forward_body,
         &state,
         provider,
         request_hash_hex,
