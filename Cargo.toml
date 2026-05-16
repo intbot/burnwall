@@ -2,7 +2,7 @@
 name = "burnwall"
 version = "0.1.0"
 edition = "2021"
-description = "AI agent firewall and cost tracker. Security + budget enforcement for AI coding tools."
+description = "Local proxy for AI coding tools (Claude Code, Codex CLI, Aider): cache-aware cost tracking, path/command security checks, daily budget enforcement. Zero telemetry."
 license = "FSL-1.1-MIT"
 repository = "https://github.com/[OWNER]/burnwall"
 readme = "README.md"
