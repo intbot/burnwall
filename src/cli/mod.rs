@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 
 pub mod completions;
 pub mod config_cmd;
+pub mod daemon;
 pub mod history;
 pub mod init;
 pub mod security;
@@ -26,7 +27,7 @@ pub struct Cli {
 pub enum Command {
     /// Start the proxy server.
     Start(start::StartArgs),
-    /// Stop the proxy daemon (v0.1: foreground only).
+    /// Stop the running Burnwall proxy.
     Stop(stop::StopArgs),
     /// Show today's spend summary.
     Status(status::StatusArgs),

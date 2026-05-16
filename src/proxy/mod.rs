@@ -70,35 +70,66 @@ impl AppState {
 
 /// Bind `addr` and run the accept loop until cancelled.
 pub async fn run(addr: SocketAddr, state: AppState) -> std::io::Result<()> {
+    run_with_shutdown(addr, state, std::future::pending::<()>()).await
+}
+
+/// Bind `addr` and run the accept loop until `shutdown` resolves.
+pub async fn run_with_shutdown(
+    addr: SocketAddr,
+    state: AppState,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
     info!("Burnwall proxy listening on http://{}", bound);
-    serve(listener, Arc::new(state)).await
+    serve_with_shutdown(listener, Arc::new(state), shutdown).await
 }
 
 /// Run the accept loop on a caller-supplied listener. Tests use this with a
 /// port-zero bind so they can run in parallel without colliding.
 pub async fn serve(listener: TcpListener, state: Arc<AppState>) -> std::io::Result<()> {
+    serve_with_shutdown(listener, state, std::future::pending::<()>()).await
+}
+
+/// Run the accept loop until `shutdown` resolves, then stop accepting new
+/// connections and return. In-flight connections are dropped — there is no
+/// drain phase — because the proxy is read-only on the response path and
+/// every cost record is committed per-request, so an abrupt stop cannot
+/// corrupt state.
+pub async fn serve_with_shutdown(
+    listener: TcpListener,
+    state: Arc<AppState>,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> std::io::Result<()> {
     info!("  /anthropic/* → {}", state.upstream_anthropic);
     info!("  /openai/*    → {}", state.upstream_openai);
 
+    tokio::pin!(shutdown);
     loop {
-        let (stream, peer) = listener.accept().await?;
-        let io = TokioIo::new(stream);
-        let state = state.clone();
-
-        tokio::spawn(async move {
-            let service = service_fn(move |req: hyper::Request<Incoming>| {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, peer) = accepted?;
+                let io = TokioIo::new(stream);
                 let state = state.clone();
-                async move { handler::handle(req, state).await }
-            });
 
-            if let Err(e) = Builder::new(TokioExecutor::new())
-                .serve_connection(io, service)
-                .await
-            {
-                error!("connection error from {}: {}", peer, e);
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: hyper::Request<Incoming>| {
+                        let state = state.clone();
+                        async move { handler::handle(req, state).await }
+                    });
+
+                    if let Err(e) = Builder::new(TokioExecutor::new())
+                        .serve_connection(io, service)
+                        .await
+                    {
+                        error!("connection error from {}: {}", peer, e);
+                    }
+                });
             }
-        });
+            _ = &mut shutdown => {
+                info!("shutdown signal received — stopping the accept loop");
+                return Ok(());
+            }
+        }
     }
 }

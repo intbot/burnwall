@@ -54,9 +54,12 @@ dashmap = "6"                        # Concurrent hashmap for loop detection
 uuid = { version = "1", features = ["v4"] }
 futures-util = "0.3"                 # Stream adapters for SSE response pass-through
 
-# Daemonize (Unix)
+# Process control for daemon mode + `burnwall stop`
 [target.'cfg(unix)'.dependencies]
-daemonize = "0.5"
+libc = "0.2"                         # kill(2) for liveness checks and SIGTERM
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
 
 [dev-dependencies]
 # Testing
@@ -113,6 +116,10 @@ path = "tests/integration/cli_test.rs"
 [[test]]
 name = "init_test"
 path = "tests/integration/init_test.rs"
+
+[[test]]
+name = "daemon_test"
+path = "tests/integration/daemon_test.rs"
 
 [profile.release]
 opt-level = "z"                      # Optimize for size

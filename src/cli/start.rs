@@ -8,9 +8,10 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::Args;
 
+use super::daemon;
 use crate::budget::{BudgetTracker, LoopDetector};
 use crate::config;
-use crate::proxy::{run, AppState};
+use crate::proxy::{serve_with_shutdown, AppState};
 use crate::security::SecurityEngine;
 use crate::storage::Storage;
 
@@ -22,6 +23,10 @@ pub struct StartArgs {
     /// Address to bind on. Overrides `proxy.host` from config.
     #[arg(long)]
     pub host: Option<String>,
+    /// Run in the background, detached from the terminal. The PID is
+    /// written to `<data dir>/burnwall.pid`; stop it with `burnwall stop`.
+    #[arg(long)]
+    pub daemon: bool,
     /// Override the Anthropic upstream URL (useful for testing).
     #[arg(long, default_value = "https://api.anthropic.com")]
     pub upstream_anthropic: String,
@@ -31,7 +36,20 @@ pub struct StartArgs {
 }
 
 pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
+    if args.daemon {
+        return daemon::spawn_background(&args).await;
+    }
+
     init_tracing();
+
+    // Refuse to start a second proxy on top of a running one — `bind` below
+    // is the real backstop, but this gives a clearer message in the common
+    // case (and cleans up a stale PID file from a previous crashed run).
+    if let Some(pid) = daemon::running_pid()? {
+        anyhow::bail!(
+            "Burnwall is already running (PID {pid}). Use `burnwall stop` to stop it first."
+        );
+    }
 
     let cfg_path = config::default_path()?;
     let user_config = config::load_or_default(&cfg_path)
@@ -102,7 +120,18 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
         .with_context(|| format!("invalid host: {}", host_str))?;
     let addr = SocketAddr::new(host, port);
 
-    run(addr, state).await.context("proxy run")?;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("binding {addr} — is the port already in use?"))?;
+
+    // Record our PID so `burnwall stop` (and a second `start`) can find us.
+    // Removed on graceful shutdown; `stop` and `running_pid` clean it up if
+    // we are killed without the chance to.
+    daemon::write_pid_file(std::process::id())?;
+
+    let result = serve_with_shutdown(listener, Arc::new(state), daemon::shutdown_signal()).await;
+    daemon::remove_pid_file().ok();
+    result.context("proxy serve")?;
     Ok(())
 }
 

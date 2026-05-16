@@ -2,22 +2,23 @@
 
 Update this file after every Claude Code session.
 
-## Status: v0.2 in progress (~78%)
+## Status: v0.2 in progress (~85%)
 
 - **v0.1**: fully shipped on `main`. 120 tests. Tagged-and-ship ready (no `v0.1.0` tag pushed yet — `[OWNER]` placeholders still in Cargo.toml/LICENSE).
-- **v0.2**: active on the `v0.2` branch. 9 feature commits landed (most recent: local-time "today" — commit `de13147`), 178 tests passing, `cargo fmt` + `clippy` clean. Working tree clean.
+- **v0.2**: active on the `v0.2` branch. 10 feature commits landed (most recent: daemon mode + real `burnwall stop`), 188 tests passing, `cargo fmt` + `clippy` clean. Working tree clean.
 - **Current branch:** `v0.2`. Both branches pushed to `origin` (`v0.2` is in sync).
 
 ### Fresh-session orientation
 
 - The **v0.2 plan** (replanned after a competitive-research pass) lives in `internal/ROADMAP.md` — `internal/` is gitignored/local-only. It has checkboxes for what's done vs remaining.
-- Next planned feature: **Background daemon mode (`--daemon`, PID file) + real `burnwall stop`** — see `internal/ROADMAP.md`. (Per-project profiles, Tier-2 log-file cost tracking, the MCP scope disclaimer, and local-time "today" just landed.)
+- Next planned features (from `internal/ROADMAP.md`): Homebrew formula, README comparison page, positioning copy, Show HN prep. (Per-project profiles, Tier-2 log-file cost tracking, the MCP scope disclaimer, local-time "today", and daemon mode all landed.)
 - Competitive landscape research is in `internal/COMPETITORS.md`.
 - User preferences are in the auto-loaded memory files (no `Co-Authored-By` trailer; no meta-commentary about hidden/scrubbed content).
 
 ## Session Log
 
-### v0.2 — Stop Wasting My Money (2026-05-13/14, `v0.2` branch)
+### v0.2 — Stop Wasting My Money (2026-05-13/15, `v0.2` branch)
+- [x] Background daemon mode (`burnwall start --daemon`) + real `burnwall stop` — new `cli::daemon` module owns the lifecycle: PID file at `<data dir>/burnwall.pid` written by the running proxy after it binds (atomic write via temp + rename, removed on graceful shutdown), `running_pid()` reads + validates against the live OS, stale files self-clean. The daemon is re-exec'd as a detached child (`setsid()` on Unix, `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` on Windows) with stdio nulled — no `fork()`, so the launching Tokio runtime is never duplicated. `stop` sends SIGTERM on Unix (the proxy's `shutdown_signal` catches it via `tokio::signal`); on Windows it's `TerminateProcess` because Windows has no deliverable graceful signal. **Windows-specific landmine fixed:** the daemon spawn now calls `CreateProcessW` directly with `bInheritHandles = FALSE` instead of `std::process::Command::spawn()` — std::process unconditionally inherits handles to set up stdio, which meant the daemon also inherited any `assert_cmd`-style capture pipes from the test harness and kept them open forever, hanging `cargo test`. Both `start` and `start --daemon` refuse to launch when an existing PID is alive; a stale PID file is cleaned up either way. 11 new tests: PID-file roundtrip, corrupt-content discard, zero-PID rejection, stale-PID self-clean, live-PID detection, the "not running" / "stale PID file" stop variants, the full `start --daemon` → assert-running → `stop` → process-gone lifecycle, and the "second daemon refuses" guard
 - [x] Loop detection — `LoopDetector` (per-hash sliding-window + cost-spiral), wired into the proxy pipeline between budget check and forward; `request_hash` column populated
 - [x] `burnwall security` command — table + `--json` view of `security_events`
 - [x] Pricing freshness warning — `PRICING_LAST_UPDATED` const + `pricing_age_days()`; `status` warns if >30 days old
@@ -30,7 +31,7 @@ Update this file after every Claude Code session.
 - [x] Tier-2 cost tracking via local log-file parsing (Claude Code + Codex CLI) — new `logscrape` module: `claude_code.rs` parses `~/.claude/projects/**/*.jsonl` (`type:assistant` lines, deduped across files by `message.id`+`requestId`); `codex.rs` parses `~/.codex/sessions/**/*.jsonl` (stateful — `turn_context`/`session_meta` model attached to following `token_count` events, `last_token_usage` normalized OpenAI-style, per-line timestamp with `YYYY/MM/DD` path-date fallback). Read-only on-the-fly scrape, no SQLite writes, fail-open throughout. `scrape_for_date` aggregates by tool+model via the existing pricing table. `burnwall status` gained a "Tracked via log files (not proxied)" section + combined-total line; `--json` gained a `log_scrape` key + `combined_total_usd`. New `log_scrape.enabled` config (default true). JSONL parsed line-by-line via `serde_json`. Env overrides `BURNWALL_CLAUDE_LOG_DIR` / `BURNWALL_CODEX_LOG_DIR` for tests. 11 new tests + 2 fixtures (`tests/fixtures/{claude_code,codex}_session.jsonl`). Codex format verified against the openai/codex `RolloutItem` / `TokenUsageInfo` source
 - [x] MCP awareness disclaimer — README gained a "Scope: What Burnwall Guards" section (Burnwall is on the LLM API path; MCP traffic is not intercepted; MCP Defender / Pipelock / SentinelGate are complementary); `burnwall status` prints a one-line scope footer. Pure copy — no new tests
 - [x] Local-time "today" — timestamps are still *stored* UTC, but every `storage::repository` date query now uses `DATE(timestamp, 'localtime')` / `DATE('now', 'localtime', ?1)`; `status`, `start` (budget hydration), and `security` derive "today" via `chrono::Local`; `logscrape::aggregate` buckets by the entry's local date and the Codex path-date fallback anchors at noon-local — so the cross-tool view stays consistent with the proxy view. `status` header is now `📊 Today (<local date>)` (dropped "UTC"); `security` shows local timestamps under a "Time" column. Fixes the off-by-one where, late in the UTC day, `status` showed an empty "tomorrow". Date-sensitive tests reworked to be timezone-robust (a `local_noon`/`local_date` helper anchors fixtures at local noon, far from any midnight); no production behavior depends on the test machine's zone. Test count unchanged at 178
-- [ ] Remaining v0.2 work — see `internal/ROADMAP.md` (daemon mode + real `stop`, Homebrew formula, README comparison page, positioning copy, Show HN prep)
+- [ ] Remaining v0.2 work — see `internal/ROADMAP.md` (Homebrew formula, README comparison page, positioning copy, Show HN prep)
 
 ### Session 0 — Planning (May 2026)
 - [x] CLAUDE.md — project rules and structure
