@@ -2,7 +2,7 @@
 
 All notable changes to Burnwall.
 
-## [Unreleased] — v0.2.0
+## [0.2.0] — 2026-05-16
 
 ### Added
 
