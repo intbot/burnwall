@@ -170,7 +170,21 @@ Pass "burnwall listening"
 # ---------------------------------- tests ----------------------------------
 
 try {
-    Section "Test 1: safe request is forwarded, parsed, cached pricing applied, savings reported"
+    Section "Smoke: shell-completion generator"
+$bashOut = & $script:Bin completions bash 2>&1 | Out-String
+if ($bashOut -like '*_burnwall()*' -and $bashOut -like '*complete -F*') {
+    Pass "completions bash emits compinit-style script"
+} else {
+    Fail "completions bash output unexpected"
+}
+$psOut = & $script:Bin completions powershell 2>&1 | Out-String
+if ($psOut -like '*Register-ArgumentCompleter*') {
+    Pass "completions powershell emits Register-ArgumentCompleter"
+} else {
+    Fail "completions powershell output unexpected"
+}
+
+Section "Test 1: safe request is forwarded, parsed, cached pricing applied, savings reported"
     $body = '{"model":"claude-haiku-4-5","max_tokens":50,"messages":[{"role":"user","content":"hi"}]}'
     $r = Invoke-Proxy -Path "/anthropic/v1/messages" -Body $body -Headers @{ "x-api-key" = "fake" }
     if ($r.Status -eq 200) { Pass "200 OK" } else { Fail ("expected 200, got {0}" -f $r.Status) }
@@ -232,6 +246,33 @@ try {
         Fail ("cache_savings = {0}, expected {1}" -f $status.cache_savings_usd, $expectedSavings)
     }
 
+    # Pricing freshness — value depends on PRICING_LAST_UPDATED, but the
+    # field must always be present and numeric.
+    if ($null -ne $status.pricing_age_days) {
+        Pass ("status JSON exposes pricing_age_days = {0}" -f $status.pricing_age_days)
+    } else {
+        Fail "status JSON missing pricing_age_days"
+    }
+    if ($null -ne $status.pricing_stale) {
+        Pass ("status JSON exposes pricing_stale = {0}" -f $status.pricing_stale)
+    } else {
+        Fail "status JSON missing pricing_stale"
+    }
+
+    # config show --json should round-trip into a JSON object exposing all top-level sections.
+    Info "verifying 'config show --json' emits a parseable JSON config"
+    $cfgJsonOut = & $script:Bin config show --json 2>&1 | Out-String
+    try {
+        $cfgJson = $cfgJsonOut | ConvertFrom-Json
+        if ($cfgJson.proxy.port -eq 4100 -and $cfgJson.budget.daily -gt 0 -and $cfgJson.security.enabled) {
+            Pass "config show --json contains proxy/budget/security sections"
+        } else {
+            Fail ("config show --json structure unexpected: {0}" -f ($cfgJson | ConvertTo-Json -Compress))
+        }
+    } catch {
+        Fail ("could not parse config show --json: {0}" -f $cfgJsonOut)
+    }
+
     Reset-Sandbox
     Section "Test 2: security violation returns 403 and writes audit rows"
     $blockedBody = '{"model":"claude-haiku-4-5","messages":[{"role":"assistant","content":[{"type":"tool_use","name":"bash","input":{"command":"cat ~/.ssh/id_rsa"}}]}]}'
@@ -260,6 +301,27 @@ try {
         Fail ("blocked_requests={0}" -f $status.blocked_requests)
     }
 
+    Info "verifying 'burnwall security' surfaces the event"
+    $secOut = & $script:Bin security 2>&1 | Out-String
+    if ($secOut -like '*path_blocked*' -and $secOut -like '*~/.ssh*' -and $secOut -like '*Total: 1 event*') {
+        Pass "burnwall security shows the path_blocked entry"
+    } else {
+        Fail ("burnwall security output unexpected:`n{0}" -f $secOut)
+    }
+
+    Info "verifying 'burnwall security --json' parses and counts"
+    $secJsonOut = & $script:Bin security --json 2>&1 | Out-String
+    try {
+        $secJson = $secJsonOut | ConvertFrom-Json
+        if ($secJson.count -eq 1 -and $secJson.events[0].event_type -eq 'path_blocked') {
+            Pass "JSON output: count=1, event_type=path_blocked"
+        } else {
+            Fail ("JSON unexpected: count={0}, type={1}" -f $secJson.count, $secJson.events[0].event_type)
+        }
+    } catch {
+        Fail ("could not parse security --json output: {0}" -f $secJsonOut)
+    }
+
     Section "Test 3: budget enforcement returns 429"
     Info "stopping burnwall, dropping budget to 0.0001 USD, restarting"
     Stop-BurnwallProxy
@@ -281,11 +343,99 @@ try {
         Fail "body missing budget_exceeded"
     }
 
+    Section "Test 3.5: log_redact_details strips rule names from storage"
+    Info "stopping burnwall, enabling security.log_redact_details, restarting"
+    Stop-BurnwallProxy
+    Reset-Sandbox
+    & $script:Bin config set security.log_redact_details true | Out-Null
+    & $script:Bin config set budget.daily 50.0 | Out-Null
+    Start-BurnwallProxy
+
+    $redactBody = '{"model":"claude-haiku-4-5","messages":[{"role":"assistant","content":[{"type":"tool_use","name":"bash","input":{"command":"cat ~/.ssh/id_rsa"}}]}]}'
+    $rResp = Invoke-Proxy -Path "/anthropic/v1/messages" -Body $redactBody
+    if ($rResp.Status -eq 403) {
+        Pass "403 returned with redaction enabled"
+    } else {
+        Fail ("expected 403, got {0}" -f $rResp.Status)
+    }
+    # The 403 BODY (sent to agent) must STILL mention the rule -- redaction is storage-only.
+    if ($rResp.Body -like '*~/.ssh*') {
+        Pass "403 body still surfaces the rule for the agent"
+    } else {
+        Fail "403 body should not redact -- agent needs the detail"
+    }
+
+    # The STORED detail must be "<redacted>" (no path string).
+    Start-Sleep -Milliseconds 300
+    $secOut = & $script:Bin security 2>&1 | Out-String
+    if ($secOut -like '*<redacted>*') {
+        Pass "stored security_events.details = <redacted>"
+    } else {
+        Fail ("storage was NOT redacted:`n{0}" -f $secOut)
+    }
+    if ($secOut -notlike '*~/.ssh*' -and $secOut -notlike '*id_rsa*') {
+        Pass "storage contains no path strings"
+    } else {
+        Fail ("storage leaked path data:`n{0}" -f $secOut)
+    }
+
+    Section "Test 4: loop detection blocks repeated identical requests"
+    Info "stopping burnwall, configuring loop_detection.max_identical_requests=3, restarting"
+    Stop-BurnwallProxy
+    Reset-Sandbox
+    # Tighten the loop threshold and disable cost-spiral so this test is deterministic.
+    & $script:Bin config set loop_detection.max_identical_requests 3 | Out-Null
+    & $script:Bin config set loop_detection.window_seconds 60 | Out-Null
+    & $script:Bin config set loop_detection.max_cost_per_window 0.0 | Out-Null
+    & $script:Bin config set budget.daily 50.0 | Out-Null
+    Start-BurnwallProxy
+
+    # Send the SAME body 3 times. First 2 should pass, 3rd should be loop-blocked.
+    Info "sending 2 identical requests (should pass)"
+    $loopBody = '{"model":"claude-haiku-4-5","max_tokens":50,"messages":[{"role":"user","content":"identical"}]}'
+    for ($i = 1; $i -le 2; $i++) {
+        $resp = Invoke-Proxy -Path "/anthropic/v1/messages" -Body $loopBody -Headers @{ "x-api-key" = "fake" }
+        if ($resp.Status -eq 200) {
+            Pass ("identical request {0}/2 passed" -f $i)
+        } else {
+            Fail ("identical request {0}/2 returned {1}" -f $i, $resp.Status)
+        }
+    }
+
+    Info "sending 3rd identical request (should be loop-blocked)"
+    $loopResp = Invoke-Proxy -Path "/anthropic/v1/messages" -Body $loopBody -Headers @{ "x-api-key" = "fake" }
+    if ($loopResp.Status -eq 429) {
+        Pass "3rd identical request returned 429"
+    } else {
+        Fail ("expected 429, got {0}" -f $loopResp.Status)
+    }
+    if ($loopResp.Body -like '*loop_detected*') {
+        Pass "body has loop_detected error type"
+    } else {
+        Fail ("body missing loop_detected: {0}" -f $loopResp.Body)
+    }
+    if ($loopResp.Body -like '*identical*') {
+        Pass "body explains the loop count"
+    } else {
+        Fail "body missing loop count detail"
+    }
+
+    # Distinct body should still pass even within the same window.
+    Info "sending a DIFFERENT body (should pass)"
+    $distinctBody = '{"model":"claude-haiku-4-5","max_tokens":50,"messages":[{"role":"user","content":"distinct"}]}'
+    $distinctResp = Invoke-Proxy -Path "/anthropic/v1/messages" -Body $distinctBody -Headers @{ "x-api-key" = "fake" }
+    if ($distinctResp.Status -eq 200) {
+        Pass "distinct body passed (loop counter is per-hash)"
+    } else {
+        Fail ("distinct body returned {0}, expected 200" -f $distinctResp.Status)
+    }
+
     # -------------- Claude Code diagnostic --------------
-    # Bring budget back up so the diagnostic isn't immediately blocked.
+    # Bring budget back up + relax loop detection so the diagnostic isn't immediately blocked.
     Stop-BurnwallProxy
     Reset-Sandbox
     & $script:Bin config set budget.daily 50.0 | Out-Null
+    & $script:Bin config set loop_detection.max_identical_requests 5 | Out-Null
     Start-BurnwallProxy
 
     Section "Diagnostic: does Claude Code route through Burnwall?"

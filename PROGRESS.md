@@ -2,11 +2,35 @@
 
 Update this file after every Claude Code session.
 
-## Status: v0.1 Ready
+## Status: v0.2 code-complete — ready for `v0.2.0` tag
 
-All v0.1 features shipped — proxy + security + budget + cost tracking + CLI. 120/120 tests green, clippy clean, rustfmt clean, release binary verified locally. Ready to tag v0.1.0 and let CI ship binaries.
+- **v0.1**: fully shipped on `main`. 120 tests. Placeholders resolved.
+- **v0.2**: code-complete on the `v0.2` branch. 188 tests passing, `cargo fmt` + `clippy` clean. All feature work landed; remaining items are external (tag the release, publish the Homebrew tap, post the launch thread) and pre-drafted in `internal/`.
+- **Current branch:** `v0.2`. Pushed to `origin`.
+
+### Fresh-session orientation
+
+- Planning, research, policy, and release-prep drafts live in `internal/` (gitignored/local-only). v0.2 items are all checked off.
+- User preferences are in the auto-loaded memory files (no `Co-Authored-By` trailer; no meta-commentary about hidden/scrubbed content).
+- **Next milestone:** tracked in `internal/ROADMAP.md`.
 
 ## Session Log
+
+### v0.2 — Stop Wasting My Money (2026-05-13/15, `v0.2` branch)
+- [x] Background daemon mode (`burnwall start --daemon`) + real `burnwall stop` — new `cli::daemon` module owns the lifecycle: PID file at `<data dir>/burnwall.pid` written by the running proxy after it binds (atomic write via temp + rename, removed on graceful shutdown), `running_pid()` reads + validates against the live OS, stale files self-clean. The daemon is re-exec'd as a detached child (`setsid()` on Unix, `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` on Windows) with stdio nulled — no `fork()`, so the launching Tokio runtime is never duplicated. `stop` sends SIGTERM on Unix (the proxy's `shutdown_signal` catches it via `tokio::signal`); on Windows it's `TerminateProcess` because Windows has no deliverable graceful signal. **Windows-specific landmine fixed:** the daemon spawn now calls `CreateProcessW` directly with `bInheritHandles = FALSE` instead of `std::process::Command::spawn()` — std::process unconditionally inherits handles to set up stdio, which meant the daemon also inherited any `assert_cmd`-style capture pipes from the test harness and kept them open forever, hanging `cargo test`. Both `start` and `start --daemon` refuse to launch when an existing PID is alive; a stale PID file is cleaned up either way. 11 new tests: PID-file roundtrip, corrupt-content discard, zero-PID rejection, stale-PID self-clean, live-PID detection, the "not running" / "stale PID file" stop variants, the full `start --daemon` → assert-running → `stop` → process-gone lifecycle, and the "second daemon refuses" guard
+- [x] Loop detection — `LoopDetector` (per-hash sliding-window + cost-spiral), wired into the proxy pipeline between budget check and forward; `request_hash` column populated
+- [x] `burnwall security` command — table + `--json` view of `security_events`
+- [x] Pricing freshness warning — `PRICING_LAST_UPDATED` const + `pricing_age_days()`; `status` warns if >30 days old
+- [x] `config show --json` — completes `--json` coverage across all commands
+- [x] Shell completions — `burnwall completions <shell>` for bash/zsh/fish/powershell/elvish (`clap_complete`)
+- [x] Path redaction — `security.log_redact_details` config; storage rows redact the matched-rule detail, 403 response unaffected (D13 mitigation)
+- [x] Competitive research pass — ~50 new competitors catalogued in `internal/COMPETITORS.md`; v0.2 replanned in `internal/ROADMAP.md`
+- [x] Repo hygiene — relocated internal planning docs to gitignored `internal/`, scrubbed history of strategy-doc content + names, removed `Co-Authored-By` trailers
+- [x] Per-project security profiles (`.burnwall.yaml`) — new `config::project` module: `ProjectProfile` (`allow_paths` / `deny_paths` / `budget.daily_max_usd`), walk-up `discover()` from cwd (`.yaml`/`.yml`), YAML via `serde_norway`. `allow_paths` is an exception list — a string leaf matching one skips path-deny checks, but command/mount/secret checks still run; `deny_paths` extend the global denylist; `budget.daily_max_usd` is a cap that can only tighten the daily limit (global `0.0`/unlimited → cap wins). `Ruleset` gained an `allow_paths` field; scanner `check_string` honors it. Merged into the runtime `Ruleset`/`BudgetConfig` in `cli::start` (before `SecurityEngine`/`BudgetTracker` construction) and surfaced in the startup banner. 24 new tests (20 unit in `project_profile_test.rs` covering parse/discover/merge + 4 `allow_paths` scanner cases in `security_test.rs`). Also fixed two pre-existing clippy lints surfaced by clippy 1.95 (`unwrap_or_default` in `loop_detector`, `write_literal` in `cli::security`)
+- [x] Tier-2 cost tracking via local log-file parsing (Claude Code + Codex CLI) — new `logscrape` module: `claude_code.rs` parses `~/.claude/projects/**/*.jsonl` (`type:assistant` lines, deduped across files by `message.id`+`requestId`); `codex.rs` parses `~/.codex/sessions/**/*.jsonl` (stateful — `turn_context`/`session_meta` model attached to following `token_count` events, `last_token_usage` normalized OpenAI-style, per-line timestamp with `YYYY/MM/DD` path-date fallback). Read-only on-the-fly scrape, no SQLite writes, fail-open throughout. `scrape_for_date` aggregates by tool+model via the existing pricing table. `burnwall status` gained a "Tracked via log files (not proxied)" section + combined-total line; `--json` gained a `log_scrape` key + `combined_total_usd`. New `log_scrape.enabled` config (default true). JSONL parsed line-by-line via `serde_json`. Env overrides `BURNWALL_CLAUDE_LOG_DIR` / `BURNWALL_CODEX_LOG_DIR` for tests. 11 new tests + 2 fixtures (`tests/fixtures/{claude_code,codex}_session.jsonl`). Codex format verified against the openai/codex `RolloutItem` / `TokenUsageInfo` source
+- [x] MCP awareness disclaimer — README gained a "Scope: What Burnwall Guards" section (Burnwall is on the LLM API path; MCP traffic is not intercepted; MCP Defender / Pipelock / SentinelGate are complementary); `burnwall status` prints a one-line scope footer. Pure copy — no new tests
+- [x] Local-time "today" — timestamps are still *stored* UTC, but every `storage::repository` date query now uses `DATE(timestamp, 'localtime')` / `DATE('now', 'localtime', ?1)`; `status`, `start` (budget hydration), and `security` derive "today" via `chrono::Local`; `logscrape::aggregate` buckets by the entry's local date and the Codex path-date fallback anchors at noon-local — so the cross-tool view stays consistent with the proxy view. `status` header is now `📊 Today (<local date>)` (dropped "UTC"); `security` shows local timestamps under a "Time" column. Fixes the off-by-one where, late in the UTC day, `status` showed an empty "tomorrow". Date-sensitive tests reworked to be timezone-robust (a `local_noon`/`local_date` helper anchors fixtures at local noon, far from any midnight); no production behavior depends on the test machine's zone. Test count unchanged at 178
+- [x] Release-prep wrap (2026-05-16) — `[OWNER]` placeholders resolved to `intbot` in `Cargo.toml` / `LICENSE` / `README.md` / `src/main.rs`; CHANGELOG carved into `[Unreleased] — v0.2.0` (with all v0.2 additions) and `[0.1.0]` sections; remaining launch-prep checked off in `internal/`
 
 ### Session 0 — Planning (May 2026)
 - [x] CLAUDE.md — project rules and structure
@@ -135,37 +159,11 @@ All v0.1 features shipped — proxy + security + budget + cost tracking + CLI. 1
 - [x] `cargo test` — 8/8 passing
 - [x] `cargo build` clean, `cargo run` prints stub banner
 
-## Next Sessions (Suggested Order)
+## Next Steps
 
-### Session 1 — Project Scaffold
-"Read CLAUDE.md and docs/ARCHITECTURE.md. Set up the Cargo workspace with all crates listed in the project structure. Add all dependencies to Cargo.toml. Create empty mod.rs files for every module. Make sure `cargo build` succeeds."
-
-### Session 2 — Proxy Server (Forward Only)
-"Read docs/SPEC.md 'Proxy Behavior' section and docs/ARCHITECTURE.md. Implement the proxy server in src/proxy/. It should listen on localhost:4100 with two route prefixes: /anthropic/* forwards to api.anthropic.com and /openai/* forwards to api.openai.com. Handle both non-streaming and SSE streaming responses. For now just forward and return — no parsing or storage. Write integration tests with a mock upstream server."
-
-### Session 3 — Response Parsers
-"Read docs/SPEC.md 'Provider API Response Formats' and 'Pricing Database' sections. Implement Anthropic and OpenAI response parsers in src/providers/. They read the usage block from API responses and calculate cost using the pricing tables. Handle all token types including cache_creation and cache_read. Write unit tests using the fixture files in tests/fixtures/."
-
-### Session 4 — SQLite Storage
-"Read docs/SPEC.md 'SQLite Schema' section. Implement storage in src/storage/. Create the database, run migrations, implement insert and query methods. Write the repository layer that the proxy and CLI commands will use. Write tests."
-
-### Session 5 — Security Engine
-"Read docs/SPEC.md 'Security Scanning' section and docs/ARCHITECTURE.md 'Security Engine Design'. Implement the security scanner in src/security/. It scans JSON request bodies for denied file paths, blocked commands, network mount paths, and secret patterns. Write tests with the blocked_path fixture."
-
-### Session 6 — Budget Enforcement
-"Read docs/SPEC.md 'Budget Enforcement' section and docs/ARCHITECTURE.md 'Budget Tracking'. Implement budget tracking in src/budget/. Use AtomicU64 for fast in-memory tracking, sync with SQLite. Return 429 when budget exceeded. Write tests."
-
-### Session 7 — Wire Everything Together
-"Connect all components: proxy → security check → budget check → forward → parse response → calculate cost → store in SQLite. Implement the `burnwall start` command. Test the full pipeline with mock upstream."
-
-### Session 8 — CLI Commands
-"Implement `burnwall status`, `burnwall history`, `burnwall config set/show` commands. Read from SQLite, format output as shown in SPEC.md. Write tests."
-
-### Session 9 — Config and Init
-"Implement TOML config loading, `burnwall init` auto-detection, and shell configuration. Handle ~/.burnwall/ directory creation. Write tests."
-
-### Session 10 — Polish and Release
-"Cross-compilation setup. README with screenshots. GitHub Actions CI. Release binaries for macOS/Windows/Linux. Final integration test pass."
+v0.2 is code-complete on this branch. The remaining steps are external
+(merging to `main`, tagging the release, publishing artifacts) and the
+next milestone is tracked in `internal/ROADMAP.md`.
 
 ## Bugs / Tech Debt
 

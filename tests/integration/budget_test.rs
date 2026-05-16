@@ -9,7 +9,9 @@
 use std::sync::Arc;
 use std::thread;
 
-use burnwall::budget::{check_daily, BudgetConfig, BudgetStatus, BudgetTracker};
+use burnwall::budget::{
+    check_daily, BudgetConfig, BudgetStatus, BudgetTracker, LoopConfig, LoopDetector, LoopVerdict,
+};
 use burnwall::providers::TokenUsage;
 use burnwall::storage::{RequestRecord, Storage};
 
@@ -155,8 +157,15 @@ fn sample_usage() -> TokenUsage {
 #[test]
 fn hydrate_loads_todays_total_from_storage() {
     let storage = Storage::open_in_memory().expect("storage");
-    // Insert two requests on the same date.
-    let date = "2026-05-13";
+    // Two requests at the same instant. `total_cost_for_date` matches in
+    // local time, so derive the query date the same way.
+    let when = chrono::DateTime::parse_from_rfc3339("2026-05-13T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let date = when
+        .with_timezone(&chrono::Local)
+        .format("%Y-%m-%d")
+        .to_string();
     for cost in &[0.75, 1.50] {
         let mut r = RequestRecord::successful(
             "anthropic",
@@ -165,14 +174,12 @@ fn hydrate_loads_todays_total_from_storage() {
             *cost,
             None,
         );
-        r.timestamp = chrono::DateTime::parse_from_rfc3339("2026-05-13T12:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+        r.timestamp = when;
         storage.insert_request(&r).unwrap();
     }
 
     let tracker = BudgetTracker::new(cfg(50.0, 80));
-    tracker.hydrate_for_date(&storage, date).expect("hydrate");
+    tracker.hydrate_for_date(&storage, &date).expect("hydrate");
     assert!((tracker.today_spent() - 2.25).abs() < 1e-6);
 }
 
@@ -189,16 +196,20 @@ fn hydrate_replaces_existing_counter_value() {
     // Background: counter has some accumulated value, then we re-hydrate
     // (e.g. on date rollover). Hydration must REPLACE, not ADD.
     let storage = Storage::open_in_memory().unwrap();
-    let date = "2026-05-13";
-    let mut r = RequestRecord::successful("openai", "gpt-5.4", &sample_usage(), 3.00, None);
-    r.timestamp = chrono::DateTime::parse_from_rfc3339("2026-05-13T12:00:00Z")
+    let when = chrono::DateTime::parse_from_rfc3339("2026-05-13T12:00:00Z")
         .unwrap()
         .with_timezone(&chrono::Utc);
+    let date = when
+        .with_timezone(&chrono::Local)
+        .format("%Y-%m-%d")
+        .to_string();
+    let mut r = RequestRecord::successful("openai", "gpt-5.4", &sample_usage(), 3.00, None);
+    r.timestamp = when;
     storage.insert_request(&r).unwrap();
 
     let tracker = BudgetTracker::new(cfg(50.0, 80));
     tracker.record(99.0); // pretend it had stale state
-    tracker.hydrate_for_date(&storage, date).unwrap();
+    tracker.hydrate_for_date(&storage, &date).unwrap();
     assert!((tracker.today_spent() - 3.00).abs() < 1e-6);
 }
 
@@ -230,4 +241,152 @@ fn record_is_safe_under_concurrent_writers() {
         expected,
         actual
     );
+}
+
+// =================== loop detector ===================
+
+fn loop_cfg(max_identical: u32, window: u32, max_cost: f64) -> LoopConfig {
+    LoopConfig {
+        enabled: true,
+        max_identical_requests: max_identical,
+        window_seconds: window,
+        max_cost_per_window: max_cost,
+        hash_prefix_bytes: 200,
+    }
+}
+
+#[test]
+fn loop_detector_passes_unique_requests() {
+    let det = LoopDetector::new(loop_cfg(3, 60, 1000.0));
+    let bodies = [
+        b"first body".as_slice(),
+        b"second body".as_slice(),
+        b"third body".as_slice(),
+    ];
+    for body in &bodies {
+        let h = det.hash(body);
+        assert_eq!(det.check_request(h), LoopVerdict::Ok);
+    }
+}
+
+#[test]
+fn loop_detector_blocks_on_nth_identical_request() {
+    // max_identical_requests = 3 -> the 3rd identical request triggers the block.
+    let det = LoopDetector::new(loop_cfg(3, 60, 0.0));
+    let body = b"identical body";
+    let h = det.hash(body);
+
+    assert_eq!(det.check_request(h), LoopVerdict::Ok, "1st should pass");
+    assert_eq!(det.check_request(h), LoopVerdict::Ok, "2nd should pass");
+    let v = det.check_request(h);
+    assert!(
+        matches!(v, LoopVerdict::Repeated { count: 3, .. }),
+        "3rd should block, got {:?}",
+        v
+    );
+}
+
+#[test]
+fn loop_detector_hashes_only_prefix_bytes() {
+    // Same prefix (200 bytes by default), different suffix -> same hash.
+    let mut a = vec![b'A'; 200];
+    let mut b = a.clone();
+    a.extend_from_slice(b"-different-suffix-A");
+    b.extend_from_slice(b"-different-suffix-B");
+    let det = LoopDetector::with_defaults();
+    assert_eq!(det.hash(&a), det.hash(&b));
+
+    // Different first 200 bytes -> different hash.
+    let mut c = vec![b'A'; 200];
+    let d = vec![b'B'; 200];
+    c[0] = b'X';
+    assert_ne!(det.hash(&c), det.hash(&d));
+}
+
+#[test]
+fn loop_detector_disabled_returns_ok() {
+    let det = LoopDetector::new(LoopConfig {
+        enabled: false,
+        ..loop_cfg(1, 60, 1.0) // would block immediately if enabled
+    });
+    let h = det.hash(b"any");
+    assert_eq!(det.check_request(h), LoopVerdict::Ok);
+    assert_eq!(det.check_request(h), LoopVerdict::Ok);
+}
+
+#[test]
+fn loop_detector_independent_hashes_dont_cross_count() {
+    let det = LoopDetector::new(loop_cfg(2, 60, 0.0));
+    let h1 = det.hash(b"body one");
+    let h2 = det.hash(b"body two");
+
+    assert_eq!(det.check_request(h1), LoopVerdict::Ok);
+    assert_eq!(det.check_request(h2), LoopVerdict::Ok);
+    // Each hash now has count=1, neither should block.
+    let v = det.check_request(h2);
+    assert!(matches!(v, LoopVerdict::Repeated { count: 2, .. }));
+}
+
+#[test]
+fn cost_spiral_detector_trips_above_cap() {
+    let det = LoopDetector::new(loop_cfg(1000, 60, 1.0)); // identical-loop disabled effectively
+    assert_eq!(det.record_cost(0.40), LoopVerdict::Ok);
+    assert_eq!(det.record_cost(0.40), LoopVerdict::Ok);
+    let v = det.record_cost(0.40); // running total 1.20 > 1.0 cap
+    assert!(matches!(v, LoopVerdict::CostSpiral { .. }));
+}
+
+#[test]
+fn cost_spiral_disabled_when_cap_zero() {
+    let det = LoopDetector::new(loop_cfg(1000, 60, 0.0));
+    for _ in 0..100 {
+        assert_eq!(det.record_cost(99.0), LoopVerdict::Ok);
+    }
+}
+
+#[test]
+fn current_window_cost_excludes_expired_entries() {
+    // 1-second window so entries expire fast.
+    let det = LoopDetector::new(loop_cfg(1000, 1, 1000.0));
+    det.record_cost(0.50);
+    assert!((det.current_window_cost() - 0.50).abs() < 1e-9);
+    // Wait past the window -- expired entry must be evicted on next read-trigger
+    // (record_cost performs the cleanup pass).
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let _ = det.record_cost(0.10);
+    // Only the new 0.10 should be in the window now.
+    assert!(
+        (det.current_window_cost() - 0.10).abs() < 1e-9,
+        "current_window_cost = {}",
+        det.current_window_cost()
+    );
+}
+
+#[test]
+fn loop_detector_safe_under_concurrent_writers() {
+    // 8 threads pounding the same hash. Set max_identical=1 so every call
+    // returns Repeated{count}, letting us verify no increments are lost.
+    let det = Arc::new(LoopDetector::new(loop_cfg(1, 60, 0.0)));
+    let h = det.hash(b"shared body");
+    let threads = 8;
+    let per_thread = 1000;
+    let mut handles = Vec::with_capacity(threads);
+    for _ in 0..threads {
+        let d = det.clone();
+        handles.push(std::thread::spawn(move || {
+            for _ in 0..per_thread {
+                let _ = d.check_request(h);
+            }
+        }));
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+    let final_verdict = det.check_request(h);
+    let final_count = match final_verdict {
+        LoopVerdict::Repeated { count, .. } => count,
+        v => panic!("expected Repeated, got {:?}", v),
+    };
+    let expected = (threads * per_thread + 1) as u32;
+    assert_eq!(final_count, expected, "lost increments under contention");
 }

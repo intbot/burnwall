@@ -10,6 +10,7 @@ use clap::Args;
 
 use crate::budget::BudgetTracker;
 use crate::config;
+use crate::logscrape::{self, ScrapeBreakdown};
 use crate::pricing;
 use crate::providers::TokenUsage;
 use crate::storage::{ModelBreakdown, Storage};
@@ -26,16 +27,29 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
     let config = config::load_or_default(&cfg_path).context("loading config")?;
 
     let storage = Arc::new(Storage::open_default()?);
-    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    // "Today" is the user's local calendar day — storage queries match
+    // timestamps in local time (see `storage::repository`).
+    let now_local = chrono::Local::now();
+    let today = now_local.format("%Y-%m-%d").to_string();
 
     let breakdown = storage.breakdown_for_date(&today)?;
     let total_requests = storage.request_count_for_date(&today)?;
     let blocked_count = storage.blocked_count_for_date(&today)?;
     let security_events = storage.security_event_count_for_date(&today)?;
     let today_cost = storage.total_cost_for_date(&today)?;
+    let pricing_age = pricing::pricing_age_days(now_local.date_naive());
 
     let cache_savings_total: f64 = breakdown.iter().map(model_cache_savings).sum();
     let cost_without_cache_total: f64 = breakdown.iter().map(model_cost_without_cache).sum();
+
+    // Tier-2: scrape local tool session logs for cross-tool spend that did
+    // not go through the proxy. `None` when disabled; `Some([])` when
+    // enabled but no Claude Code / Codex activity today.
+    let log_scrape = if config.log_scrape.enabled {
+        Some(logscrape::scrape_for_date(&today))
+    } else {
+        None
+    };
 
     let budget = BudgetTracker::new((&config.budget).into());
     budget.hydrate_for_date(&storage, &today)?;
@@ -53,6 +67,8 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
             &budget,
             cache_savings_total,
             cost_without_cache_total,
+            pricing_age,
+            log_scrape.as_deref(),
         )?;
     } else {
         write_table(
@@ -66,6 +82,8 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
             &budget,
             cache_savings_total,
             cost_without_cache_total,
+            pricing_age,
+            log_scrape.as_deref(),
         )?;
     }
     Ok(())
@@ -83,8 +101,10 @@ fn write_table(
     budget: &BudgetTracker,
     cache_savings: f64,
     cost_without_cache: f64,
+    pricing_age_days: Option<i64>,
+    log_scrape: Option<&[ScrapeBreakdown]>,
 ) -> std::io::Result<()> {
-    writeln!(w, "📊 Today (UTC {})", date)?;
+    writeln!(w, "📊 Today ({})", date)?;
     writeln!(
         w,
         "   Total: ${:.2} across {} request{}",
@@ -116,6 +136,41 @@ fn write_table(
         }
     }
     writeln!(w)?;
+
+    if let Some(rows) = log_scrape {
+        writeln!(w, "   Tracked via log files (not proxied)")?;
+        if rows.is_empty() {
+            writeln!(w, "   (no Claude Code or Codex activity today)")?;
+        } else {
+            writeln!(
+                w,
+                "   {:<32}  {:>8}  {:>8}  {:>9}",
+                "Tool / Model", "Cost", "Turns", "Cache Hit"
+            )?;
+            writeln!(w, "   {}", "─".repeat(63))?;
+            for row in rows {
+                let label = format!("{}/{}", row.tool, row.model);
+                writeln!(
+                    w,
+                    "   {:<32}  ${:>7.2}  {:>8}  {:>8.0}%",
+                    truncate(&label, 32),
+                    row.cost,
+                    row.turns,
+                    row.cache_hit_rate() * 100.0
+                )?;
+            }
+            let log_subtotal = logscrape::subtotal(rows);
+            writeln!(w, "   {}", "─".repeat(63))?;
+            writeln!(w, "   Log-file subtotal: ${:.2}", log_subtotal)?;
+            writeln!(w)?;
+            writeln!(
+                w,
+                "   Combined today (proxied + log files): ${:.2}",
+                today_cost + log_subtotal
+            )?;
+        }
+        writeln!(w)?;
+    }
 
     let bcfg = budget.config();
     if bcfg.daily_usd > 0.0 {
@@ -150,6 +205,21 @@ fn write_table(
             cost_without_cache
         )?;
     }
+    if let Some(age) = pricing_age_days {
+        if age > 30 {
+            writeln!(w)?;
+            writeln!(
+                w,
+                "   ⚠️  Pricing data is {} days old (>30). Update Burnwall or override via ~/.burnwall/pricing.toml.",
+                age
+            )?;
+        }
+    }
+    writeln!(w)?;
+    writeln!(
+        w,
+        "   ℹ️  Scope: Burnwall guards LLM API traffic. MCP tool calls flow through unfiltered."
+    )?;
     Ok(())
 }
 
@@ -165,9 +235,12 @@ fn write_json(
     budget: &BudgetTracker,
     cache_savings: f64,
     cost_without_cache: f64,
+    pricing_age_days: Option<i64>,
+    log_scrape: Option<&[ScrapeBreakdown]>,
 ) -> std::io::Result<()> {
     use serde_json::json;
     let bcfg = budget.config();
+    let log_subtotal = log_scrape.map(logscrape::subtotal).unwrap_or(0.0);
     let value = json!({
         "date": date,
         "total_cost_usd": today_cost,
@@ -176,6 +249,8 @@ fn write_json(
         "security_events": security_events,
         "cache_savings_usd": cache_savings,
         "cost_without_cache_usd": cost_without_cache,
+        "pricing_age_days": pricing_age_days,
+        "pricing_stale": pricing_age_days.map(|d| d > 30).unwrap_or(false),
         "budget": {
             "daily_limit_usd": bcfg.daily_usd,
             "spent_today_usd": today_cost,
@@ -191,6 +266,23 @@ fn write_json(
             "output_tokens": r.output_tokens,
             "cache_hit_rate": r.cache_hit_rate(),
         })).collect::<Vec<_>>(),
+        // `null` when log scraping is disabled; otherwise the per-tool/model
+        // rows plus their subtotal. Read-only — not part of the proxy DB.
+        "log_scrape": log_scrape.map(|rows| json!({
+            "rows": rows.iter().map(|r| json!({
+                "tool": r.tool,
+                "model": r.model,
+                "cost_usd": r.cost,
+                "turns": r.turns,
+                "input_tokens": r.usage.input_tokens,
+                "cache_creation_tokens": r.usage.cache_creation_tokens,
+                "cache_read_tokens": r.usage.cache_read_tokens,
+                "output_tokens": r.usage.output_tokens,
+                "cache_hit_rate": r.cache_hit_rate(),
+            })).collect::<Vec<_>>(),
+            "subtotal_usd": logscrape::subtotal(rows),
+        })),
+        "combined_total_usd": today_cost + log_subtotal,
     });
     writeln!(w, "{}", serde_json::to_string_pretty(&value).unwrap())?;
     Ok(())

@@ -17,7 +17,7 @@
 Thumbs.db
 desktop.ini
 
-# Local Claude Code state (per-machine permissions, etc.)
+# Local Claude Code state (per-machine permissions, skills, etc.)
 .claude/
 
 # Local-only files (not part of the published repo)

@@ -1,8 +1,10 @@
 # 🛡️ Burnwall
 
-**The AI agent firewall that also saves you money.**
+**Track what your AI coding agent costs. Block what it shouldn't touch.**
 
-Burnwall is a local proxy that sits between your AI coding tools (Claude Code, Codex CLI, Aider, OpenCode, Cline) and their API providers. It protects your system, tracks real costs, and stops runaway bills — all in a single binary with zero telemetry.
+Burnwall is a local proxy for AI coding tools — Claude Code, Codex CLI, Aider, OpenCode, Cline. It combines cache-aware cost accounting, path-and-command security checks on every tool call, cross-tool spend aggregation, and zero telemetry — without sending your prompts to a SaaS dashboard.
+
+If you've ever woken up to a four-figure API bill from an agent loop, or wondered whether your agent has been quietly `cat`-ing `~/.ssh/id_rsa` into the context window: Burnwall is the seatbelt.
 
 ```
 $ burnwall start
@@ -24,7 +26,7 @@ AI providers have complex pricing with cache tiers, write premiums, and stealth 
 ### 🛑 Budget Enforcement
 Set a daily limit. Burnwall blocks API calls when you hit it. No more surprise $1,400 bills.
 
-### 🔄 Loop Detection *(v0.2)*
+### 🔄 Loop Detection
 Detect and kill runaway agents that repeat the same request, burning tokens at 20+ requests per minute.
 
 ## Quick Start
@@ -57,7 +59,7 @@ release workflow publishes per-platform archives):
 
 ```bash
 # From source (requires Rust toolchain ≥ 1.80):
-git clone https://github.com/[OWNER]/burnwall && cd burnwall
+git clone https://github.com/intbot/burnwall && cd burnwall
 cargo build --release
 ./target/release/burnwall --help
 
@@ -86,6 +88,12 @@ Every API call flows through Burnwall:
 ```
 
 Responses are **never modified** — Burnwall reads them, logs the cost, and passes them through unchanged.
+
+## Scope: What Burnwall Guards
+
+Burnwall sits on the **LLM API path** — the HTTP traffic between your AI tool and Anthropic/OpenAI. Security scanning, budget enforcement, and cost tracking all operate on that traffic.
+
+It does **not** intercept **MCP** (Model Context Protocol) traffic. When your agent calls an MCP server's tools, that traffic flows through your AI tool directly — Burnwall never sees it, so it can't scan or block it. MCP-layer protection is a separate concern; dedicated MCP-firewall tools exist and run cleanly alongside Burnwall.
 
 ## Supported Tools
 

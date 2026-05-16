@@ -21,6 +21,11 @@
 //! not the response, so we can't reliably tell from the response alone.
 //! See `docs/SPEC.md` Pricing Notes for the trade-off.
 
+/// Date the embedded rate card was last edited, `YYYY-MM-DD`. Bump
+/// whenever you change [`KNOWN_MODELS`]. The status command warns the user
+/// if this date is more than 30 days behind today.
+pub const PRICING_LAST_UPDATED: &str = "2026-05-13";
+
 /// USD per million tokens, broken out by token type.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ModelPricing {

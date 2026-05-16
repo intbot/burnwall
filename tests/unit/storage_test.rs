@@ -4,13 +4,36 @@
 //! parallel-safe — no `~/.burnwall/` pollution, no shared state between
 //! tests.
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Duration, Local, TimeZone, Utc};
 
 use burnwall::providers::TokenUsage;
 use burnwall::storage::{RequestRecord, SecurityEvent, Storage};
 
 fn ts(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(y, m, d, h, mi, s).unwrap()
+}
+
+/// A timestamp at local noon, `offset_days` from today, returned as the
+/// stored (UTC) value. Date queries match in local time, so anchoring at
+/// noon — maximally far from local midnight — keeps the calendar date
+/// stable no matter what timezone the test runs in.
+fn local_noon(offset_days: i64) -> DateTime<Utc> {
+    (Local::now() + Duration::days(offset_days))
+        .date_naive()
+        .and_hms_opt(12, 0, 0)
+        .unwrap()
+        .and_local_timezone(Local)
+        .single()
+        .unwrap()
+        .with_timezone(&Utc)
+}
+
+/// The local `YYYY-MM-DD` date string `offset_days` from today.
+fn local_date(offset_days: i64) -> String {
+    (Local::now() + Duration::days(offset_days))
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string()
 }
 
 fn sample_usage() -> TokenUsage {
@@ -128,12 +151,12 @@ fn get_request_returns_none_for_missing_id() {
 fn total_cost_for_date_sums_only_that_date() {
     let storage = Storage::open_in_memory().unwrap();
 
-    // Two on 2026-05-13, one on 2026-05-12, one on 2026-05-14
+    // Two records today, one two days back, one two days ahead.
     for (when, cost) in &[
-        (ts(2026, 5, 13, 9, 0, 0), 0.10),
-        (ts(2026, 5, 13, 18, 30, 0), 0.25),
-        (ts(2026, 5, 12, 23, 59, 0), 0.99),
-        (ts(2026, 5, 14, 0, 0, 1), 0.50),
+        (local_noon(0), 0.10),
+        (local_noon(0) + Duration::hours(1), 0.25),
+        (local_noon(-2), 0.99),
+        (local_noon(2), 0.50),
     ] {
         let mut r = RequestRecord::successful(
             "anthropic",
@@ -146,7 +169,7 @@ fn total_cost_for_date_sums_only_that_date() {
         storage.insert_request(&r).unwrap();
     }
 
-    let day = storage.total_cost_for_date("2026-05-13").unwrap();
+    let day = storage.total_cost_for_date(&local_date(0)).unwrap();
     assert!((day - 0.35).abs() < 1e-9, "got {}", day);
 }
 
@@ -161,34 +184,32 @@ fn requests_for_date_returns_oldest_first() {
     let storage = Storage::open_in_memory().unwrap();
 
     // Insert in non-chronological order; query must order ASC by timestamp.
+    // All three land on today's local date (noon .. noon+3h).
     for when in &[
-        ts(2026, 5, 13, 18, 0, 0),
-        ts(2026, 5, 13, 9, 0, 0),
-        ts(2026, 5, 13, 14, 0, 0),
+        local_noon(0) + Duration::hours(3),
+        local_noon(0),
+        local_noon(0) + Duration::hours(1),
     ] {
         let mut r = RequestRecord::successful("openai", "gpt-5.4", &sample_usage(), 0.01, None);
         r.timestamp = *when;
         storage.insert_request(&r).unwrap();
     }
 
-    let rows = storage.requests_for_date("2026-05-13").unwrap();
+    let rows = storage.requests_for_date(&local_date(0)).unwrap();
     assert_eq!(rows.len(), 3);
-    assert_eq!(rows[0].timestamp, ts(2026, 5, 13, 9, 0, 0));
-    assert_eq!(rows[1].timestamp, ts(2026, 5, 13, 14, 0, 0));
-    assert_eq!(rows[2].timestamp, ts(2026, 5, 13, 18, 0, 0));
+    assert_eq!(rows[0].timestamp, local_noon(0));
+    assert_eq!(rows[1].timestamp, local_noon(0) + Duration::hours(1));
+    assert_eq!(rows[2].timestamp, local_noon(0) + Duration::hours(3));
 }
 
 #[test]
 fn daily_totals_groups_by_date_and_aggregates() {
     let storage = Storage::open_in_memory().unwrap();
 
-    // Use timestamps anchored near "now" so they fall inside the
-    // `DATE('now', '-N days')` window the query computes.
-    let now = Utc::now();
-    let today = now.format("%Y-%m-%d").to_string();
-    let yesterday = (now - chrono::Duration::days(1))
-        .format("%Y-%m-%d")
-        .to_string();
+    // Anchor on local noon so the rows fall on stable local dates inside
+    // the `DATE('now', 'localtime', '-N days')` window the query computes.
+    let today = local_date(0);
+    let yesterday = local_date(-1);
 
     // Today: two ok + one blocked
     for (i, blocked) in [false, false, true].iter().enumerate() {
@@ -197,13 +218,13 @@ fn daily_totals_groups_by_date_and_aggregates() {
         } else {
             RequestRecord::successful("anthropic", "claude-haiku-4-5", &sample_usage(), 0.05, None)
         };
-        r.timestamp = now + chrono::Duration::seconds(i as i64);
+        r.timestamp = local_noon(0) + Duration::seconds(i as i64);
         storage.insert_request(&r).unwrap();
     }
     // Yesterday: one ok
     {
         let mut r = RequestRecord::successful("openai", "gpt-5.4", &sample_usage(), 0.20, None);
-        r.timestamp = now - chrono::Duration::days(1);
+        r.timestamp = local_noon(-1);
         storage.insert_request(&r).unwrap();
     }
 
@@ -227,13 +248,13 @@ fn daily_totals_groups_by_date_and_aggregates() {
 fn security_event_roundtrip_with_provider_context() {
     let storage = Storage::open_in_memory().unwrap();
 
-    let event = SecurityEvent::new("path_blocked", "~/.ssh/id_rsa")
+    let mut event = SecurityEvent::new("path_blocked", "~/.ssh/id_rsa")
         .with_provider("anthropic", "claude-sonnet-4-6");
+    event.timestamp = local_noon(0);
 
     let id = storage.insert_security_event(&event).unwrap();
 
-    let date = event.timestamp.format("%Y-%m-%d").to_string();
-    let events = storage.security_events_for_date(&date).unwrap();
+    let events = storage.security_events_for_date(&local_date(0)).unwrap();
     let read = events
         .iter()
         .find(|e| e.id == Some(id))
@@ -250,14 +271,14 @@ fn security_events_for_date_excludes_other_dates() {
     let storage = Storage::open_in_memory().unwrap();
 
     let mut e1 = SecurityEvent::new("path_blocked", "/etc/shadow");
-    e1.timestamp = ts(2026, 5, 13, 10, 0, 0);
+    e1.timestamp = local_noon(-1);
     let mut e2 = SecurityEvent::new("command_blocked", "rm -rf /");
-    e2.timestamp = ts(2026, 5, 14, 10, 0, 0);
+    e2.timestamp = local_noon(0);
 
     storage.insert_security_event(&e1).unwrap();
     storage.insert_security_event(&e2).unwrap();
 
-    let day = storage.security_events_for_date("2026-05-13").unwrap();
+    let day = storage.security_events_for_date(&local_date(-1)).unwrap();
     assert_eq!(day.len(), 1);
     assert_eq!(day[0].event_type, "path_blocked");
 }

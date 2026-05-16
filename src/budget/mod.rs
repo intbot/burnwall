@@ -26,6 +26,7 @@ pub mod limits;
 pub mod loop_detector;
 
 pub use limits::{check_daily, BudgetConfig, BudgetStatus};
+pub use loop_detector::{LoopConfig, LoopDetector, LoopVerdict};
 
 use crate::storage::Storage;
 

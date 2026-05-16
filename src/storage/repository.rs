@@ -2,8 +2,11 @@
 //!
 //! All queries are parameterized — no string interpolation of user data.
 //! The `chrono` feature on rusqlite handles `DateTime<Utc>` ↔ TEXT in RFC
-//! 3339 form; `DATE(timestamp)` works against this format since SQLite's
-//! date functions parse ISO 8601.
+//! 3339 form. Timestamps are *stored* in UTC, but every date query uses
+//! `DATE(timestamp, 'localtime')` so that "a date" means the user's local
+//! calendar day — `status` and `history` should not show a UTC-shifted
+//! "today". Callers therefore pass local `YYYY-MM-DD` strings (the CLI
+//! derives them from `chrono::Local`).
 
 use chrono::{DateTime, Utc};
 use rusqlite::{params, OptionalExtension};
@@ -71,14 +74,14 @@ impl Storage {
         })
     }
 
-    /// Sum of `cost_usd` for the given UTC date (`YYYY-MM-DD`). Powers the
-    /// budget check: the caller decides whether "today" is UTC or local and
-    /// formats the date accordingly.
+    /// Sum of `cost_usd` for the given local date (`YYYY-MM-DD`). Powers the
+    /// budget check; `date` is matched against each row's timestamp in local
+    /// time, so callers pass a `chrono::Local`-derived date.
     pub fn total_cost_for_date(&self, date: &str) -> Result<f64> {
         self.with_conn(|conn| {
             let cost: f64 = conn.query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM requests
-                 WHERE DATE(timestamp) = ?1",
+                 WHERE DATE(timestamp, 'localtime') = ?1",
                 params![date],
                 |row| row.get(0),
             )?;
@@ -86,7 +89,7 @@ impl Storage {
         })
     }
 
-    /// All requests within the given UTC date, oldest first.
+    /// All requests within the given local date, oldest first.
     pub fn requests_for_date(&self, date: &str) -> Result<Vec<RequestRecord>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
@@ -94,7 +97,7 @@ impl Storage {
                         input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
                         cost_usd, blocked, block_reason, session_id, request_hash
                  FROM requests
-                 WHERE DATE(timestamp) = ?1
+                 WHERE DATE(timestamp, 'localtime') = ?1
                  ORDER BY timestamp ASC",
             )?;
             let rows: rusqlite::Result<Vec<RequestRecord>> =
@@ -103,25 +106,25 @@ impl Storage {
         })
     }
 
-    /// Per-day totals covering the last `days` UTC days (newest first).
+    /// Per-day totals covering the last `days` local days (newest first).
     /// Empty days are omitted. Drives the `burnwall history` table.
     pub fn daily_totals(&self, days: i64) -> Result<Vec<DailyTotal>> {
         self.with_conn(|conn| {
-            // SQLite's `DATE('now', '-N days')` gives the date N days ago.
-            // Bind `-N days` as a single parameter rather than concatenating.
+            // `DATE('now', 'localtime', '-N days')` gives the local date N
+            // days ago. Bind `-N days` as a parameter, not concatenated.
             let offset = format!("-{} days", days);
             let mut stmt = conn.prepare(
                 "SELECT
-                    DATE(timestamp)                            AS date,
+                    DATE(timestamp, 'localtime')                            AS date,
                     COALESCE(SUM(cost_usd), 0.0)               AS total_cost,
                     COUNT(*)                                   AS total_requests,
                     COALESCE(SUM(blocked), 0)                  AS total_blocked,
                     COALESCE(SUM(cache_read_tokens), 0)        AS total_cache_read,
                     COALESCE(SUM(input_tokens + cache_creation_tokens + cache_read_tokens), 0) AS total_prompt
                  FROM requests
-                 WHERE DATE(timestamp) >= DATE('now', ?1)
-                 GROUP BY DATE(timestamp)
-                 ORDER BY DATE(timestamp) DESC",
+                 WHERE DATE(timestamp, 'localtime') >= DATE('now', 'localtime', ?1)
+                 GROUP BY DATE(timestamp, 'localtime')
+                 ORDER BY DATE(timestamp, 'localtime') DESC",
             )?;
             let rows: rusqlite::Result<Vec<DailyTotal>> = stmt
                 .query_map(params![offset], |row| {
@@ -161,7 +164,7 @@ impl Storage {
                     COALESCE(SUM(cache_read_tokens), 0)             AS cache_read_tokens,
                     COALESCE(SUM(output_tokens), 0)                 AS output_tokens
                  FROM requests
-                 WHERE DATE(timestamp) = ?1 AND blocked = 0
+                 WHERE DATE(timestamp, 'localtime') = ?1 AND blocked = 0
                  GROUP BY provider, model
                  ORDER BY cost DESC",
             )?;
@@ -187,7 +190,7 @@ impl Storage {
     pub fn request_count_for_date(&self, date: &str) -> Result<i64> {
         self.with_conn(|conn| {
             let count: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM requests WHERE DATE(timestamp) = ?1",
+                "SELECT COUNT(*) FROM requests WHERE DATE(timestamp, 'localtime') = ?1",
                 params![date],
                 |row| row.get(0),
             )?;
@@ -200,7 +203,7 @@ impl Storage {
         self.with_conn(|conn| {
             let count: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM requests
-                 WHERE DATE(timestamp) = ?1 AND blocked = 1",
+                 WHERE DATE(timestamp, 'localtime') = ?1 AND blocked = 1",
                 params![date],
                 |row| row.get(0),
             )?;
@@ -212,7 +215,7 @@ impl Storage {
     pub fn security_event_count_for_date(&self, date: &str) -> Result<i64> {
         self.with_conn(|conn| {
             let count: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM security_events WHERE DATE(timestamp) = ?1",
+                "SELECT COUNT(*) FROM security_events WHERE DATE(timestamp, 'localtime') = ?1",
                 params![date],
                 |row| row.get(0),
             )?;
@@ -220,13 +223,40 @@ impl Storage {
         })
     }
 
-    /// Count of security events for a UTC date — used by `burnwall status`.
+    /// All security events from the last `days` local days, newest first.
+    /// `days = 1` = today only.
+    pub fn security_events_since_days(&self, days: i64) -> Result<Vec<SecurityEvent>> {
+        self.with_conn(|conn| {
+            let offset = format!("-{} days", days - 1);
+            let mut stmt = conn.prepare(
+                "SELECT id, timestamp, event_type, details, provider, model
+                 FROM security_events
+                 WHERE DATE(timestamp, 'localtime') >= DATE('now', 'localtime', ?1)
+                 ORDER BY timestamp DESC",
+            )?;
+            let rows: rusqlite::Result<Vec<SecurityEvent>> = stmt
+                .query_map(params![offset], |row| {
+                    Ok(SecurityEvent {
+                        id: Some(row.get(0)?),
+                        timestamp: row.get::<_, DateTime<Utc>>(1)?,
+                        event_type: row.get(2)?,
+                        details: row.get(3)?,
+                        provider: row.get(4)?,
+                        model: row.get(5)?,
+                    })
+                })?
+                .collect();
+            Ok(rows?)
+        })
+    }
+
+    /// Security events for a local date — used by `burnwall status`.
     pub fn security_events_for_date(&self, date: &str) -> Result<Vec<SecurityEvent>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, timestamp, event_type, details, provider, model
                  FROM security_events
-                 WHERE DATE(timestamp) = ?1
+                 WHERE DATE(timestamp, 'localtime') = ?1
                  ORDER BY timestamp ASC",
             )?;
             let rows: rusqlite::Result<Vec<SecurityEvent>> = stmt

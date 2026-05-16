@@ -156,16 +156,10 @@ fn init_creates_data_directory() {
     assert!(path.exists(), "data dir should be created by init");
 }
 
-#[test]
-fn stop_command_prints_v0_1_message() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().to_path_buf();
-    burnwall(&path)
-        .arg("stop")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("foreground"));
-}
+// `burnwall stop` behavior moved out of init_test in v0.2 — the daemon
+// integration suite (`tests/integration/daemon_test.rs`) owns the full
+// stop lifecycle now, including the "not running" and "stale PID file"
+// cases that used to live here as a v0.1 stub assertion.
 
 // ────────────────────────── config-driven start ──────────────────────────
 // We can't easily exercise `burnwall start` end-to-end here (it binds a

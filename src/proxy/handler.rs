@@ -11,7 +11,7 @@ use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 use tracing::warn;
 
-use crate::budget::BudgetStatus;
+use crate::budget::{BudgetStatus, LoopVerdict};
 use crate::storage::{RequestRecord, SecurityEvent};
 
 use super::{forwarding, streaming, AppState, ProxyBody};
@@ -78,17 +78,27 @@ pub async fn handle(
     if let Some(violation) = state.security.scan(&body_bytes) {
         warn!("🛡️ BLOCKED {}: {}", provider, violation.message());
 
-        let event = SecurityEvent::new(violation.kind.event_type(), &violation.matched)
+        // When log_redact_details is on, storage rows strip the matched-rule
+        // detail and keep only the event-type label. The 403 below stays
+        // informative -- legitimate users still see what was blocked.
+        let redact = state.security.rules().log_redact_details;
+        let stored_details = if redact {
+            "<redacted>".to_string()
+        } else {
+            violation.matched.clone()
+        };
+        let stored_reason = if redact {
+            violation.kind.event_type().to_string()
+        } else {
+            format!("{}: {}", violation.kind.event_type(), violation.matched)
+        };
+
+        let event = SecurityEvent::new(violation.kind.event_type(), &stored_details)
             .with_provider(provider, &model);
         if let Err(e) = state.storage.insert_security_event(&event) {
             tracing::error!("security_event insert failed: {}", e);
         }
-        let record = RequestRecord::blocked(
-            provider,
-            &model,
-            &format!("{}: {}", violation.kind.event_type(), violation.matched),
-            None,
-        );
+        let record = RequestRecord::blocked(provider, &model, &stored_reason, None);
         if let Err(e) = state.storage.insert_request(&record) {
             tracing::error!("blocked-request insert failed: {}", e);
         }
@@ -129,6 +139,24 @@ pub async fn handle(
         BudgetStatus::Ok => {}
     }
 
+    // ─── loop detection ───
+    let request_hash = state.loop_detector.hash(&body_bytes);
+    let request_hash_hex = format!("{:016x}", request_hash);
+    let verdict = state.loop_detector.check_request(request_hash);
+    if verdict.is_blocking() {
+        warn!("🔄 LOOP BLOCKED {}: {}", provider, verdict.message());
+        let mut record = RequestRecord::blocked(provider, &model, &verdict.message(), None);
+        record.request_hash = Some(request_hash_hex.clone());
+        if let Err(e) = state.storage.insert_request(&record) {
+            tracing::error!("blocked-request insert failed: {}", e);
+        }
+        return Ok(error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "loop_detected",
+            &verdict.message(),
+        ));
+    }
+
     // ─── forward + tee-parse ───
     match forwarding::forward(
         parts.method,
@@ -137,6 +165,7 @@ pub async fn handle(
         body_bytes,
         &state,
         provider,
+        request_hash_hex,
     )
     .await
     {

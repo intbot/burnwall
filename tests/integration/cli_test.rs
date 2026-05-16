@@ -50,7 +50,7 @@ fn status_table_shows_seeded_data() {
         .arg("status")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Today (UTC"))
+        .stdout(predicate::str::contains("Today ("))
         .stdout(predicate::str::contains("anthropic/claude-sonnet-4-6"))
         .stdout(predicate::str::contains("$0.01"))
         .stdout(predicate::str::contains("Security: 1 blocked attempt"));
@@ -138,6 +138,24 @@ fn config_show_prints_default_when_no_file() {
 }
 
 #[test]
+fn config_show_json_emits_valid_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+
+    let output = burnwall(&path)
+        .args(["config", "show", "--json"])
+        .output()
+        .expect("run");
+    assert!(output.status.success());
+    let v: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("config show --json must emit valid JSON");
+    assert_eq!(v["proxy"]["port"], 4100);
+    assert_eq!(v["budget"]["daily"], 50.0);
+    assert!(v["security"]["enabled"].as_bool().unwrap());
+}
+
+#[test]
 fn config_set_writes_to_file_and_persists() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_path_buf();
@@ -171,6 +189,121 @@ fn config_set_rejects_unknown_key() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("unknown config key"));
+}
+
+// ============================ completions ============================
+
+#[test]
+fn completions_bash_emits_a_compinit_script() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    burnwall(&path)
+        .args(["completions", "bash"])
+        .assert()
+        .success()
+        // bash completion scripts always declare _<binary>() and call complete
+        .stdout(predicate::str::contains("_burnwall()"))
+        .stdout(predicate::str::contains("complete -F _burnwall"));
+}
+
+#[test]
+fn completions_zsh_emits_compdef_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    burnwall(&path)
+        .args(["completions", "zsh"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("#compdef burnwall"));
+}
+
+#[test]
+fn completions_powershell_emits_argument_completer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    burnwall(&path)
+        .args(["completions", "powershell"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Register-ArgumentCompleter"));
+}
+
+#[test]
+fn completions_rejects_unknown_shell() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    burnwall(&path)
+        .args(["completions", "csh"])
+        .assert()
+        .failure();
+}
+
+// =============================== security ===============================
+
+#[test]
+fn security_command_lists_seeded_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    seed_storage(&path);
+
+    burnwall(&path)
+        .arg("security")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Security events"))
+        .stdout(predicate::str::contains("path_blocked"))
+        .stdout(predicate::str::contains("anthropic/claude-sonnet-4-6"))
+        .stdout(predicate::str::contains("~/.ssh/id_rsa"))
+        .stdout(predicate::str::contains("Total: 1 event"));
+}
+
+#[test]
+fn security_command_json_emits_array() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    seed_storage(&path);
+
+    let output = burnwall(&path)
+        .args(["security", "--json"])
+        .output()
+        .expect("run");
+    assert!(output.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(v["count"], 1);
+    assert_eq!(v["events"][0]["event_type"], "path_blocked");
+    assert_eq!(v["events"][0]["details"], "~/.ssh/id_rsa");
+}
+
+#[test]
+fn security_command_with_empty_db_says_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    burnwall(&path)
+        .arg("security")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("(none)"));
+}
+
+#[test]
+fn security_command_filters_by_event_type() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    seed_storage(&path);
+
+    // The seeded event is path_blocked. Filtering for command_blocked should hide it.
+    burnwall(&path)
+        .args(["security", "--event-type", "command_blocked"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("(none)"));
+
+    burnwall(&path)
+        .args(["security", "--event-type", "path_blocked"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Total: 1 event"));
 }
 
 #[test]

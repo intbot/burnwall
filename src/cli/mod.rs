@@ -2,9 +2,12 @@
 
 use clap::{Parser, Subcommand};
 
+pub mod completions;
 pub mod config_cmd;
+pub mod daemon;
 pub mod history;
 pub mod init;
+pub mod security;
 pub mod start;
 pub mod status;
 pub mod stop;
@@ -24,7 +27,7 @@ pub struct Cli {
 pub enum Command {
     /// Start the proxy server.
     Start(start::StartArgs),
-    /// Stop the proxy daemon (v0.1: foreground only).
+    /// Stop the running Burnwall proxy.
     Stop(stop::StopArgs),
     /// Show today's spend summary.
     Status(status::StatusArgs),
@@ -34,6 +37,10 @@ pub enum Command {
     Config(config_cmd::ConfigArgs),
     /// Detect AI tools and print/apply env-var setup.
     Init(init::InitArgs),
+    /// Inspect security events (blocked attempts).
+    Security(security::SecurityArgs),
+    /// Print a shell-completion script to stdout.
+    Completions(completions::CompletionsArgs),
 }
 
 impl Cli {
@@ -45,6 +52,8 @@ impl Cli {
             Command::History(args) => history::run_cmd(args),
             Command::Config(args) => config_cmd::run_cmd(args),
             Command::Init(args) => init::run_cmd(args),
+            Command::Security(args) => security::run_cmd(args),
+            Command::Completions(args) => completions::run_cmd(args),
         }
     }
 }

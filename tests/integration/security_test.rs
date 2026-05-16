@@ -230,3 +230,59 @@ fn violation_message_is_human_readable() {
     assert!(msg.contains("denied path"));
     assert!(msg.contains("~/.ssh"));
 }
+
+// ──────────────── allow_paths exceptions (project profiles) ────────────────
+
+#[test]
+fn allow_path_exempts_matching_path_from_deny() {
+    // `~/.aws` is a default deny, but the project profile allows it back.
+    let rules = Ruleset {
+        allow_paths: vec!["~/.aws".to_string()],
+        ..Ruleset::default()
+    };
+    let engine = SecurityEngine::new(rules);
+    let body = br#"{"x": "cat ~/.aws/credentials"}"#;
+    assert!(engine.scan(body).is_none());
+}
+
+#[test]
+fn allow_path_does_not_exempt_unrelated_deny() {
+    // Allowing `./src` must not green-light an unrelated denied path.
+    let rules = Ruleset {
+        allow_paths: vec!["./src".to_string()],
+        ..Ruleset::default()
+    };
+    let engine = SecurityEngine::new(rules);
+    let body = br#"{"x": "cat ~/.aws/credentials"}"#;
+    let v = engine.scan(body).expect("violation");
+    assert_eq!(v.kind, ViolationKind::Path);
+    assert_eq!(v.matched, "~/.aws");
+}
+
+#[test]
+fn allow_path_exempts_path_but_not_command() {
+    // The leaf matches an allow path, so the path-deny is skipped — but the
+    // denied command in the same string still blocks.
+    let rules = Ruleset {
+        allow_paths: vec!["~/.aws".to_string()],
+        ..Ruleset::default()
+    };
+    let engine = SecurityEngine::new(rules);
+    let body = br#"{"x": "cat ~/.aws/creds && rm -rf /"}"#;
+    let v = engine.scan(body).expect("violation");
+    assert_eq!(v.kind, ViolationKind::Command);
+}
+
+#[test]
+fn allow_path_exempts_path_but_not_secret() {
+    // Path-deny skipped via the allow exception; the AWS key pattern in the
+    // same leaf is still caught.
+    let rules = Ruleset {
+        allow_paths: vec!["~/.aws".to_string()],
+        ..Ruleset::default()
+    };
+    let engine = SecurityEngine::new(rules);
+    let body = br#"{"x": "dump ~/.aws/creds AKIAIOSFODNN7EXAMPLE"}"#;
+    let v = engine.scan(body).expect("violation");
+    assert_eq!(v.kind, ViolationKind::Secret);
+}

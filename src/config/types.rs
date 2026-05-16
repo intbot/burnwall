@@ -16,6 +16,8 @@ pub struct Config {
     pub loop_detection: LoopDetectionConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub log_scrape: LogScrapeConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -60,6 +62,11 @@ pub struct SecurityConfig {
     pub deny_commands: Vec<String>,
     pub block_network_mounts: bool,
     pub detect_secrets: bool,
+    /// Redact the `details` field in `security_events` rows and the
+    /// `block_reason` in blocked `requests` rows — keeps filesystem paths
+    /// out of stored data for users who sync or share the database.
+    #[serde(default)]
+    pub log_redact_details: bool,
 }
 
 impl Default for SecurityConfig {
@@ -76,6 +83,7 @@ impl Default for SecurityConfig {
                 .collect(),
             block_network_mounts: true,
             detect_secrets: true,
+            log_redact_details: false,
         }
     }
 }
@@ -114,6 +122,20 @@ impl Default for LoggingConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LogScrapeConfig {
+    /// When true, `burnwall status` also scrapes local tool session logs
+    /// (Claude Code, Codex) to show cross-tool spend that did not go
+    /// through the proxy. Read-only — never writes to the database.
+    pub enabled: bool,
+}
+
+impl Default for LogScrapeConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 /// Convert the persistent config's budget block into the runtime
 /// [`crate::budget::BudgetConfig`] used by [`BudgetTracker`].
 impl From<&BudgetConfig> for crate::budget::BudgetConfig {
@@ -132,9 +154,30 @@ impl From<&SecurityConfig> for crate::security::Ruleset {
     fn from(c: &SecurityConfig) -> Self {
         Self {
             deny_paths: c.deny_paths.clone(),
+            // `allow_paths` is project-profile-only — the global config has
+            // no allow list. A discovered `.burnwall.yaml` merges into this
+            // afterwards (see `cli::start`).
+            allow_paths: Vec::new(),
             deny_commands: c.deny_commands.clone(),
             block_network_mounts: c.block_network_mounts,
             detect_secrets: c.detect_secrets,
+            log_redact_details: c.log_redact_details,
+        }
+    }
+}
+
+/// Convert the persistent loop_detection block into the runtime
+/// [`crate::budget::LoopConfig`]. `hash_prefix_bytes` keeps its built-in
+/// default (200) — we don't expose it as a TOML knob in v0.2.
+impl From<&LoopDetectionConfig> for crate::budget::LoopConfig {
+    fn from(c: &LoopDetectionConfig) -> Self {
+        let defaults = crate::budget::LoopConfig::default();
+        Self {
+            enabled: c.enabled,
+            max_identical_requests: c.max_identical_requests,
+            window_seconds: c.window_seconds,
+            max_cost_per_window: c.max_cost_per_window,
+            hash_prefix_bytes: defaults.hash_prefix_bytes,
         }
     }
 }

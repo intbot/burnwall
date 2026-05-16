@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use burnwall::budget::{BudgetConfig, BudgetTracker};
+use burnwall::budget::{BudgetConfig, BudgetTracker, LoopDetector};
 use burnwall::proxy::{serve, AppState};
 use burnwall::security::SecurityEngine;
 use burnwall::storage::Storage;
@@ -35,7 +35,8 @@ fn client() -> reqwest::Client {
 }
 
 fn today() -> String {
-    chrono::Utc::now().format("%Y-%m-%d").to_string()
+    // Storage date queries match in local time, so "today" is local.
+    chrono::Local::now().format("%Y-%m-%d").to_string()
 }
 
 /// Wait briefly for the tee callback to fire — it runs in a spawned task
@@ -69,6 +70,7 @@ async fn safe_anthropic_request_records_cost() {
         http_client: reqwest::Client::new(),
         security: Arc::new(SecurityEngine::with_defaults()),
         budget: budget.clone(),
+        loop_detector: Arc::new(LoopDetector::with_defaults()),
         storage: storage.clone(),
     };
     let addr = spawn_proxy(state).await;
@@ -129,6 +131,7 @@ async fn safe_openai_request_records_cost_with_cache() {
         http_client: reqwest::Client::new(),
         security: Arc::new(SecurityEngine::with_defaults()),
         budget: Arc::new(BudgetTracker::with_defaults()),
+        loop_detector: Arc::new(LoopDetector::with_defaults()),
         storage: storage.clone(),
     };
     let addr = spawn_proxy(state).await;
@@ -171,6 +174,7 @@ async fn security_violation_returns_403_and_records_event() {
         http_client: reqwest::Client::new(),
         security: Arc::new(SecurityEngine::with_defaults()),
         budget: Arc::new(BudgetTracker::with_defaults()),
+        loop_detector: Arc::new(LoopDetector::with_defaults()),
         storage: storage.clone(),
     };
     let addr = spawn_proxy(state).await;
@@ -239,6 +243,7 @@ async fn budget_exceeded_returns_429_without_forwarding() {
         http_client: reqwest::Client::new(),
         security: Arc::new(SecurityEngine::with_defaults()),
         budget,
+        loop_detector: Arc::new(LoopDetector::with_defaults()),
         storage: storage.clone(),
     };
     let addr = spawn_proxy(state).await;
@@ -299,6 +304,7 @@ data: {\"type\":\"message_stop\"}\n\n";
         http_client: reqwest::Client::new(),
         security: Arc::new(SecurityEngine::with_defaults()),
         budget: Arc::new(BudgetTracker::with_defaults()),
+        loop_detector: Arc::new(LoopDetector::with_defaults()),
         storage: storage.clone(),
     };
     let addr = spawn_proxy(state).await;
@@ -362,6 +368,7 @@ async fn budget_warning_does_not_block() {
         http_client: reqwest::Client::new(),
         security: Arc::new(SecurityEngine::with_defaults()),
         budget,
+        loop_detector: Arc::new(LoopDetector::with_defaults()),
         storage: Arc::new(Storage::open_in_memory().unwrap()),
     };
     let addr = spawn_proxy(state).await;
@@ -374,4 +381,200 @@ async fn budget_warning_does_not_block() {
         .unwrap();
 
     assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loop_detection_blocks_after_threshold_identical_requests() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg",
+            "model": "claude-haiku-4-5",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        })))
+        .mount(&mock)
+        .await;
+
+    // Detector tuned to block on the 3rd identical request within 60s.
+    let detector = Arc::new(burnwall::budget::LoopDetector::new(
+        burnwall::budget::LoopConfig {
+            enabled: true,
+            max_identical_requests: 3,
+            window_seconds: 60,
+            max_cost_per_window: 0.0, // disable cost-spiral for this test
+            hash_prefix_bytes: 200,
+        },
+    ));
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = AppState {
+        upstream_anthropic: mock.uri(),
+        upstream_openai: "http://127.0.0.1:1".to_string(),
+        http_client: reqwest::Client::new(),
+        security: Arc::new(SecurityEngine::with_defaults()),
+        budget: Arc::new(BudgetTracker::with_defaults()),
+        loop_detector: detector,
+        storage: storage.clone(),
+    };
+    let addr = spawn_proxy(state).await;
+
+    let body =
+        json!({"model": "claude-haiku-4-5", "messages": [{"role": "user", "content": "hi"}]});
+
+    // First two: forwarded
+    for i in 1..=2 {
+        let resp = client()
+            .post(format!("http://{}/anthropic/v1/messages", addr))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "request {} should pass", i);
+        let _ = resp.bytes().await; // drain
+    }
+
+    // Third identical: blocked
+    let resp = client()
+        .post(format!("http://{}/anthropic/v1/messages", addr))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        429,
+        "3rd identical request should be loop-blocked"
+    );
+    let body_text: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body_text["error"]["type"], "loop_detected");
+    assert!(body_text["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("loop detected"));
+
+    settle().await;
+
+    // The two forwarded requests + the one blocked one should all be in storage.
+    let rows = storage.requests_for_date(&today()).unwrap();
+    assert_eq!(rows.len(), 3, "all 3 requests should be logged");
+    let blocked: Vec<_> = rows.iter().filter(|r| r.blocked).collect();
+    assert_eq!(blocked.len(), 1, "exactly 1 blocked row");
+    assert!(blocked[0]
+        .block_reason
+        .as_ref()
+        .map(|r| r.contains("loop detected"))
+        .unwrap_or(false));
+    // Successful rows should have request_hash populated.
+    let successful: Vec<_> = rows.iter().filter(|r| !r.blocked).collect();
+    assert!(successful.iter().all(|r| r.request_hash.is_some()));
+    // Identical bodies -> identical hashes.
+    assert_eq!(successful[0].request_hash, successful[1].request_hash);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn security_log_redact_details_strips_rule_from_storage() {
+    use burnwall::security::{Ruleset, SecurityEngine};
+
+    // SecurityEngine with redaction on. The rest of the ruleset is the default.
+    let rules = Ruleset {
+        log_redact_details: true,
+        ..Ruleset::default()
+    };
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = AppState {
+        upstream_anthropic: "http://127.0.0.1:1".to_string(),
+        upstream_openai: "http://127.0.0.1:1".to_string(),
+        http_client: reqwest::Client::new(),
+        security: Arc::new(SecurityEngine::new(rules)),
+        budget: Arc::new(BudgetTracker::with_defaults()),
+        loop_detector: Arc::new(LoopDetector::with_defaults()),
+        storage: storage.clone(),
+    };
+    let addr = spawn_proxy(state).await;
+
+    let resp = client()
+        .post(format!("http://{}/anthropic/v1/messages", addr))
+        .json(&serde_json::json!({
+            "model": "claude-sonnet-4-6",
+            "messages": [{
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "name": "bash",
+                    "input": {"command": "cat ~/.ssh/id_rsa"}
+                }]
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // 403 to the agent is unaffected -- still mentions the rule.
+    assert_eq!(resp.status(), 403);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("~/.ssh"));
+
+    settle().await;
+
+    // Storage rows DO redact: details = "<redacted>", block_reason = "path_blocked".
+    let events = storage.security_events_for_date(&today()).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].details, "<redacted>");
+    assert!(!events[0].details.contains("ssh"));
+
+    let rows = storage.requests_for_date(&today()).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].block_reason.as_deref(), Some("path_blocked"));
+    assert!(!rows[0].block_reason.as_ref().unwrap().contains("ssh"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn distinct_requests_dont_trip_loop_detector() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg", "model": "claude-haiku-4-5",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        })))
+        .mount(&mock)
+        .await;
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = AppState {
+        upstream_anthropic: mock.uri(),
+        upstream_openai: "http://127.0.0.1:1".to_string(),
+        http_client: reqwest::Client::new(),
+        security: Arc::new(SecurityEngine::with_defaults()),
+        budget: Arc::new(BudgetTracker::with_defaults()),
+        loop_detector: Arc::new(burnwall::budget::LoopDetector::new(
+            burnwall::budget::LoopConfig {
+                enabled: true,
+                max_identical_requests: 3,
+                window_seconds: 60,
+                max_cost_per_window: 0.0,
+                hash_prefix_bytes: 200,
+            },
+        )),
+        storage: storage.clone(),
+    };
+    let addr = spawn_proxy(state).await;
+
+    // Send 5 requests with distinct bodies -- no loop should trip.
+    for i in 0..5 {
+        let body = json!({"model": "claude-haiku-4-5", "n": i});
+        let resp = client()
+            .post(format!("http://{}/anthropic/v1/messages", addr))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "distinct request {} should pass", i);
+        let _ = resp.bytes().await;
+    }
 }
