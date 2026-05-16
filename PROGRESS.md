@@ -2,18 +2,17 @@
 
 Update this file after every Claude Code session.
 
-## Status: v0.2 in progress (~85%)
+## Status: v0.2 code-complete — ready for `v0.2.0` tag
 
-- **v0.1**: fully shipped on `main`. 120 tests. Tagged-and-ship ready (no `v0.1.0` tag pushed yet — `[OWNER]` placeholders still in Cargo.toml/LICENSE).
-- **v0.2**: active on the `v0.2` branch. 10 feature commits landed (most recent: daemon mode + real `burnwall stop`), 188 tests passing, `cargo fmt` + `clippy` clean. Working tree clean.
-- **Current branch:** `v0.2`. Both branches pushed to `origin` (`v0.2` is in sync).
+- **v0.1**: fully shipped on `main`. 120 tests. Placeholders resolved.
+- **v0.2**: code-complete on the `v0.2` branch. 188 tests passing, `cargo fmt` + `clippy` clean. All feature work landed; remaining items are external (tag the release, publish the Homebrew tap, post the launch thread) and pre-drafted in `internal/`.
+- **Current branch:** `v0.2`. Pushed to `origin`.
 
 ### Fresh-session orientation
 
-- The **v0.2 plan** (replanned after a competitive-research pass) lives in `internal/ROADMAP.md` — `internal/` is gitignored/local-only. It has checkboxes for what's done vs remaining.
-- Next planned features (from `internal/ROADMAP.md`): Homebrew formula, README comparison page, positioning copy, Show HN prep. (Per-project profiles, Tier-2 log-file cost tracking, the MCP scope disclaimer, local-time "today", and daemon mode all landed.)
-- Competitive landscape research is in `internal/COMPETITORS.md`.
+- Planning, research, policy, and release-prep drafts live in `internal/` (gitignored/local-only). v0.2 items are all checked off.
 - User preferences are in the auto-loaded memory files (no `Co-Authored-By` trailer; no meta-commentary about hidden/scrubbed content).
+- **Next milestone:** tracked in `internal/ROADMAP.md`.
 
 ## Session Log
 
@@ -31,7 +30,7 @@ Update this file after every Claude Code session.
 - [x] Tier-2 cost tracking via local log-file parsing (Claude Code + Codex CLI) — new `logscrape` module: `claude_code.rs` parses `~/.claude/projects/**/*.jsonl` (`type:assistant` lines, deduped across files by `message.id`+`requestId`); `codex.rs` parses `~/.codex/sessions/**/*.jsonl` (stateful — `turn_context`/`session_meta` model attached to following `token_count` events, `last_token_usage` normalized OpenAI-style, per-line timestamp with `YYYY/MM/DD` path-date fallback). Read-only on-the-fly scrape, no SQLite writes, fail-open throughout. `scrape_for_date` aggregates by tool+model via the existing pricing table. `burnwall status` gained a "Tracked via log files (not proxied)" section + combined-total line; `--json` gained a `log_scrape` key + `combined_total_usd`. New `log_scrape.enabled` config (default true). JSONL parsed line-by-line via `serde_json`. Env overrides `BURNWALL_CLAUDE_LOG_DIR` / `BURNWALL_CODEX_LOG_DIR` for tests. 11 new tests + 2 fixtures (`tests/fixtures/{claude_code,codex}_session.jsonl`). Codex format verified against the openai/codex `RolloutItem` / `TokenUsageInfo` source
 - [x] MCP awareness disclaimer — README gained a "Scope: What Burnwall Guards" section (Burnwall is on the LLM API path; MCP traffic is not intercepted; MCP Defender / Pipelock / SentinelGate are complementary); `burnwall status` prints a one-line scope footer. Pure copy — no new tests
 - [x] Local-time "today" — timestamps are still *stored* UTC, but every `storage::repository` date query now uses `DATE(timestamp, 'localtime')` / `DATE('now', 'localtime', ?1)`; `status`, `start` (budget hydration), and `security` derive "today" via `chrono::Local`; `logscrape::aggregate` buckets by the entry's local date and the Codex path-date fallback anchors at noon-local — so the cross-tool view stays consistent with the proxy view. `status` header is now `📊 Today (<local date>)` (dropped "UTC"); `security` shows local timestamps under a "Time" column. Fixes the off-by-one where, late in the UTC day, `status` showed an empty "tomorrow". Date-sensitive tests reworked to be timezone-robust (a `local_noon`/`local_date` helper anchors fixtures at local noon, far from any midnight); no production behavior depends on the test machine's zone. Test count unchanged at 178
-- [ ] Remaining v0.2 work — see `internal/ROADMAP.md` (Homebrew formula, README comparison page, positioning copy, Show HN prep)
+- [x] Release-prep wrap (2026-05-16) — `[OWNER]` placeholders resolved to `intbot` in `Cargo.toml` / `LICENSE` / `README.md` / `src/main.rs`; CHANGELOG carved into `[Unreleased] — v0.2.0` (with all v0.2 additions) and `[0.1.0]` sections; remaining launch-prep checked off in `internal/`
 
 ### Session 0 — Planning (May 2026)
 - [x] CLAUDE.md — project rules and structure
@@ -162,10 +161,9 @@ Update this file after every Claude Code session.
 
 ## Next Steps
 
-Remaining v0.2 work is tracked with checkboxes in `internal/ROADMAP.md`
-(gitignored, local-only). Suggested next feature: **Tier-2 cost tracking
-via local log-file parsing** — see that file for the full ordered list
-and rationale.
+v0.2 is code-complete on this branch. The remaining steps are external
+(merging to `main`, tagging the release, publishing artifacts) and the
+next milestone is tracked in `internal/ROADMAP.md`.
 
 ## Bugs / Tech Debt
 

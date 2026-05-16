@@ -1,5 +1,5 @@
-// Burnwall — AI agent firewall and cost tracker
-// https://github.com/[OWNER]/burnwall
+// Burnwall
+// https://github.com/intbot/burnwall
 
 use clap::Parser;
 

@@ -2,7 +2,54 @@
 
 All notable changes to Burnwall.
 
-## [Unreleased] — v0.1 in development
+## [Unreleased] — v0.2.0
+
+### Added
+
+- Background daemon mode. `burnwall start --daemon` runs the proxy in
+  the background and writes a PID file under the data directory; the
+  file is removed on graceful shutdown and stale files self-clean on
+  sight. A second `start` against a live daemon refuses cleanly.
+- `burnwall stop` now actually terminates a running daemon (graceful
+  shutdown on Unix; immediate stop on Windows, safe because each
+  storage write is its own transaction).
+- Loop detector. Runaway agents that keep firing the same request, or
+  burn cost faster than a configurable rate, get cut off with a 429
+  before they drain the budget.
+- `burnwall security` command — table or `--json` view of blocked
+  requests with rule, provider, model, and timestamp.
+- Per-project security profiles via `.burnwall.yaml`, discovered by
+  walk-up from the current working directory. Supports `allow_paths`
+  exceptions, additional `deny_paths`, and a per-project
+  `budget.daily_max_usd` cap (can only tighten the global limit).
+- Cross-tool cost tracking for tools that don't go through the proxy.
+  `burnwall status` aggregates from local Claude Code and Codex CLI
+  session logs alongside proxied traffic, with a combined-total line
+  and a separate `log_scrape` key in `--json` output. Read-only — no
+  database writes from log scraping.
+- Local-time "today". `status`, `history`, and `security` now bucket
+  by your local calendar day; timestamps are still stored in UTC
+  internally. Fixes the off-by-one where late-UTC-day `status` showed
+  an empty bucket.
+- Pricing data freshness warning — `burnwall status` flags when the
+  embedded rate card is more than 30 days old.
+- Shell completions. `burnwall completions <shell>` emits scripts for
+  bash, zsh, fish, powershell, and elvish.
+- Path redaction in storage: `security.log_redact_details` redacts the
+  matched-rule detail in `security_events` rows while leaving the 403
+  response unaffected (D13 mitigation).
+- `--json` output is now consistent across every command, including
+  `config show`.
+- README documents the scope of what Burnwall guards: it sits on the
+  LLM API path, and MCP traffic is intentionally out of scope for
+  this milestone. `burnwall status` carries a one-line scope footer.
+
+### Changed
+
+- Headline copy on the README and `Cargo.toml` description now leads
+  with "local proxy for AI coding tools."
+
+## [0.1.0] — initial feature set
 
 ### Added
 
@@ -37,12 +84,3 @@ All notable changes to Burnwall.
 - GitHub Actions: CI matrix (ubuntu / macOS / windows; build + test +
   rustfmt + clippy) and release workflow (per-target archives, GitHub
   Release with auto-generated notes on `v*` tag push).
-
-### Not yet (planned for v0.2+)
-
-- Loop detection (request hashing + exponential backoff)
-- Background daemon mode + real `burnwall stop`
-- VS Code / Cursor extension
-- TZ-aware "today" (currently UTC; SPEC §"daily reset" is local-time)
-- aarch64-linux release artifact (needs cross-build setup)
-- Path redaction in `security_events.details`

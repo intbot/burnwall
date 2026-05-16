@@ -59,7 +59,7 @@ release workflow publishes per-platform archives):
 
 ```bash
 # From source (requires Rust toolchain ≥ 1.80):
-git clone https://github.com/[OWNER]/burnwall && cd burnwall
+git clone https://github.com/intbot/burnwall && cd burnwall
 cargo build --release
 ./target/release/burnwall --help
 
