@@ -1,4 +1,4 @@
-//! Burnwall — AI agent firewall and cost tracker.
+//! Burnwall — local proxy for AI coding tools.
 //!
 //! Library crate exposing the proxy server, security engine, budget tracker,
 //! storage layer, and pricing calculator. The `burnwall` binary is a thin CLI

@@ -14,11 +14,7 @@ pub mod status;
 pub mod stop;
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "burnwall",
-    version,
-    about = "AI agent firewall and cost tracker"
-)]
+#[command(name = "burnwall", version, about)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,

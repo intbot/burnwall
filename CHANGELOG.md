@@ -2,6 +2,15 @@
 
 All notable changes to Burnwall.
 
+## [0.3.1] — 2026-05-16
+
+### Changed
+
+- CLI `--help` summary and the library crate doc now match the README
+  positioning ("local proxy for AI coding tools"). The CLI summary is
+  driven from `Cargo.toml` so the two cannot drift again. No
+  functional changes.
+
 ## [0.3.0] — 2026-05-16
 
 ### Added
