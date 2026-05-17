@@ -53,6 +53,7 @@ pub struct ToolCall {
 /// message, malformed JSON, or batch requests (we only log the simple
 /// single-call case in phase 1).
 pub fn parse_tool_call(body: &[u8]) -> Option<ToolCall> {
+    let body = body.strip_prefix(b"\xef\xbb\xbf").unwrap_or(body);
     let v: Value = serde_json::from_slice(body).ok()?;
     let method = v.get("method").and_then(Value::as_str)?;
     if method != "tools/call" {

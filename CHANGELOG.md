@@ -2,6 +2,18 @@
 
 All notable changes to Burnwall.
 
+## [0.3.2] — 2026-05-17
+
+### Fixed
+
+- Security scan no longer fails-open on a request body that starts with
+  a UTF-8 BOM (`EF BB BF`). The JSON parser used to reject the BOM and
+  the fail-open arm forwarded the request unscanned; the scanner now
+  strips a leading BOM before parsing. The same fix lands on
+  `extract_model`, the cache-injection rewriter, the cache-savings
+  projection, and the MCP `tools/call` parser so they stay consistent.
+  Found during pre-launch user-journey testing on Windows.
+
 ## [0.3.1] — 2026-05-16
 
 ### Changed

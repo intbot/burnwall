@@ -30,7 +30,8 @@ pub struct InjectionOutcome {
 /// - there is no system prompt and no messages to mark, or
 /// - serializing the rewritten value fails.
 pub fn inject_if_eligible(body: &Bytes) -> InjectionOutcome {
-    let Ok(mut value) = serde_json::from_slice::<Value>(body) else {
+    let bom_stripped = body.strip_prefix(b"\xef\xbb\xbf").unwrap_or(body);
+    let Ok(mut value) = serde_json::from_slice::<Value>(bom_stripped) else {
         return InjectionOutcome {
             body: body.clone(),
             modified: false,
@@ -142,6 +143,7 @@ const CHARS_PER_TOKEN_ESTIMATE: f64 = 4.0;
 /// Status surfaces this as "Cache injection (off): est. $X foregone
 /// today" so users have a number to weigh before flipping the switch.
 pub fn estimate_savings_usd(body: &[u8]) -> f64 {
+    let body = body.strip_prefix(b"\xef\xbb\xbf").unwrap_or(body);
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
         return 0.0;
     };

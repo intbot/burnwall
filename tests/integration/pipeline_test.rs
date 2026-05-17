@@ -713,3 +713,63 @@ async fn cache_injection_off_forwards_body_unchanged() {
     // First message content stayed a string.
     assert!(upstream_body["messages"][0]["content"].is_string());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn utf8_bom_prefixed_body_still_triggers_security_scan() {
+    // Regression for the BOM fail-open: a body that starts with `EF BB BF`
+    // used to bypass the scanner because `serde_json::from_slice` rejected
+    // the BOM and the fail-open arm forwarded the request. The fix strips
+    // a leading BOM before parsing.
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0) // upstream must never see this
+        .mount(&mock)
+        .await;
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = AppState {
+        upstream_anthropic: mock.uri(),
+        upstream_openai: "http://127.0.0.1:1".to_string(),
+        http_client: reqwest::Client::new(),
+        security: Arc::new(SecurityEngine::with_defaults()),
+        budget: Arc::new(BudgetTracker::with_defaults()),
+        loop_detector: Arc::new(LoopDetector::with_defaults()),
+        storage: storage.clone(),
+        cache_injection: false,
+    };
+    let addr = spawn_proxy(state).await;
+
+    // Identical to security_violation_returns_403_and_records_event but
+    // with `EF BB BF` prepended to the body bytes.
+    let json_body = serde_json::to_vec(&json!({
+        "model": "claude-sonnet-4-6",
+        "messages": [{
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "name": "bash",
+                "input": {"command": "cat ~/.ssh/id_rsa"}
+            }]
+        }]
+    }))
+    .unwrap();
+    let mut with_bom = vec![0xef, 0xbb, 0xbf];
+    with_bom.extend_from_slice(&json_body);
+
+    let resp = client()
+        .post(format!("http://{}/anthropic/v1/messages", addr))
+        .header("content-type", "application/json")
+        .body(with_bom)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "security_blocked");
+
+    settle().await;
+    let events = storage.security_events_for_date(&today()).unwrap();
+    assert_eq!(events.len(), 1, "BOM-prefixed body should still get logged");
+}

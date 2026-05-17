@@ -232,6 +232,7 @@ fn escape_json(s: &str) -> String {
 /// Best-effort extraction of the `model` field from a request body. Used
 /// to populate `RequestRecord.model` even when the request was blocked.
 fn extract_model(body: &[u8]) -> Option<String> {
+    let body = body.strip_prefix(b"\xef\xbb\xbf").unwrap_or(body);
     let val: serde_json::Value = serde_json::from_slice(body).ok()?;
     val.get("model").and_then(|m| m.as_str()).map(String::from)
 }

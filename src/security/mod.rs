@@ -96,6 +96,11 @@ impl SecurityEngine {
     ///
     /// Non-JSON bodies return `None` (see fail-open in the module docs).
     pub fn scan(&self, body: &[u8]) -> Option<Violation> {
+        // Strip a leading UTF-8 BOM: `serde_json` rejects it, which would
+        // otherwise let a `\xef\xbb\xbf{…}` body slip past the scanner via
+        // the fail-open path. Real clients never emit a BOM; this is
+        // defense-in-depth.
+        let body = body.strip_prefix(b"\xef\xbb\xbf").unwrap_or(body);
         let json: serde_json::Value = serde_json::from_slice(body).ok()?;
         scanner::scan(&json, &self.rules)
     }
