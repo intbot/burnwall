@@ -2,6 +2,42 @@
 
 All notable changes to Burnwall.
 
+## [0.3.0] — 2026-05-16
+
+### Added
+
+- Anthropic prompt-cache auto-injection. When enabled, outbound Messages
+  API requests with no existing `cache_control` markers get an
+  ephemeral marker added on the system prompt and the first message,
+  so the cached read tier applies on subsequent turns. Existing
+  markers are always respected and never overridden. Off by default;
+  enable via `proxy.cache_injection = true` in config or with
+  `burnwall start --rewrite-anthropic-cache`. The startup banner
+  shows whether injection is on.
+- "Would-have-cached" projection. When injection is off,
+  `burnwall status` reports a per-day USD estimate of the savings
+  you would have captured if it had been on. Surfaced as a line in
+  the table view and a `projected_cache_savings_usd` field in
+  `--json` output.
+- `burnwall mcp-watch <upstream>` — pass-through proxy in front of an
+  upstream MCP HTTP server. Forwards every request unchanged, streams
+  responses back, and records JSON-RPC `tools/call` invocations
+  (tool name, request id, upstream HTTP status) to a new `mcp_events`
+  table. Argument payloads are deliberately not stored — they can
+  contain prompt content. `--port` and `--host` flags are available
+  for binding; defaults are `127.0.0.1:4101`.
+- Security denylist extended to MCP. `burnwall mcp-watch` runs every
+  request body through the same security engine the LLM proxy uses,
+  so denied paths, commands, network mounts, and secret patterns are
+  blocked when they appear inside `tools/call` arguments. A violation
+  returns 403, never forwards to the upstream MCP server, and writes
+  a `security_events` row with `provider = "mcp"` and the tool name —
+  `burnwall security` shows these alongside LLM-side blocks. The
+  per-project `.burnwall.yaml` profile (including `allow_paths`
+  exceptions) applies too.
+- `burnwall status` carries a count line for MCP `tools/call`
+  invocations recorded today when the count is non-zero.
+
 ## [0.2.0] — 2026-05-16
 
 ### Added
