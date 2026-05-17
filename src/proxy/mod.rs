@@ -21,6 +21,7 @@ use crate::budget::{BudgetTracker, LoopDetector};
 use crate::security::SecurityEngine;
 use crate::storage::Storage;
 
+pub mod cache_injection;
 pub mod forwarding;
 pub mod handler;
 pub mod streaming;
@@ -39,6 +40,10 @@ pub struct AppState {
     pub budget: Arc<BudgetTracker>,
     pub loop_detector: Arc<LoopDetector>,
     pub storage: Arc<Storage>,
+    /// Auto-inject Anthropic `cache_control` markers on outbound requests.
+    /// Off by default — turned on via `proxy.cache_injection` or the
+    /// `--rewrite-anthropic-cache` flag on `burnwall start`.
+    pub cache_injection: bool,
 }
 
 impl AppState {
@@ -55,6 +60,7 @@ impl AppState {
             budget: Arc::new(BudgetTracker::with_defaults()),
             loop_detector: Arc::new(LoopDetector::with_defaults()),
             storage: Arc::new(Storage::open_in_memory().expect("in-memory storage cannot fail")),
+            cache_injection: false,
         }
     }
 

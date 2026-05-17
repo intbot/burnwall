@@ -72,6 +72,7 @@ async fn safe_anthropic_request_records_cost() {
         budget: budget.clone(),
         loop_detector: Arc::new(LoopDetector::with_defaults()),
         storage: storage.clone(),
+        cache_injection: false,
     };
     let addr = spawn_proxy(state).await;
 
@@ -133,6 +134,7 @@ async fn safe_openai_request_records_cost_with_cache() {
         budget: Arc::new(BudgetTracker::with_defaults()),
         loop_detector: Arc::new(LoopDetector::with_defaults()),
         storage: storage.clone(),
+        cache_injection: false,
     };
     let addr = spawn_proxy(state).await;
 
@@ -176,6 +178,7 @@ async fn security_violation_returns_403_and_records_event() {
         budget: Arc::new(BudgetTracker::with_defaults()),
         loop_detector: Arc::new(LoopDetector::with_defaults()),
         storage: storage.clone(),
+        cache_injection: false,
     };
     let addr = spawn_proxy(state).await;
 
@@ -245,6 +248,7 @@ async fn budget_exceeded_returns_429_without_forwarding() {
         budget,
         loop_detector: Arc::new(LoopDetector::with_defaults()),
         storage: storage.clone(),
+        cache_injection: false,
     };
     let addr = spawn_proxy(state).await;
 
@@ -306,6 +310,7 @@ data: {\"type\":\"message_stop\"}\n\n";
         budget: Arc::new(BudgetTracker::with_defaults()),
         loop_detector: Arc::new(LoopDetector::with_defaults()),
         storage: storage.clone(),
+        cache_injection: false,
     };
     let addr = spawn_proxy(state).await;
 
@@ -370,6 +375,7 @@ async fn budget_warning_does_not_block() {
         budget,
         loop_detector: Arc::new(LoopDetector::with_defaults()),
         storage: Arc::new(Storage::open_in_memory().unwrap()),
+        cache_injection: false,
     };
     let addr = spawn_proxy(state).await;
 
@@ -416,6 +422,7 @@ async fn loop_detection_blocks_after_threshold_identical_requests() {
         budget: Arc::new(BudgetTracker::with_defaults()),
         loop_detector: detector,
         storage: storage.clone(),
+        cache_injection: false,
     };
     let addr = spawn_proxy(state).await;
 
@@ -491,6 +498,7 @@ async fn security_log_redact_details_strips_rule_from_storage() {
         budget: Arc::new(BudgetTracker::with_defaults()),
         loop_detector: Arc::new(LoopDetector::with_defaults()),
         storage: storage.clone(),
+        cache_injection: false,
     };
     let addr = spawn_proxy(state).await;
 
@@ -562,6 +570,7 @@ async fn distinct_requests_dont_trip_loop_detector() {
             },
         )),
         storage: storage.clone(),
+        cache_injection: false,
     };
     let addr = spawn_proxy(state).await;
 
@@ -577,4 +586,130 @@ async fn distinct_requests_dont_trip_loop_detector() {
         assert_eq!(resp.status(), 200, "distinct request {} should pass", i);
         let _ = resp.bytes().await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cache_injection_rewrites_outbound_anthropic_body_when_enabled() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_inject",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "ok"}],
+            "model": "claude-sonnet-4-6",
+            "usage": {"input_tokens": 100, "output_tokens": 10},
+        })))
+        .mount(&mock)
+        .await;
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = AppState {
+        upstream_anthropic: mock.uri(),
+        upstream_openai: "http://127.0.0.1:1".to_string(),
+        http_client: reqwest::Client::new(),
+        security: Arc::new(SecurityEngine::with_defaults()),
+        budget: Arc::new(BudgetTracker::with_defaults()),
+        loop_detector: Arc::new(LoopDetector::with_defaults()),
+        storage: storage.clone(),
+        cache_injection: true,
+    };
+    let addr = spawn_proxy(state).await;
+
+    let req_body = json!({
+        "model": "claude-sonnet-4-6",
+        "system": "You are a careful assistant.",
+        "messages": [{"role": "user", "content": "Long stable context."}],
+        "max_tokens": 16,
+    });
+    let resp = client()
+        .post(format!("http://{}/anthropic/v1/messages", addr))
+        .json(&req_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let received = mock.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1, "exactly one upstream request expected");
+    let upstream_body: serde_json::Value =
+        serde_json::from_slice(&received[0].body).expect("upstream got valid JSON");
+
+    // System prompt is now an array whose last block carries cache_control.
+    let sys_blocks = upstream_body
+        .get("system")
+        .and_then(|v| v.as_array())
+        .expect("system widened to array");
+    assert_eq!(
+        sys_blocks.last().unwrap().get("cache_control").unwrap(),
+        &json!({"type": "ephemeral"}),
+    );
+
+    // First message's content was widened and marked too.
+    let first_msg_blocks = upstream_body
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+        .expect("first message content widened to array");
+    assert!(first_msg_blocks
+        .last()
+        .unwrap()
+        .get("cache_control")
+        .is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cache_injection_off_forwards_body_unchanged() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_passthrough",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "ok"}],
+            "model": "claude-sonnet-4-6",
+            "usage": {"input_tokens": 100, "output_tokens": 10},
+        })))
+        .mount(&mock)
+        .await;
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = AppState {
+        upstream_anthropic: mock.uri(),
+        upstream_openai: "http://127.0.0.1:1".to_string(),
+        http_client: reqwest::Client::new(),
+        security: Arc::new(SecurityEngine::with_defaults()),
+        budget: Arc::new(BudgetTracker::with_defaults()),
+        loop_detector: Arc::new(LoopDetector::with_defaults()),
+        storage: storage.clone(),
+        cache_injection: false,
+    };
+    let addr = spawn_proxy(state).await;
+
+    let req_body = json!({
+        "model": "claude-sonnet-4-6",
+        "system": "You are a careful assistant.",
+        "messages": [{"role": "user", "content": "Anything."}],
+    });
+    let resp = client()
+        .post(format!("http://{}/anthropic/v1/messages", addr))
+        .json(&req_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let received = mock.received_requests().await.unwrap();
+    let upstream_body: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
+    // System is still the original string — not widened.
+    assert_eq!(
+        upstream_body.get("system").unwrap(),
+        &json!("You are a careful assistant."),
+    );
+    // First message content stayed a string.
+    assert!(upstream_body["messages"][0]["content"].is_string());
 }

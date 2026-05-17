@@ -1,6 +1,6 @@
 [package]
 name = "burnwall"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Local proxy for AI coding tools (Claude Code, Codex CLI, Aider): cache-aware cost tracking, path/command security checks, daily budget enforcement. Zero telemetry."
 license = "FSL-1.1-MIT"
@@ -120,6 +120,14 @@ path = "tests/integration/init_test.rs"
 [[test]]
 name = "daemon_test"
 path = "tests/integration/daemon_test.rs"
+
+[[test]]
+name = "cache_injection_test"
+path = "tests/unit/cache_injection_test.rs"
+
+[[test]]
+name = "mcp_watch_test"
+path = "tests/integration/mcp_watch_test.rs"
 
 [profile.release]
 opt-level = "z"                      # Optimize for size

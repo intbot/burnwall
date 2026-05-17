@@ -309,3 +309,48 @@ fn open_with_file_path_persists_across_reopens() {
     let read = storage.get_request(id).unwrap().expect("present");
     assert!((read.cost_usd - 1.23).abs() < 1e-9);
 }
+
+#[test]
+fn cache_projection_accumulates_across_calls() {
+    let storage = Storage::open_in_memory().unwrap();
+    let date = local_date(0);
+
+    assert_eq!(storage.cache_projection_for_date(&date).unwrap(), 0.0);
+
+    storage.record_cache_projection(&date, 0.10).unwrap();
+    storage.record_cache_projection(&date, 0.25).unwrap();
+    let total = storage.cache_projection_for_date(&date).unwrap();
+    assert!((total - 0.35).abs() < 1e-9, "got {total}");
+}
+
+#[test]
+fn cache_projection_per_day_buckets_are_independent() {
+    let storage = Storage::open_in_memory().unwrap();
+    let today = local_date(0);
+    let yesterday = local_date(-1);
+
+    storage.record_cache_projection(&today, 1.50).unwrap();
+    storage.record_cache_projection(&yesterday, 0.40).unwrap();
+
+    assert!((storage.cache_projection_for_date(&today).unwrap() - 1.50).abs() < 1e-9);
+    assert!((storage.cache_projection_for_date(&yesterday).unwrap() - 0.40).abs() < 1e-9);
+    assert_eq!(
+        storage.cache_projection_for_date(&local_date(-2)).unwrap(),
+        0.0,
+    );
+}
+
+#[test]
+fn cache_projection_ignores_non_positive_and_non_finite_values() {
+    let storage = Storage::open_in_memory().unwrap();
+    let date = local_date(0);
+
+    storage.record_cache_projection(&date, 0.0).unwrap();
+    storage.record_cache_projection(&date, -1.0).unwrap();
+    storage.record_cache_projection(&date, f64::NAN).unwrap();
+    storage
+        .record_cache_projection(&date, f64::INFINITY)
+        .unwrap();
+
+    assert_eq!(storage.cache_projection_for_date(&date).unwrap(), 0.0);
+}

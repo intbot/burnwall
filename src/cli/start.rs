@@ -33,6 +33,10 @@ pub struct StartArgs {
     /// Override the OpenAI upstream URL.
     #[arg(long, default_value = "https://api.openai.com")]
     pub upstream_openai: String,
+    /// Auto-inject Anthropic `cache_control` markers on outbound requests.
+    /// Overrides `proxy.cache_injection` from config when present.
+    #[arg(long)]
+    pub rewrite_anthropic_cache: bool,
 }
 
 pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
@@ -95,6 +99,8 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
         .clone()
         .unwrap_or_else(|| user_config.proxy.host.clone());
 
+    let cache_injection = args.rewrite_anthropic_cache || user_config.proxy.cache_injection;
+
     print_banner(
         &host_str,
         port,
@@ -103,6 +109,7 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
         &security,
         &budget,
         project_profile.as_ref(),
+        cache_injection,
     );
 
     let state = AppState {
@@ -113,6 +120,7 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
         budget,
         loop_detector,
         storage,
+        cache_injection,
     };
 
     let host: IpAddr = host_str
@@ -154,6 +162,7 @@ fn print_banner(
     security: &Arc<SecurityEngine>,
     budget: &Arc<BudgetTracker>,
     project_profile: Option<&(std::path::PathBuf, config::project::ProjectProfile)>,
+    cache_injection: bool,
 ) {
     let _ = storage;
     println!("🛡️  Burnwall v{}", env!("CARGO_PKG_VERSION"));
@@ -191,6 +200,9 @@ fn print_banner(
             profile.deny_paths.len(),
             cap,
         );
+    }
+    if cache_injection {
+        println!("   Cache:    Anthropic cache_control injection ON");
     }
     println!("   Ready. Press Ctrl-C to stop.");
 }

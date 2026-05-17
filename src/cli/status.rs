@@ -38,6 +38,8 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
     let security_events = storage.security_event_count_for_date(&today)?;
     let today_cost = storage.total_cost_for_date(&today)?;
     let pricing_age = pricing::pricing_age_days(now_local.date_naive());
+    let projected_savings = storage.cache_projection_for_date(&today)?;
+    let mcp_events_today = storage.mcp_event_count_for_date(&today)?;
 
     let cache_savings_total: f64 = breakdown.iter().map(model_cache_savings).sum();
     let cost_without_cache_total: f64 = breakdown.iter().map(model_cost_without_cache).sum();
@@ -69,6 +71,8 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
             cost_without_cache_total,
             pricing_age,
             log_scrape.as_deref(),
+            projected_savings,
+            mcp_events_today,
         )?;
     } else {
         write_table(
@@ -84,6 +88,8 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
             cost_without_cache_total,
             pricing_age,
             log_scrape.as_deref(),
+            projected_savings,
+            mcp_events_today,
         )?;
     }
     Ok(())
@@ -103,6 +109,8 @@ fn write_table(
     cost_without_cache: f64,
     pricing_age_days: Option<i64>,
     log_scrape: Option<&[ScrapeBreakdown]>,
+    projected_savings: f64,
+    mcp_events: i64,
 ) -> std::io::Result<()> {
     writeln!(w, "📊 Today ({})", date)?;
     writeln!(
@@ -205,6 +213,17 @@ fn write_table(
             cost_without_cache
         )?;
     }
+    if projected_savings > 0.0 {
+        writeln!(
+            w,
+            "   💡 Cache injection (off): est. ${:.2} foregone today",
+            projected_savings
+        )?;
+        writeln!(
+            w,
+            "      Enable with `burnwall config set proxy.cache_injection true`."
+        )?;
+    }
     if let Some(age) = pricing_age_days {
         if age > 30 {
             writeln!(w)?;
@@ -220,6 +239,13 @@ fn write_table(
         w,
         "   ℹ️  Scope: Burnwall guards LLM API traffic. MCP tool calls flow through unfiltered."
     )?;
+    if mcp_events > 0 {
+        writeln!(
+            w,
+            "      MCP tools/call recorded by `mcp-watch`: {} today",
+            mcp_events
+        )?;
+    }
     Ok(())
 }
 
@@ -237,6 +263,8 @@ fn write_json(
     cost_without_cache: f64,
     pricing_age_days: Option<i64>,
     log_scrape: Option<&[ScrapeBreakdown]>,
+    projected_savings: f64,
+    mcp_events: i64,
 ) -> std::io::Result<()> {
     use serde_json::json;
     let bcfg = budget.config();
@@ -249,6 +277,8 @@ fn write_json(
         "security_events": security_events,
         "cache_savings_usd": cache_savings,
         "cost_without_cache_usd": cost_without_cache,
+        "projected_cache_savings_usd": projected_savings,
+        "mcp_events_today": mcp_events,
         "pricing_age_days": pricing_age_days,
         "pricing_stale": pricing_age_days.map(|d| d > 30).unwrap_or(false),
         "budget": {

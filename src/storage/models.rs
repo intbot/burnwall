@@ -125,6 +125,39 @@ pub struct DailyTotal {
     pub cache_hit_rate: f64,
 }
 
+/// One pass-through event captured by `burnwall mcp-watch`: an MCP
+/// JSON-RPC `tools/call` request that the watcher forwarded to its
+/// upstream MCP server. Argument payloads are deliberately NOT stored —
+/// they can contain prompt content.
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpEvent {
+    pub id: Option<i64>,
+    pub timestamp: DateTime<Utc>,
+    pub tool_name: String,
+    /// JSON-RPC `id` field, stringified. `None` for notifications (no id).
+    pub rpc_id: Option<String>,
+    pub upstream_status: i64,
+    pub upstream_uri: Option<String>,
+}
+
+impl McpEvent {
+    pub fn new(tool_name: &str, rpc_id: Option<&str>, upstream_status: i64) -> Self {
+        Self {
+            id: None,
+            timestamp: Utc::now(),
+            tool_name: tool_name.to_string(),
+            rpc_id: rpc_id.map(str::to_string),
+            upstream_status,
+            upstream_uri: None,
+        }
+    }
+
+    pub fn with_upstream_uri(mut self, uri: &str) -> Self {
+        self.upstream_uri = Some(uri.to_string());
+        self
+    }
+}
+
 /// One row of the `burnwall status` provider/model breakdown table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelBreakdown {
