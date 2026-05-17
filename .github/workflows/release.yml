@@ -22,7 +22,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
             archive: tar.gz
             bin: burnwall
-          - os: macos-13
+          - os: macos-latest
             target: x86_64-apple-darwin
             archive: tar.gz
             bin: burnwall
