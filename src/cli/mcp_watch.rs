@@ -10,7 +10,9 @@ use anyhow::Context;
 use clap::Args;
 
 use crate::cli::daemon;
+use crate::config;
 use crate::mcp::{self, WatchState};
+use crate::security::SecurityEngine;
 use crate::storage::Storage;
 
 #[derive(Args, Debug)]
@@ -30,7 +32,29 @@ pub struct McpWatchArgs {
 pub async fn run_cmd(args: McpWatchArgs) -> anyhow::Result<()> {
     init_tracing();
 
+    let cfg_path = config::default_path()?;
+    let user_config = config::load_or_default(&cfg_path)
+        .with_context(|| format!("loading config from {}", cfg_path.display()))?;
+
     let storage = Arc::new(Storage::open_default().context("opening default storage")?);
+
+    // Load the same security rules the LLM proxy uses, including any
+    // discovered per-project profile — so MCP tool calls are filtered
+    // against the exact same denylist (and any allow_paths exceptions).
+    let mut ruleset: crate::security::Ruleset = (&user_config.security).into();
+    let project_profile = match std::env::current_dir() {
+        Ok(cwd) => config::project::discover_and_load(&cwd)
+            .context("loading per-project .burnwall.yaml")?,
+        Err(e) => {
+            tracing::warn!("could not determine working directory: {e}");
+            None
+        }
+    };
+    if let Some((_, profile)) = &project_profile {
+        profile.apply_to_ruleset(&mut ruleset);
+    }
+    let security = Arc::new(SecurityEngine::new(ruleset));
+
     let host: IpAddr = args
         .host
         .parse()
@@ -40,6 +64,22 @@ pub async fn run_cmd(args: McpWatchArgs) -> anyhow::Result<()> {
     println!("🛡️  Burnwall mcp-watch v{}", env!("CARGO_PKG_VERSION"));
     println!("   Listen:   http://{}:{}", args.host, args.port);
     println!("   Upstream: {}", args.upstream);
+    println!(
+        "   Security: {} deny paths, {} allow paths, {} deny commands, mounts={}, secrets={}",
+        security.rules().deny_paths.len(),
+        security.rules().allow_paths.len(),
+        security.rules().deny_commands.len(),
+        security.rules().block_network_mounts,
+        security.rules().detect_secrets,
+    );
+    if let Some((path, profile)) = &project_profile {
+        println!(
+            "   Project:  {} ({} allow, {} deny paths)",
+            path.display(),
+            profile.allow_paths.len(),
+            profile.deny_paths.len(),
+        );
+    }
     println!("   Logging tools/call invocations to ~/.burnwall/burnwall.db (mcp_events table).");
     println!("   Ready. Press Ctrl-C to stop.");
 
@@ -47,6 +87,7 @@ pub async fn run_cmd(args: McpWatchArgs) -> anyhow::Result<()> {
         upstream: args.upstream.clone(),
         http_client: reqwest::Client::new(),
         storage,
+        security,
     };
 
     let listener = tokio::net::TcpListener::bind(addr)

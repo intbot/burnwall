@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use burnwall::mcp::{parse_tool_call, serve_with_shutdown, ToolCall, WatchState};
+use burnwall::security::SecurityEngine;
 use burnwall::storage::Storage;
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -100,6 +101,7 @@ async fn tools_call_is_forwarded_and_logged_with_upstream_status() {
         upstream: upstream.uri(),
         http_client: reqwest::Client::new(),
         storage: storage.clone(),
+        security: Arc::new(SecurityEngine::with_defaults()),
     };
     let addr = spawn_watcher(state).await;
 
@@ -146,6 +148,7 @@ async fn non_tool_call_methods_pass_through_without_recording() {
         upstream: upstream.uri(),
         http_client: reqwest::Client::new(),
         storage: storage.clone(),
+        security: Arc::new(SecurityEngine::with_defaults()),
     };
     let addr = spawn_watcher(state).await;
 
@@ -180,6 +183,7 @@ async fn upstream_failure_still_records_tool_call_with_status_zero() {
             .build()
             .unwrap(),
         storage: storage.clone(),
+        security: Arc::new(SecurityEngine::with_defaults()),
     };
     let addr = spawn_watcher(state).await;
 
@@ -220,6 +224,7 @@ async fn upstream_path_and_query_are_preserved() {
         upstream: upstream.uri(),
         http_client: reqwest::Client::new(),
         storage: storage.clone(),
+        security: Arc::new(SecurityEngine::with_defaults()),
     };
     let addr = spawn_watcher(state).await;
 
@@ -236,4 +241,133 @@ async fn upstream_path_and_query_are_preserved() {
     assert_eq!(resp.status(), 200);
     // Drain so any spawned task running on the connection is unblocked.
     let _ = resp.bytes().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tools_call_with_denied_path_in_arguments_returns_403_and_never_forwards() {
+    // Upstream should never be hit — the scan blocks before forward.
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&upstream)
+        .await;
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = WatchState {
+        upstream: upstream.uri(),
+        http_client: reqwest::Client::new(),
+        storage: storage.clone(),
+        security: Arc::new(SecurityEngine::with_defaults()),
+    };
+    let addr = spawn_watcher(state).await;
+
+    let resp = client()
+        .post(format!("http://{}/mcp/rpc", addr))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+                "name": "read_file",
+                "arguments": {"path": "~/.ssh/id_rsa"},
+            },
+            "id": 11,
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 403);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "security_blocked");
+
+    // No mcp_events row (we only log forwarded tool calls).
+    let events = storage.mcp_events_for_date(&today()).unwrap();
+    assert!(
+        events.is_empty(),
+        "blocked call should not appear in mcp_events"
+    );
+
+    // A security_events row was inserted with provider=mcp + tool name.
+    let sec = storage.security_events_for_date(&today()).unwrap();
+    assert_eq!(sec.len(), 1);
+    assert_eq!(sec[0].event_type, "path_blocked");
+    assert_eq!(sec[0].provider.as_deref(), Some("mcp"));
+    assert_eq!(sec[0].model.as_deref(), Some("read_file"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn denied_command_in_tool_arguments_is_blocked() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&upstream)
+        .await;
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = WatchState {
+        upstream: upstream.uri(),
+        http_client: reqwest::Client::new(),
+        storage: storage.clone(),
+        security: Arc::new(SecurityEngine::with_defaults()),
+    };
+    let addr = spawn_watcher(state).await;
+
+    let resp = client()
+        .post(format!("http://{}/mcp/rpc", addr))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "bash", "arguments": {"command": "rm -rf /"}},
+            "id": 12,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    let sec = storage.security_events_for_date(&today()).unwrap();
+    assert_eq!(sec.len(), 1);
+    assert_eq!(sec[0].event_type, "command_blocked");
+    assert_eq!(sec[0].provider.as_deref(), Some("mcp"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secret_pattern_in_tool_arguments_is_blocked() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&upstream)
+        .await;
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = WatchState {
+        upstream: upstream.uri(),
+        http_client: reqwest::Client::new(),
+        storage: storage.clone(),
+        security: Arc::new(SecurityEngine::with_defaults()),
+    };
+    let addr = spawn_watcher(state).await;
+
+    let resp = client()
+        .post(format!("http://{}/mcp/rpc", addr))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+                "name": "upload",
+                "arguments": {"body": "AKIAIOSFODNN7EXAMPLE"},
+            },
+            "id": 13,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    let sec = storage.security_events_for_date(&today()).unwrap();
+    assert_eq!(sec.len(), 1);
+    assert_eq!(sec[0].event_type, "secret_detected");
 }

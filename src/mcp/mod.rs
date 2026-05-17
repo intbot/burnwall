@@ -25,13 +25,19 @@ use tokio::net::TcpListener;
 use tracing::{debug, error, info, warn};
 
 use crate::proxy::streaming::{self, ProxyBody};
-use crate::storage::{McpEvent, Storage};
+use crate::security::SecurityEngine;
+use crate::storage::{McpEvent, SecurityEvent, Storage};
 
 #[derive(Clone)]
 pub struct WatchState {
     pub upstream: String,
     pub http_client: reqwest::Client,
     pub storage: Arc<Storage>,
+    /// Same engine as the LLM proxy uses. Applied to every MCP request
+    /// body so the path / command / mount / secret denylist also covers
+    /// `tools/call` arguments. A violation returns 403, writes a
+    /// `security_events` row, and never forwards.
+    pub security: Arc<SecurityEngine>,
 }
 
 /// Parsed JSON-RPC `tools/call` request, captured for the event log.
@@ -165,6 +171,32 @@ async fn handle(
     } else {
         None
     };
+
+    // Security scan: the same engine the LLM proxy uses, applied to the
+    // raw JSON-RPC body. Walks every string leaf — that means `tools/call`
+    // arguments get the path / command / mount / secret denylist for free.
+    // A violation returns 403 and never forwards (mirrors the LLM proxy's
+    // 403 path); the `security_events` row gets `provider="mcp"` and the
+    // tool name when we have one, so `burnwall security` shows the source.
+    if let Some(violation) = state.security.scan(&body_bytes) {
+        warn!("🛡️ MCP BLOCKED: {}", violation.message());
+        let redact = state.security.rules().log_redact_details;
+        let stored_details = if redact {
+            "<redacted>".to_string()
+        } else {
+            violation.matched.clone()
+        };
+        let tool_label = tool_call
+            .as_ref()
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        let event = SecurityEvent::new(violation.kind.event_type(), &stored_details)
+            .with_provider("mcp", &tool_label);
+        if let Err(e) = state.storage.insert_security_event(&event) {
+            error!("mcp security_event insert failed: {}", e);
+        }
+        return Ok(error_response(StatusCode::FORBIDDEN, "security_blocked"));
+    }
 
     let mut outbound_headers = HeaderMap::new();
     for (name, value) in parts.headers.iter() {
