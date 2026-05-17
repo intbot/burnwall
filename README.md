@@ -50,21 +50,51 @@ burnwall config set budget.daily 20
 
 ## Install
 
-Prebuilt binaries (after a release tag is pushed, the GitHub Actions
-release workflow publishes per-platform archives):
-
-- macOS arm64 / x86_64
-- Linux x86_64
-- Windows x86_64
+**macOS / Linux:**
 
 ```bash
-# From source (requires Rust toolchain ≥ 1.80):
-git clone https://github.com/intbot/burnwall && cd burnwall
-cargo build --release
-./target/release/burnwall --help
+curl -fsSL https://raw.githubusercontent.com/intbot/burnwall/main/install.sh | sh
+```
 
-# Or once published:
-cargo install burnwall
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/intbot/burnwall/main/install.ps1 | iex
+```
+
+The installers detect your OS and architecture, download the right
+release archive from GitHub, drop the `burnwall` binary in a per-user
+location (`~/.local/bin` on Unix, `%USERPROFILE%\.burnwall\bin` on
+Windows), and print a PATH hint if needed. Override the install dir
+with `BURNWALL_INSTALL_DIR=…` or pin a version with
+`BURNWALL_VERSION=0.3.1`.
+
+### Homebrew
+
+```bash
+brew tap intbot/burnwall
+brew install burnwall
+```
+
+Works on macOS (arm64 + x86_64) and Linuxbrew.
+
+### Manual download
+
+Prebuilt archives for every release are at
+<https://github.com/intbot/burnwall/releases>:
+
+- `burnwall-aarch64-apple-darwin.tar.gz` — macOS Apple Silicon
+- `burnwall-x86_64-apple-darwin.tar.gz` — macOS Intel
+- `burnwall-x86_64-unknown-linux-gnu.tar.gz` — Linux x86_64
+- `burnwall-x86_64-pc-windows-msvc.zip` — Windows x86_64
+
+Extract and put the `burnwall` binary anywhere on your `PATH`.
+
+### For Rust developers
+
+```bash
+cargo install burnwall                                         # from crates.io
+git clone https://github.com/intbot/burnwall && cd burnwall && cargo build --release   # from source
 ```
 
 ## How It Works
