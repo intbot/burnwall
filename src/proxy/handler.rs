@@ -158,20 +158,30 @@ pub async fn handle(
     }
 
     // ─── cache injection (Anthropic only, opt-in) ───
-    // Replaces `body_bytes` with a rewritten body that has `cache_control`
-    // ephemeral markers on the system prompt and first message. Triggers
-    // only when the operator opted in AND the request is destined for the
-    // Messages API (no other Anthropic endpoint accepts these markers).
-    let forward_body = if state.cache_injection
-        && provider == "anthropic"
-        && cache_injection::is_messages_path(&rest)
-    {
+    // When on: replace `body_bytes` with a rewritten body that has
+    // `cache_control` ephemeral markers on the system prompt and first
+    // message. When off: estimate the steady-state savings we would have
+    // captured and accumulate them in `daily_projection`, so `burnwall
+    // status` can surface "you would have saved $X today". Both branches
+    // gate to provider=anthropic + path=/v1/messages (the only Anthropic
+    // endpoint that accepts these markers).
+    let messages_api = provider == "anthropic" && cache_injection::is_messages_path(&rest);
+    let forward_body = if state.cache_injection && messages_api {
         let outcome = cache_injection::inject_if_eligible(&body_bytes);
         if outcome.modified {
             tracing::debug!("cache_control injected on Anthropic request");
         }
         outcome.body
     } else {
+        if !state.cache_injection && messages_api {
+            let projected = cache_injection::estimate_savings_usd(&body_bytes);
+            if projected > 0.0 {
+                let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+                if let Err(e) = state.storage.record_cache_projection(&today, projected) {
+                    tracing::warn!("cache projection record failed: {}", e);
+                }
+            }
+        }
         body_bytes
     };
 

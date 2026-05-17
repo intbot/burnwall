@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, OptionalExtension};
 
 use super::{
-    models::{DailyTotal, ModelBreakdown, RequestRecord, SecurityEvent},
+    models::{DailyTotal, McpEvent, ModelBreakdown, RequestRecord, SecurityEvent},
     Result, Storage,
 };
 
@@ -247,6 +247,102 @@ impl Storage {
                 })?
                 .collect();
             Ok(rows?)
+        })
+    }
+
+    /// Add to the "would-have-cached" projection accumulator for the given
+    /// local date. Called from the proxy handler when cache injection is
+    /// off and an Anthropic Messages request flows through. The projection
+    /// is rough (char-count tokenization heuristic) and exists purely so
+    /// `burnwall status` can show the user the foregone savings.
+    pub fn record_cache_projection(&self, date: &str, savings_usd: f64) -> Result<()> {
+        if !savings_usd.is_finite() || savings_usd <= 0.0 {
+            return Ok(());
+        }
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO daily_projection (date, projected_cache_savings_usd)
+                 VALUES (?1, ?2)
+                 ON CONFLICT(date) DO UPDATE SET
+                     projected_cache_savings_usd = projected_cache_savings_usd + excluded.projected_cache_savings_usd,
+                     updated_at = datetime('now')",
+                params![date, savings_usd],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Insert an MCP tool-invocation row from `burnwall mcp-watch`.
+    pub fn insert_mcp_event(&self, e: &McpEvent) -> Result<i64> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO mcp_events (timestamp, tool_name, rpc_id, upstream_status, upstream_uri)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    e.timestamp,
+                    e.tool_name,
+                    e.rpc_id,
+                    e.upstream_status,
+                    e.upstream_uri,
+                ],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+    }
+
+    /// Count MCP events recorded today (local date).
+    pub fn mcp_event_count_for_date(&self, date: &str) -> Result<i64> {
+        self.with_conn(|conn| {
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM mcp_events
+                 WHERE DATE(timestamp, 'localtime') = ?1",
+                params![date],
+                |row| row.get(0),
+            )?;
+            Ok(count)
+        })
+    }
+
+    /// All MCP events from the given local date, newest first.
+    pub fn mcp_events_for_date(&self, date: &str) -> Result<Vec<McpEvent>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, timestamp, tool_name, rpc_id, upstream_status, upstream_uri
+                 FROM mcp_events
+                 WHERE DATE(timestamp, 'localtime') = ?1
+                 ORDER BY timestamp DESC",
+            )?;
+            let rows: rusqlite::Result<Vec<McpEvent>> = stmt
+                .query_map(params![date], |row| {
+                    Ok(McpEvent {
+                        id: Some(row.get(0)?),
+                        timestamp: row.get::<_, DateTime<Utc>>(1)?,
+                        tool_name: row.get(2)?,
+                        rpc_id: row.get(3)?,
+                        upstream_status: row.get(4)?,
+                        upstream_uri: row.get(5)?,
+                    })
+                })?
+                .collect();
+            Ok(rows?)
+        })
+    }
+
+    /// Read the accumulated projection for a local date. Returns 0.0 when
+    /// no projection has been recorded — distinct from "cache injection
+    /// is on", which the caller checks separately.
+    pub fn cache_projection_for_date(&self, date: &str) -> Result<f64> {
+        self.with_conn(|conn| {
+            let value: f64 = conn
+                .query_row(
+                    "SELECT projected_cache_savings_usd FROM daily_projection
+                     WHERE date = ?1",
+                    params![date],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .unwrap_or(0.0);
+            Ok(value)
         })
     }
 

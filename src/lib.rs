@@ -12,6 +12,7 @@ pub mod budget;
 pub mod cli;
 pub mod config;
 pub mod logscrape;
+pub mod mcp;
 pub mod pricing;
 pub mod providers;
 pub mod proxy;

@@ -22,7 +22,7 @@ use rusqlite::Connection;
 pub mod models;
 pub mod repository;
 
-pub use models::{DailyTotal, ModelBreakdown, RequestRecord, SecurityEvent};
+pub use models::{DailyTotal, McpEvent, ModelBreakdown, RequestRecord, SecurityEvent};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS requests (
@@ -64,6 +64,31 @@ CREATE TABLE IF NOT EXISTS daily_summary (
     cache_savings REAL NOT NULL DEFAULT 0.0,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Per-day accumulator of the "would-have-cached" savings projection,
+-- written from the proxy handler only when cache injection is OFF and the
+-- request was an Anthropic Messages-API call eligible for marker insertion.
+-- Read by `burnwall status` to surface the foregone savings.
+CREATE TABLE IF NOT EXISTS daily_projection (
+    date TEXT PRIMARY KEY,
+    projected_cache_savings_usd REAL NOT NULL DEFAULT 0.0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Pass-through audit log of MCP tool invocations seen by `burnwall
+-- mcp-watch`. Read-only first: we record the tool name + JSON-RPC id +
+-- HTTP status returned by the upstream MCP server, never the argument
+-- payload (could contain prompt content).
+CREATE TABLE IF NOT EXISTS mcp_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+    tool_name TEXT NOT NULL,
+    rpc_id TEXT,
+    upstream_status INTEGER NOT NULL DEFAULT 0,
+    upstream_uri TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_mcp_events_timestamp ON mcp_events(timestamp);
 "#;
 
 #[derive(Debug, thiserror::Error)]

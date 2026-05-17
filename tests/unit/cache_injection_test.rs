@@ -3,7 +3,9 @@
 use bytes::Bytes;
 use serde_json::{json, Value};
 
-use burnwall::proxy::cache_injection::{inject_if_eligible, is_messages_path};
+use burnwall::proxy::cache_injection::{
+    estimate_savings_usd, inject_if_eligible, is_messages_path,
+};
 
 fn body(v: Value) -> Bytes {
     Bytes::from(serde_json::to_vec(&v).unwrap())
@@ -191,6 +193,97 @@ fn is_messages_path_recognizes_exact_and_query_suffixed() {
     assert!(!is_messages_path("/v1/complete"));
     assert!(!is_messages_path("/"));
     assert!(!is_messages_path(""));
+}
+
+#[test]
+fn estimate_savings_zero_for_invalid_json() {
+    assert_eq!(estimate_savings_usd(b"{ not json"), 0.0);
+    assert_eq!(estimate_savings_usd(b""), 0.0);
+}
+
+#[test]
+fn estimate_savings_zero_when_request_already_has_cache_control() {
+    let req = body(json!({
+        "model": "claude-sonnet-4-6",
+        "system": [
+            {"type": "text", "text": "x".repeat(4000), "cache_control": {"type": "ephemeral"}},
+        ],
+        "messages": [{"role": "user", "content": "Hello"}],
+    }));
+    assert_eq!(estimate_savings_usd(&req), 0.0);
+}
+
+#[test]
+fn estimate_savings_zero_for_unknown_model() {
+    let req = body(json!({
+        "model": "claude-magical-9000",
+        "system": "x".repeat(4000),
+        "messages": [{"role": "user", "content": "Hello"}],
+    }));
+    assert_eq!(estimate_savings_usd(&req), 0.0);
+}
+
+#[test]
+fn estimate_savings_zero_when_no_system_or_messages() {
+    let req = body(json!({"model": "claude-sonnet-4-6", "max_tokens": 256}));
+    assert_eq!(estimate_savings_usd(&req), 0.0);
+}
+
+#[test]
+fn estimate_savings_matches_pricing_formula_for_string_inputs() {
+    // 4000 chars of system + 4000 chars of first message = 8000 chars
+    // tokens ≈ 8000 / 4 = 2000
+    // Sonnet 4.6: input $3.00/MTok, cache_read $0.30/MTok → delta $2.70/MTok
+    // expected savings = 2000 * 2.70 / 1_000_000 = $0.0054
+    let req = body(json!({
+        "model": "claude-sonnet-4-6",
+        "system": "a".repeat(4000),
+        "messages": [{"role": "user", "content": "b".repeat(4000)}],
+    }));
+
+    let savings = estimate_savings_usd(&req);
+    assert!(
+        (savings - 0.0054).abs() < 1e-9,
+        "expected $0.0054, got {savings}"
+    );
+}
+
+#[test]
+fn estimate_savings_counts_text_blocks_inside_arrays() {
+    // System is a single 1000-char text block; first message is two text
+    // blocks summing to 3000 chars. Total 4000 chars → 1000 tokens.
+    // Haiku 4.5: input $1.00 - cache_read $0.10 = $0.90/MTok delta.
+    // Expected savings = 1000 * 0.90 / 1_000_000 = $0.0009.
+    let req = body(json!({
+        "model": "claude-haiku-4-5",
+        "system": [{"type": "text", "text": "s".repeat(1000)}],
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "x".repeat(2000)},
+                {"type": "text", "text": "y".repeat(1000)},
+            ],
+        }],
+    }));
+
+    let savings = estimate_savings_usd(&req);
+    assert!(
+        (savings - 0.0009).abs() < 1e-9,
+        "expected $0.0009, got {savings}"
+    );
+}
+
+#[test]
+fn estimate_savings_resolves_date_suffixed_model_id() {
+    // The proxy can see model IDs like `claude-sonnet-4-6-20250514`; the
+    // pricing lookup tolerates that suffix, and so should the projection.
+    let req = body(json!({
+        "model": "claude-sonnet-4-6-20260301",
+        "system": "a".repeat(4000),
+        "messages": [{"role": "user", "content": "b".repeat(4000)}],
+    }));
+    let savings = estimate_savings_usd(&req);
+    assert!((savings - 0.0054).abs() < 1e-9);
 }
 
 #[test]

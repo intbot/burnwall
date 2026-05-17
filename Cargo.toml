@@ -125,6 +125,10 @@ path = "tests/integration/daemon_test.rs"
 name = "cache_injection_test"
 path = "tests/unit/cache_injection_test.rs"
 
+[[test]]
+name = "mcp_watch_test"
+path = "tests/integration/mcp_watch_test.rs"
+
 [profile.release]
 opt-level = "z"                      # Optimize for size
 lto = true                          # Link-time optimization

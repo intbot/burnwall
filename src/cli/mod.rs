@@ -7,6 +7,7 @@ pub mod config_cmd;
 pub mod daemon;
 pub mod history;
 pub mod init;
+pub mod mcp_watch;
 pub mod security;
 pub mod start;
 pub mod status;
@@ -41,6 +42,8 @@ pub enum Command {
     Security(security::SecurityArgs),
     /// Print a shell-completion script to stdout.
     Completions(completions::CompletionsArgs),
+    /// Pass-through MCP HTTP proxy that logs tools/call invocations.
+    McpWatch(mcp_watch::McpWatchArgs),
 }
 
 impl Cli {
@@ -54,6 +57,7 @@ impl Cli {
             Command::Init(args) => init::run_cmd(args),
             Command::Security(args) => security::run_cmd(args),
             Command::Completions(args) => completions::run_cmd(args),
+            Command::McpWatch(args) => mcp_watch::run_cmd(args).await,
         }
     }
 }
