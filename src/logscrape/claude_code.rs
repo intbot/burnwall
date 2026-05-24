@@ -127,6 +127,10 @@ fn parse_line(line: &str) -> Option<ParsedTurn> {
             model,
             timestamp,
             usage,
+            // Claude Code's usage block does not itemize thinking tokens; they
+            // are billed inside `output_tokens` with no separate count we can
+            // trust, so the reasoning-effort rule never fires on Claude data.
+            reasoning_tokens: 0,
         },
     })
 }

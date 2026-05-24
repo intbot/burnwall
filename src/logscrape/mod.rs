@@ -39,6 +39,13 @@ pub struct UsageEntry {
     pub model: String,
     pub timestamp: DateTime<Utc>,
     pub usage: TokenUsage,
+    /// Reasoning/thinking tokens spent this turn — a *subset* of
+    /// `usage.output_tokens` already billed at the output rate, surfaced
+    /// separately so the waste engine can re-attribute it. `0` when the tool
+    /// doesn't report it (Claude Code's usage block has no separate count);
+    /// populated from Codex's `last_token_usage.reasoning_output_tokens`.
+    /// Never added to cost math — it is informational only.
+    pub reasoning_tokens: u64,
 }
 
 /// Per-(tool, model) aggregate for a single date — one row of the

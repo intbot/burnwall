@@ -135,6 +135,16 @@ fn codex_parse_str_normalizes_token_usage() {
     assert_eq!(first.usage.cache_read_tokens, 4000);
     assert_eq!(first.usage.cache_creation_tokens, 0);
     assert_eq!(first.usage.output_tokens, 300);
+    // Reasoning tokens are a subset of output_tokens, surfaced separately.
+    assert_eq!(first.reasoning_tokens, 120);
+}
+
+#[test]
+fn claude_code_entries_report_no_reasoning_tokens() {
+    // Claude Code's usage block has no separate reasoning count, so every
+    // parsed turn carries reasoning_tokens == 0 (the rule fails open on it).
+    let turns = claude_code::parse_str(&fixture("claude_code_session.jsonl"));
+    assert!(turns.iter().all(|t| t.entry.reasoning_tokens == 0));
 }
 
 #[test]
@@ -209,6 +219,7 @@ fn entry(
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
         },
+        reasoning_tokens: 0,
     }
 }
 

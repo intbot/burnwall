@@ -107,6 +107,10 @@ fn parse_token_count(
     if usage.total() == 0 {
         return None;
     }
+    // Reasoning tokens are a subset of `output_tokens` (Codex's `total_tokens`
+    // = input + output, with no separate reasoning term), surfaced for the
+    // waste engine. Never folded back into `usage` — that would double-count.
+    let reasoning_tokens = json_i64(last, "reasoning_output_tokens").max(0) as u64;
     let model = current_model.clone()?;
     let timestamp = line_timestamp(value, fallback_date)?;
     Some(UsageEntry {
@@ -114,6 +118,7 @@ fn parse_token_count(
         model,
         timestamp,
         usage,
+        reasoning_tokens,
     })
 }
 

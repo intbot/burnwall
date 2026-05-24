@@ -12,6 +12,7 @@ pub mod security;
 pub mod start;
 pub mod status;
 pub mod stop;
+pub mod waste;
 
 #[derive(Parser, Debug)]
 #[command(name = "burnwall", version, about)]
@@ -40,6 +41,8 @@ pub enum Command {
     Completions(completions::CompletionsArgs),
     /// Pass-through MCP HTTP proxy that logs tools/call invocations.
     McpWatch(mcp_watch::McpWatchArgs),
+    /// Report cost-waste patterns found in local AI session logs.
+    Waste(waste::WasteArgs),
 }
 
 impl Cli {
@@ -54,6 +57,7 @@ impl Cli {
             Command::Security(args) => security::run_cmd(args),
             Command::Completions(args) => completions::run_cmd(args),
             Command::McpWatch(args) => mcp_watch::run_cmd(args).await,
+            Command::Waste(args) => waste::run_cmd(args),
         }
     }
 }

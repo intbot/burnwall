@@ -178,7 +178,6 @@ Scan `tool_use` / `function_call` blocks in the REQUEST body (before forwarding)
 
 - Read `docs/SPEC.md` for exact CLI behavior and output formats
 - Read `docs/ARCHITECTURE.md` for component design and data flow
-- Read `PROGRESS.md` for current project state
 - Work in focused, scoped sessions — one component at a time
 - Write tests FIRST for any new parser or calculator logic
 - Never add any form of telemetry or network call beyond API forwarding

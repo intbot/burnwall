@@ -18,3 +18,4 @@ pub mod providers;
 pub mod proxy;
 pub mod security;
 pub mod storage;
+pub mod waste;
