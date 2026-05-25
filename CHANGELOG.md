@@ -2,6 +2,37 @@
 
 All notable changes to Burnwall.
 
+## [0.4.0] — 2026-05-25
+
+### Added
+
+- `burnwall waste` — an advisory report of cost-waste patterns found in your
+  local AI session logs, each line annotated with its estimated dollar impact.
+  Read-only; it never reads prompt content. Detects prompt-cache starvation,
+  flagship-model use on trivial requests, heavy reasoning on routine prompts,
+  requests near the context-window limit, runaway context growth within a
+  session, and very long sessions. The headline figure is capped at what was
+  actually spent. `--days N` and `--json` supported.
+- `burnwall explore` — spend broken down by model, by tool, and by workspace
+  over a window. `--days N` and `--json` supported.
+- Monthly burndown in `burnwall history` — month-to-date spend, an ideal-pace
+  line, and an end-of-month projection against the configured monthly budget.
+- `burnwall status` shows a one-line teaser of average avoidable spend per day
+  when there is any, with a pointer to `burnwall waste`.
+- `burnwall config doctor` — prints the effective configuration and flags
+  deprecated or unknown keys, out-of-range values, and any safety toggle that
+  is turned on. Exits non-zero on an error-level problem.
+
+### Changed
+
+- New `[tools]` config section toggles log scraping per tool (`claude_code`,
+  `codex`). It supersedes the old `[log_scrape]` switch, which still works for
+  one release as a global on/off.
+- New `[waste]` config section with `enabled` (default on) gates the advisory
+  engine and the `status` teaser.
+- `security.enabled = false` now actually disables request scanning; it was
+  previously accepted but ignored.
+
 ## [0.3.2] — 2026-05-17
 
 ### Fixed
