@@ -20,6 +20,9 @@
 
 #[derive(Debug, Clone)]
 pub struct Ruleset {
+    /// Master switch. When `false`, [`super::SecurityEngine::scan`] forwards
+    /// everything without inspecting it. Default `true`.
+    pub enabled: bool,
     pub deny_paths: Vec<String>,
     /// Path exceptions from a project profile. A leaf matching one of these
     /// skips the path-deny checks. Empty unless a `.burnwall.yaml` was
@@ -38,6 +41,7 @@ pub struct Ruleset {
 impl Default for Ruleset {
     fn default() -> Self {
         Self {
+            enabled: true,
             deny_paths: DEFAULT_DENY_PATHS.iter().map(|s| s.to_string()).collect(),
             allow_paths: Vec::new(),
             deny_commands: DEFAULT_DENY_COMMANDS

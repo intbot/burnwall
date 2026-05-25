@@ -46,6 +46,17 @@ pub struct UsageEntry {
     /// populated from Codex's `last_token_usage.reasoning_output_tokens`.
     /// Never added to cost math — it is informational only.
     pub reasoning_tokens: u64,
+    /// Session this turn belongs to, used to group multi-turn rules
+    /// (mega-sessions, runaway-context-growth). `None` when the tool's log
+    /// carries no session identity.
+    pub session_id: Option<String>,
+    /// Working directory the turn ran in, for the per-workspace cost
+    /// dimension. `None` when the log doesn't record it.
+    pub workspace: Option<String>,
+    /// The model's context-window size in tokens, when the log reports it
+    /// (Codex's `model_context_window`). Lets the saturation rule compare a
+    /// prompt against the real limit instead of a hardcoded per-model map.
+    pub context_window: Option<u64>,
 }
 
 /// Per-(tool, model) aggregate for a single date — one row of the
@@ -80,9 +91,19 @@ impl ScrapeBreakdown {
 /// Collect usage entries from every supported tool's logs. Fail-open: a
 /// tool with no log directory or unparseable logs contributes nothing.
 pub fn collect_all() -> Vec<UsageEntry> {
+    collect_selected(true, true)
+}
+
+/// Collect entries only from the selected tools — honors the per-tool
+/// `[tools]` config switches so a disabled tool is never read.
+pub fn collect_selected(scrape_claude: bool, scrape_codex: bool) -> Vec<UsageEntry> {
     let mut entries = Vec::new();
-    entries.extend(claude_code::collect());
-    entries.extend(codex::collect());
+    if scrape_claude {
+        entries.extend(claude_code::collect());
+    }
+    if scrape_codex {
+        entries.extend(codex::collect());
+    }
     entries
 }
 

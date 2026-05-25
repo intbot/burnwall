@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 pub mod completions;
 pub mod config_cmd;
 pub mod daemon;
+pub mod explore;
 pub mod history;
 pub mod init;
 pub mod mcp_watch;
@@ -43,6 +44,8 @@ pub enum Command {
     McpWatch(mcp_watch::McpWatchArgs),
     /// Report cost-waste patterns found in local AI session logs.
     Waste(waste::WasteArgs),
+    /// Explore spend by model, harness, and workspace over a window.
+    Explore(explore::ExploreArgs),
 }
 
 impl Cli {
@@ -58,6 +61,7 @@ impl Cli {
             Command::Completions(args) => completions::run_cmd(args),
             Command::McpWatch(args) => mcp_watch::run_cmd(args).await,
             Command::Waste(args) => waste::run_cmd(args),
+            Command::Explore(args) => explore::run_cmd(args),
         }
     }
 }

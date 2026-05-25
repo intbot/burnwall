@@ -1,5 +1,8 @@
 //! Built-in waste rules behind the [`WasteRule`] trait.
 
+use std::collections::HashMap;
+
+use crate::logscrape::UsageEntry;
 use crate::pricing::{self, ModelPricing};
 
 use super::types::{Finding, Severity, WasteContext, WasteRule};
@@ -7,6 +10,28 @@ use super::types::{Finding, Severity, WasteContext, WasteRule};
 /// Total prompt-side tokens for an entry (input + cache write + cache read).
 fn prompt_tokens(usage: &crate::providers::TokenUsage) -> u64 {
     usage.input_tokens + usage.cache_creation_tokens + usage.cache_read_tokens
+}
+
+/// The per-token input rate (USD) for an entry's model, or `None` if unknown.
+fn input_rate(model: &str) -> Option<f64> {
+    pricing::get_pricing(model).map(|p| p.input_per_mtok / 1_000_000.0)
+}
+
+/// Group entries into sessions by `session_id` (entries without one are
+/// skipped), each session's turns sorted oldest-first. Used by the
+/// multi-turn rules; single-turn rules ignore session identity.
+fn sessions<'a>(ctx: &WasteContext<'a>) -> Vec<Vec<&'a UsageEntry>> {
+    let mut map: HashMap<&str, Vec<&UsageEntry>> = HashMap::new();
+    for e in ctx.entries {
+        if let Some(sid) = e.session_id.as_deref() {
+            map.entry(sid).or_default().push(e);
+        }
+    }
+    let mut out: Vec<Vec<&UsageEntry>> = map.into_values().collect();
+    for s in &mut out {
+        s.sort_by_key(|e| e.timestamp);
+    }
+    out
 }
 
 /// If `model` is a flagship-tier model, return the pricing of the cheaper
@@ -250,4 +275,209 @@ impl WasteRule for ReasoningEffortOveruse {
             ),
         })
     }
+}
+
+/// **Context-window saturation** — requests whose prompt fills most of the
+/// model's context window. These pay peak per-turn input cost and risk
+/// truncation/quality loss. Feasible because Codex reports the real
+/// `model_context_window`; entries without a window (Claude Code) are skipped.
+///
+/// Waste is the uncached input spend on the saturated turns — money you'd trim
+/// by compacting or splitting the work. (It overlaps other rules; the report's
+/// headline is capped at actual spend.)
+pub struct ContextWindowSaturation {
+    pub min_fill_rate: f64,
+    pub min_sample: usize,
+}
+
+impl Default for ContextWindowSaturation {
+    fn default() -> Self {
+        Self {
+            min_fill_rate: 0.85,
+            min_sample: 10,
+        }
+    }
+}
+
+impl WasteRule for ContextWindowSaturation {
+    fn id(&self) -> &'static str {
+        "context-window-saturation"
+    }
+
+    fn evaluate(&self, ctx: &WasteContext) -> Option<Finding> {
+        let mut count = 0usize;
+        let mut waste_usd = 0.0f64;
+
+        for e in ctx.entries {
+            let Some(window) = e.context_window.filter(|&w| w > 0) else {
+                continue;
+            };
+            let fill = prompt_tokens(&e.usage) as f64 / window as f64;
+            if fill < self.min_fill_rate {
+                continue;
+            }
+            count += 1;
+            if let Some(rate) = input_rate(&e.model) {
+                waste_usd += e.usage.input_tokens as f64 * rate;
+            }
+        }
+
+        if count < self.min_sample || waste_usd <= 0.0 {
+            return None;
+        }
+
+        Some(Finding {
+            rule_id: "context-window-saturation",
+            title: "Requests near the context-window limit".to_string(),
+            severity: Severity::Low,
+            count,
+            observed_waste_usd: waste_usd,
+            detail: format!(
+                "{count} requests ran at {:.0}%+ of the model's context window, spending about \
+                 ${:.2} on input at peak per-turn cost (and risking truncation). \
+                 Compacting or splitting the work keeps prompts well under the limit.",
+                self.min_fill_rate * 100.0,
+                waste_usd,
+            ),
+        })
+    }
+}
+
+/// **Runaway context growth** — a session whose per-turn prompt keeps climbing,
+/// so later turns re-pay for an ever-larger carried context. Trips when a
+/// session's last-third average context is at least `growth_factor`× its
+/// first-third average. Needs session grouping, so Claude Code (which logs a
+/// `sessionId`) and Codex both qualify.
+///
+/// Waste is the input spend above the session's early baseline — what the
+/// growth cost you. Compacting earlier would have avoided it.
+pub struct RunawayContextGrowth {
+    pub min_turns: usize,
+    pub growth_factor: f64,
+}
+
+impl Default for RunawayContextGrowth {
+    fn default() -> Self {
+        Self {
+            min_turns: 8,
+            growth_factor: 3.0,
+        }
+    }
+}
+
+impl WasteRule for RunawayContextGrowth {
+    fn id(&self) -> &'static str {
+        "runaway-context-growth"
+    }
+
+    fn evaluate(&self, ctx: &WasteContext) -> Option<Finding> {
+        let mut flagged = 0usize;
+        let mut waste_usd = 0.0f64;
+
+        for s in sessions(ctx) {
+            if s.len() < self.min_turns {
+                continue;
+            }
+            let third = (s.len() / 3).max(1);
+            let early = &s[..third];
+            let late = &s[s.len() - third..];
+            let early_ctx = mean(early, |e| prompt_tokens(&e.usage));
+            let late_ctx = mean(late, |e| prompt_tokens(&e.usage));
+            if early_ctx <= 0.0 || late_ctx < self.growth_factor * early_ctx {
+                continue;
+            }
+            // Input above the early baseline, priced per turn at its model rate.
+            let baseline_input = mean(early, |e| e.usage.input_tokens);
+            let mut session_waste = 0.0f64;
+            for e in &s {
+                let extra = (e.usage.input_tokens as f64 - baseline_input).max(0.0);
+                if let Some(rate) = input_rate(&e.model) {
+                    session_waste += extra * rate;
+                }
+            }
+            if session_waste > 0.0 {
+                flagged += 1;
+                waste_usd += session_waste;
+            }
+        }
+
+        if flagged == 0 || waste_usd <= 0.0 {
+            return None;
+        }
+
+        Some(Finding {
+            rule_id: "runaway-context-growth",
+            title: "Sessions with a ballooning context".to_string(),
+            severity: Severity::Low,
+            count: flagged,
+            observed_waste_usd: waste_usd,
+            detail: format!(
+                "{flagged} session(s) let the context grow {:.0}×+ from start to finish, \
+                 spending about ${:.2} re-sending the accumulated context. \
+                 Compacting or starting a fresh session for a new task trims this.",
+                self.growth_factor, waste_usd,
+            ),
+        })
+    }
+}
+
+/// **Mega-sessions** — sessions that run for very many turns while sustaining a
+/// large context. Informational (no isolated dollar figure — the spend overlaps
+/// the cache/growth rules), so it reports `observed_waste_usd == 0.0` and just
+/// surfaces the count, per the [`Finding`] contract.
+pub struct MegaSessions {
+    pub min_turns: usize,
+    pub min_total_prompt_tokens: u64,
+}
+
+impl Default for MegaSessions {
+    fn default() -> Self {
+        Self {
+            min_turns: 40,
+            min_total_prompt_tokens: 500_000,
+        }
+    }
+}
+
+impl WasteRule for MegaSessions {
+    fn id(&self) -> &'static str {
+        "mega-sessions"
+    }
+
+    fn evaluate(&self, ctx: &WasteContext) -> Option<Finding> {
+        let count = sessions(ctx)
+            .into_iter()
+            .filter(|s| {
+                s.len() >= self.min_turns
+                    && s.iter().map(|e| prompt_tokens(&e.usage)).sum::<u64>()
+                        >= self.min_total_prompt_tokens
+            })
+            .count();
+
+        if count == 0 {
+            return None;
+        }
+
+        Some(Finding {
+            rule_id: "mega-sessions",
+            title: "Very long sessions".to_string(),
+            severity: Severity::Low,
+            count,
+            observed_waste_usd: 0.0,
+            detail: format!(
+                "{count} session(s) ran {}+ turns on a large sustained context. \
+                 Long sessions re-pay for a growing context every turn — splitting focused \
+                 work into shorter sessions keeps prompts (and cost) down.",
+                self.min_turns,
+            ),
+        })
+    }
+}
+
+/// Arithmetic mean of `f` over `entries` (`0.0` for an empty slice).
+fn mean<F: Fn(&UsageEntry) -> u64>(entries: &[&UsageEntry], f: F) -> f64 {
+    if entries.is_empty() {
+        return 0.0;
+    }
+    entries.iter().map(|e| f(e) as f64).sum::<f64>() / entries.len() as f64
 }

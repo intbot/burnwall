@@ -37,7 +37,7 @@ const TOOL: &str = "codex";
 /// the session date recovered from the file path (`.../YYYY/MM/DD/...`); it
 /// is used to date an event only when its line carries no `timestamp`.
 pub fn parse_str(contents: &str, fallback_date: Option<NaiveDate>) -> Vec<UsageEntry> {
-    let mut current_model: Option<String> = None;
+    let mut state = SessionState::default();
     let mut out = Vec::new();
 
     for line in contents.lines() {
@@ -45,17 +45,9 @@ pub fn parse_str(contents: &str, fallback_date: Option<NaiveDate>) -> Vec<UsageE
             continue;
         };
         match value.get("type").and_then(Value::as_str) {
-            Some("turn_context") | Some("session_meta") => {
-                if let Some(model) = value
-                    .get("payload")
-                    .and_then(|p| p.get("model"))
-                    .and_then(Value::as_str)
-                {
-                    current_model = Some(model.to_string());
-                }
-            }
+            Some("turn_context") | Some("session_meta") => state.update_from(&value),
             Some("event_msg") => {
-                if let Some(entry) = parse_token_count(&value, &current_model, fallback_date) {
+                if let Some(entry) = parse_token_count(&value, &state, fallback_date) {
                     out.push(entry);
                 }
             }
@@ -63,6 +55,35 @@ pub fn parse_str(contents: &str, fallback_date: Option<NaiveDate>) -> Vec<UsageE
         }
     }
     out
+}
+
+/// The most recent session context — model, working directory, and session
+/// id are announced in `turn_context` / `session_meta` lines and attached to
+/// the `token_count` events that follow (which don't repeat them).
+#[derive(Default)]
+struct SessionState {
+    model: Option<String>,
+    cwd: Option<String>,
+    session_id: Option<String>,
+}
+
+impl SessionState {
+    /// Absorb any of model / cwd / id present on a context line. Each field
+    /// is sticky — a later line without the field keeps the previous value.
+    fn update_from(&mut self, value: &Value) {
+        let Some(payload) = value.get("payload") else {
+            return;
+        };
+        if let Some(model) = payload.get("model").and_then(Value::as_str) {
+            self.model = Some(model.to_string());
+        }
+        if let Some(cwd) = payload.get("cwd").and_then(Value::as_str) {
+            self.cwd = Some(cwd.to_string());
+        }
+        if let Some(id) = payload.get("id").and_then(Value::as_str) {
+            self.session_id = Some(id.to_string());
+        }
+    }
 }
 
 /// Discover and parse every Codex rollout log under the log root.
@@ -95,14 +116,15 @@ fn log_root() -> Option<PathBuf> {
 /// timestamp, or reports zero tokens (a rate-limit-only re-emit).
 fn parse_token_count(
     value: &Value,
-    current_model: &Option<String>,
+    state: &SessionState,
     fallback_date: Option<NaiveDate>,
 ) -> Option<UsageEntry> {
     let payload = value.get("payload")?;
     if payload.get("type").and_then(Value::as_str)? != "token_count" {
         return None;
     }
-    let last = payload.get("info")?.get("last_token_usage")?;
+    let info = payload.get("info")?;
+    let last = info.get("last_token_usage")?;
     let usage = codex_usage(last);
     if usage.total() == 0 {
         return None;
@@ -111,7 +133,12 @@ fn parse_token_count(
     // = input + output, with no separate reasoning term), surfaced for the
     // waste engine. Never folded back into `usage` — that would double-count.
     let reasoning_tokens = json_i64(last, "reasoning_output_tokens").max(0) as u64;
-    let model = current_model.clone()?;
+    // The model's context-window size travels in the same `info` block.
+    let context_window = info
+        .get("model_context_window")
+        .and_then(Value::as_u64)
+        .filter(|&w| w > 0);
+    let model = state.model.clone()?;
     let timestamp = line_timestamp(value, fallback_date)?;
     Some(UsageEntry {
         tool: TOOL,
@@ -119,6 +146,9 @@ fn parse_token_count(
         timestamp,
         usage,
         reasoning_tokens,
+        session_id: state.session_id.clone(),
+        workspace: state.cwd.clone(),
+        context_window,
     })
 }
 

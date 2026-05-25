@@ -12,7 +12,7 @@ pub mod types;
 
 pub use types::{
     BudgetConfig, Config, LogScrapeConfig, LoggingConfig, LoopDetectionConfig, ProxyConfig,
-    SecurityConfig,
+    SecurityConfig, ToolsConfig, WasteConfig,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -120,6 +120,10 @@ pub fn set_dotted_key(config: &mut Config, key: &str, value: &str) -> Result<()>
         }
         "logging.level" => config.logging.level = value.to_string(),
         "logging.file" => config.logging.file = value.to_string(),
+        "tools.claude_code" => config.tools.claude_code = parse(key, value)?,
+        "tools.codex" => config.tools.codex = parse(key, value)?,
+        "waste.enabled" => config.waste.enabled = parse(key, value)?,
+        // Deprecated alias — still settable for one release.
         "log_scrape.enabled" => config.log_scrape.enabled = parse(key, value)?,
         _ => return Err(ConfigError::UnknownKey(key.to_string())),
     }

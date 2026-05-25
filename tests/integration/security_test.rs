@@ -23,6 +23,18 @@ fn engine() -> SecurityEngine {
 // ─────────────────────────── Fixture-based ───────────────────────────
 
 #[test]
+fn disabled_engine_forwards_everything() {
+    // `security.enabled = false` → no scanning; a normally-blocked body passes.
+    let rules = Ruleset {
+        enabled: false,
+        ..Ruleset::default()
+    };
+    let engine = SecurityEngine::new(rules);
+    let body = br#"{"x": "cat ~/.ssh/id_rsa"}"#;
+    assert!(engine.scan(body).is_none());
+}
+
+#[test]
 fn fixture_blocked_path_is_caught() {
     // Fixture has command "cat /Users/developer/.ssh/id_rsa". Rule "~/.ssh"
     // must match via the shared "/.ssh" suffix.

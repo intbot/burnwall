@@ -80,6 +80,10 @@ fn claude_code_parse_str_extracts_assistant_turns() {
     assert_eq!(first.entry.usage.cache_creation_tokens, 8000);
     assert_eq!(first.entry.usage.cache_read_tokens, 45000);
     assert_eq!(first.entry.usage.output_tokens, 210);
+    // Session + workspace come from top-level line fields; no context window.
+    assert_eq!(first.entry.session_id.as_deref(), Some("sess_cc_1"));
+    assert_eq!(first.entry.workspace.as_deref(), Some("/home/dev/webapp"));
+    assert_eq!(first.entry.context_window, None);
 
     // The last line repeats msg_001/req_001 verbatim.
     assert_eq!(turns[3].dedup_key, turns[0].dedup_key);
@@ -137,6 +141,11 @@ fn codex_parse_str_normalizes_token_usage() {
     assert_eq!(first.usage.output_tokens, 300);
     // Reasoning tokens are a subset of output_tokens, surfaced separately.
     assert_eq!(first.reasoning_tokens, 120);
+    // Session id + cwd come from session_meta/turn_context; context window
+    // from the token_count info block.
+    assert_eq!(first.session_id.as_deref(), Some("sess_1"));
+    assert_eq!(first.workspace.as_deref(), Some("/home/dev/proj"));
+    assert_eq!(first.context_window, Some(272000));
 }
 
 #[test]
@@ -220,6 +229,9 @@ fn entry(
             cache_read_tokens: 0,
         },
         reasoning_tokens: 0,
+        session_id: None,
+        workspace: None,
+        context_window: None,
     }
 }
 

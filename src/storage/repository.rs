@@ -186,6 +186,58 @@ impl Storage {
         })
     }
 
+    /// Sum of `cost_usd` for a local calendar month (`YYYY-MM`). Powers the
+    /// monthly burndown in `burnwall history`.
+    pub fn cost_for_month(&self, month: &str) -> Result<f64> {
+        self.with_conn(|conn| {
+            let cost: f64 = conn.query_row(
+                "SELECT COALESCE(SUM(cost_usd), 0.0) FROM requests
+                 WHERE strftime('%Y-%m', timestamp, 'localtime') = ?1",
+                params![month],
+                |row| row.get(0),
+            )?;
+            Ok(cost)
+        })
+    }
+
+    /// Per-provider / per-model aggregates over the last `days` local days
+    /// (newest-cost first), excluding blocked rows. Drives `burnwall explore`.
+    pub fn breakdown_since_days(&self, days: i64) -> Result<Vec<ModelBreakdown>> {
+        self.with_conn(|conn| {
+            let offset = format!("-{} days", days - 1);
+            let mut stmt = conn.prepare(
+                "SELECT
+                    provider,
+                    model,
+                    COALESCE(SUM(cost_usd), 0.0)                    AS cost,
+                    COUNT(*)                                        AS requests,
+                    COALESCE(SUM(input_tokens), 0)                  AS input_tokens,
+                    COALESCE(SUM(cache_creation_tokens), 0)         AS cache_creation_tokens,
+                    COALESCE(SUM(cache_read_tokens), 0)             AS cache_read_tokens,
+                    COALESCE(SUM(output_tokens), 0)                 AS output_tokens
+                 FROM requests
+                 WHERE DATE(timestamp, 'localtime') >= DATE('now', 'localtime', ?1) AND blocked = 0
+                 GROUP BY provider, model
+                 ORDER BY cost DESC",
+            )?;
+            let rows: rusqlite::Result<Vec<ModelBreakdown>> = stmt
+                .query_map(params![offset], |row| {
+                    Ok(ModelBreakdown {
+                        provider: row.get(0)?,
+                        model: row.get(1)?,
+                        cost: row.get(2)?,
+                        requests: row.get(3)?,
+                        input_tokens: row.get::<_, i64>(4)? as u64,
+                        cache_creation_tokens: row.get::<_, i64>(5)? as u64,
+                        cache_read_tokens: row.get::<_, i64>(6)? as u64,
+                        output_tokens: row.get::<_, i64>(7)? as u64,
+                    })
+                })?
+                .collect();
+            Ok(rows?)
+        })
+    }
+
     /// Total request count for a date (blocked + ok).
     pub fn request_count_for_date(&self, date: &str) -> Result<i64> {
         self.with_conn(|conn| {

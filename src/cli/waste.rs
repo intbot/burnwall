@@ -7,6 +7,7 @@ use anyhow::Context;
 use chrono::{Duration, Local};
 use clap::Args;
 
+use crate::config::{self, Config};
 use crate::logscrape::{self, UsageEntry};
 use crate::waste::{self, Finding};
 
@@ -22,29 +23,48 @@ pub struct WasteArgs {
 
 pub fn run_cmd(args: WasteArgs) -> anyhow::Result<()> {
     let days = args.days.max(1);
-    let entries = collect_recent(days);
-    let findings = waste::analyze(&entries);
+    let cfg_path = config::default_path()?;
+    let cfg = config::load_or_default(&cfg_path).context("loading config")?;
 
     let mut out = std::io::stdout().lock();
+    if !cfg.waste.enabled {
+        writeln!(
+            out,
+            "Waste insights are disabled (set `waste.enabled = true` to re-enable)."
+        )?;
+        return Ok(());
+    }
+
+    let entries = collect_recent(&cfg, days);
+    let findings = waste::analyze(&entries);
+    // Capped at actual spend — rules overlap, so the raw sum can exceed reality.
+    let total = waste::capped_waste_usd(&findings, &entries);
+
     if args.json {
-        write_json(&mut out, &findings, days).context("writing JSON")?;
+        write_json(&mut out, &findings, days, total).context("writing JSON")?;
     } else {
-        write_table(&mut out, &findings, days).context("writing report")?;
+        write_table(&mut out, &findings, days, total).context("writing report")?;
     }
     Ok(())
 }
 
 /// Usage entries whose local date falls within the last `days` days
-/// (inclusive of today). Fail-open: tools with no logs contribute nothing.
-fn collect_recent(days: i64) -> Vec<UsageEntry> {
+/// (inclusive of today). Honors the per-tool `[tools]` switches. Fail-open:
+/// tools with no logs contribute nothing.
+fn collect_recent(cfg: &Config, days: i64) -> Vec<UsageEntry> {
     let cutoff = (Local::now() - Duration::days(days - 1)).date_naive();
-    logscrape::collect_all()
+    logscrape::collect_selected(cfg.scrape_claude_code(), cfg.scrape_codex())
         .into_iter()
         .filter(|e| e.timestamp.with_timezone(&Local).date_naive() >= cutoff)
         .collect()
 }
 
-fn write_table(w: &mut impl Write, findings: &[Finding], days: i64) -> std::io::Result<()> {
+fn write_table(
+    w: &mut impl Write,
+    findings: &[Finding],
+    days: i64,
+    total: f64,
+) -> std::io::Result<()> {
     writeln!(w, "💸 Waste insights (last {} day{})", days, plural(days))?;
     writeln!(w)?;
 
@@ -58,10 +78,9 @@ fn write_table(w: &mut impl Write, findings: &[Finding], days: i64) -> std::io::
         return Ok(());
     }
 
-    let total = waste::total_waste_usd(findings);
     writeln!(
         w,
-        "   Estimated avoidable spend: ${:.2} over the window",
+        "   Estimated avoidable spend: up to ${:.2} over the window",
         total
     )?;
     writeln!(w)?;
@@ -79,11 +98,16 @@ fn write_table(w: &mut impl Write, findings: &[Finding], days: i64) -> std::io::
     Ok(())
 }
 
-fn write_json(w: &mut impl Write, findings: &[Finding], days: i64) -> std::io::Result<()> {
+fn write_json(
+    w: &mut impl Write,
+    findings: &[Finding],
+    days: i64,
+    total: f64,
+) -> std::io::Result<()> {
     use serde_json::json;
     let value = json!({
         "window_days": days,
-        "estimated_waste_usd": waste::total_waste_usd(findings),
+        "estimated_waste_usd": total,
         "findings": findings.iter().map(|f| json!({
             "rule_id": f.rule_id,
             "title": f.title,

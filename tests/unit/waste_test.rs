@@ -1,13 +1,16 @@
 //! Unit tests for the waste-insights engine.
 
-use chrono::Utc;
+use chrono::{Duration, Utc};
 
 use burnwall::logscrape::UsageEntry;
 use burnwall::providers::TokenUsage;
 use burnwall::waste::{
     self,
-    rules::{CacheHitStarvation, ModelOverreliance, ReasoningEffortOveruse},
-    WasteRule,
+    rules::{
+        CacheHitStarvation, ContextWindowSaturation, MegaSessions, ModelOverreliance,
+        ReasoningEffortOveruse, RunawayContextGrowth,
+    },
+    Finding, Severity, WasteRule,
 };
 
 fn entry(model: &str, input: u64, cache_creation: u64, cache_read: u64) -> UsageEntry {
@@ -32,6 +35,9 @@ fn entry_out(
             cache_read_tokens: cache_read,
         },
         reasoning_tokens: 0,
+        session_id: None,
+        workspace: None,
+        context_window: None,
     }
 }
 
@@ -39,6 +45,21 @@ fn entry_out(
 fn reasoning_entry(model: &str, input: u64, output: u64, reasoning: u64) -> UsageEntry {
     let mut e = entry_out(model, input, 0, 0, output);
     e.reasoning_tokens = reasoning;
+    e
+}
+
+/// An entry belonging to `session`, ordered by `idx`, with the given input.
+fn session_entry(session: &str, model: &str, input: u64, idx: i64) -> UsageEntry {
+    let mut e = entry_out(model, input, 0, 0, 0);
+    e.session_id = Some(session.to_string());
+    e.timestamp = Utc::now() + Duration::seconds(idx);
+    e
+}
+
+/// A Codex-style entry that reports its context-window size.
+fn ctx_entry(model: &str, input: u64, window: u64) -> UsageEntry {
+    let mut e = entry_out(model, input, 0, 0, 0);
+    e.context_window = Some(window);
     e
 }
 
@@ -252,6 +273,147 @@ fn tools_without_reasoning_counts_never_trip() {
     assert!(rule
         .evaluate(&waste::WasteContext { entries: &entries })
         .is_none());
+}
+
+#[test]
+fn flags_context_window_saturation() {
+    let rule = ContextWindowSaturation {
+        min_fill_rate: 0.85,
+        min_sample: 10,
+    };
+    // 12 requests at ~88% of a 272k window.
+    let entries: Vec<UsageEntry> = (0..12)
+        .map(|_| ctx_entry("gpt-5.5", 240_000, 272_000))
+        .collect();
+    let f = rule
+        .evaluate(&waste::WasteContext { entries: &entries })
+        .expect("should flag saturation");
+    assert_eq!(f.rule_id, "context-window-saturation");
+    assert_eq!(f.count, 12);
+    // gpt-5.5 input $2/MTok: 240000 × 2 / 1e6 = $0.48 each × 12 = $5.76.
+    assert!((f.observed_waste_usd - 5.76).abs() < 1e-6);
+}
+
+#[test]
+fn entries_without_a_window_are_not_saturation() {
+    // Claude Code entries carry context_window == None → skipped.
+    let rule = ContextWindowSaturation {
+        min_fill_rate: 0.85,
+        min_sample: 3,
+    };
+    let entries: Vec<UsageEntry> = (0..10)
+        .map(|_| entry_out("claude-opus-4-7", 240_000, 0, 0, 0))
+        .collect();
+    assert!(rule
+        .evaluate(&waste::WasteContext { entries: &entries })
+        .is_none());
+}
+
+#[test]
+fn flags_runaway_context_growth() {
+    let rule = RunawayContextGrowth {
+        min_turns: 8,
+        growth_factor: 3.0,
+    };
+    // 9-turn session: early ~1k context, late ~12k context.
+    let inputs = [
+        1_000u64, 1_000, 1_000, 4_000, 6_000, 8_000, 12_000, 12_000, 12_000,
+    ];
+    let entries: Vec<UsageEntry> = inputs
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| session_entry("s1", "claude-sonnet-4-6", v, i as i64))
+        .collect();
+    let f = rule
+        .evaluate(&waste::WasteContext { entries: &entries })
+        .expect("should flag growth");
+    assert_eq!(f.rule_id, "runaway-context-growth");
+    assert_eq!(f.count, 1);
+    // baseline input = 1000; extra summed = 48000; sonnet input $3/MTok → $0.144.
+    assert!((f.observed_waste_usd - 0.144).abs() < 1e-6);
+}
+
+#[test]
+fn stable_session_is_not_runaway() {
+    let rule = RunawayContextGrowth {
+        min_turns: 8,
+        growth_factor: 3.0,
+    };
+    let entries: Vec<UsageEntry> = (0..9)
+        .map(|i| session_entry("s1", "claude-sonnet-4-6", 5_000, i))
+        .collect();
+    assert!(rule
+        .evaluate(&waste::WasteContext { entries: &entries })
+        .is_none());
+}
+
+#[test]
+fn short_session_is_not_runaway() {
+    let rule = RunawayContextGrowth {
+        min_turns: 8,
+        growth_factor: 3.0,
+    };
+    // Big growth, but only 3 turns — under min_turns.
+    let inputs = [1_000u64, 6_000, 12_000];
+    let entries: Vec<UsageEntry> = inputs
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| session_entry("s1", "claude-sonnet-4-6", v, i as i64))
+        .collect();
+    assert!(rule
+        .evaluate(&waste::WasteContext { entries: &entries })
+        .is_none());
+}
+
+#[test]
+fn flags_mega_sessions_as_informational() {
+    let rule = MegaSessions {
+        min_turns: 40,
+        min_total_prompt_tokens: 500_000,
+    };
+    // 40 turns × 15k = 600k prompt tokens.
+    let entries: Vec<UsageEntry> = (0..40)
+        .map(|i| session_entry("s1", "claude-opus-4-7", 15_000, i))
+        .collect();
+    let f = rule
+        .evaluate(&waste::WasteContext { entries: &entries })
+        .expect("should flag mega session");
+    assert_eq!(f.rule_id, "mega-sessions");
+    assert_eq!(f.count, 1);
+    // Informational — no isolated dollar figure.
+    assert_eq!(f.observed_waste_usd, 0.0);
+}
+
+#[test]
+fn small_session_is_not_mega() {
+    let rule = MegaSessions {
+        min_turns: 40,
+        min_total_prompt_tokens: 500_000,
+    };
+    let entries: Vec<UsageEntry> = (0..10)
+        .map(|i| session_entry("s1", "claude-opus-4-7", 15_000, i))
+        .collect();
+    assert!(rule
+        .evaluate(&waste::WasteContext { entries: &entries })
+        .is_none());
+}
+
+#[test]
+fn capped_waste_never_exceeds_actual_spend() {
+    let entries = vec![entry_out("claude-haiku-4-5", 1_000, 0, 0, 200)];
+    let spend = waste::total_spend_usd(&entries);
+    // A finding claiming 10× the real spend must be clamped to actual spend.
+    let findings = vec![Finding {
+        rule_id: "synthetic",
+        title: "synthetic".to_string(),
+        severity: Severity::Low,
+        count: 1,
+        observed_waste_usd: spend * 10.0,
+        detail: "synthetic".to_string(),
+    }];
+    let capped = waste::capped_waste_usd(&findings, &entries);
+    assert!(spend > 0.0);
+    assert!((capped - spend).abs() < 1e-9);
 }
 
 #[test]

@@ -17,7 +17,37 @@ pub struct Config {
     #[serde(default)]
     pub logging: LoggingConfig,
     #[serde(default)]
+    pub tools: ToolsConfig,
+    #[serde(default)]
+    pub waste: WasteConfig,
+    /// Deprecated: superseded by `[tools]`. Kept for one release as a global
+    /// kill switch (`enabled = false` disables all log scraping). Prefer the
+    /// per-tool `[tools]` switches. Only written back when set to a
+    /// non-default value, so fresh configs don't re-introduce the old key.
+    #[serde(default, skip_serializing_if = "log_scrape_is_default")]
     pub log_scrape: LogScrapeConfig,
+}
+
+fn log_scrape_is_default(c: &LogScrapeConfig) -> bool {
+    *c == LogScrapeConfig::default()
+}
+
+impl Config {
+    /// Whether to scrape Claude Code logs — the per-tool `[tools]` switch,
+    /// gated by the deprecated global `[log_scrape]` kill switch.
+    pub fn scrape_claude_code(&self) -> bool {
+        self.log_scrape.enabled && self.tools.claude_code
+    }
+
+    /// Whether to scrape Codex logs.
+    pub fn scrape_codex(&self) -> bool {
+        self.log_scrape.enabled && self.tools.codex
+    }
+
+    /// Whether any tool's logs are scraped at all.
+    pub fn any_scrape_enabled(&self) -> bool {
+        self.scrape_claude_code() || self.scrape_codex()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -143,6 +173,38 @@ impl Default for LogScrapeConfig {
     }
 }
 
+/// Per-tool log scraping. All supported tools default ON; set one `false`
+/// to skip it. Replaces the global `[log_scrape].enabled` bool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolsConfig {
+    pub claude_code: bool,
+    pub codex: bool,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self {
+            claude_code: true,
+            codex: true,
+        }
+    }
+}
+
+/// Waste-insights configuration. `enabled` toggles the whole advisory
+/// engine (`burnwall waste` + the `status` teaser). Off-by-default,
+/// privacy-relaxing rules and per-rule threshold overrides will hang off
+/// sub-tables here in a later release.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WasteConfig {
+    pub enabled: bool,
+}
+
+impl Default for WasteConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 /// Convert the persistent config's budget block into the runtime
 /// [`crate::budget::BudgetConfig`] used by [`BudgetTracker`].
 impl From<&BudgetConfig> for crate::budget::BudgetConfig {
@@ -160,6 +222,7 @@ impl From<&BudgetConfig> for crate::budget::BudgetConfig {
 impl From<&SecurityConfig> for crate::security::Ruleset {
     fn from(c: &SecurityConfig) -> Self {
         Self {
+            enabled: c.enabled,
             deny_paths: c.deny_paths.clone(),
             // `allow_paths` is project-profile-only — the global config has
             // no allow list. A discovered `.burnwall.yaml` merges into this

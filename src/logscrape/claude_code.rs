@@ -110,6 +110,14 @@ fn parse_line(line: &str) -> Option<ParsedTurn> {
     };
     let timestamp = parse_timestamp(value.get("timestamp")?.as_str()?)?;
 
+    // Session + workspace are top-level fields Claude Code stamps on every
+    // event line. Absent → None (fail-open; session-grouped rules just skip).
+    let session_id = value
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let workspace = value.get("cwd").and_then(Value::as_str).map(str::to_string);
+
     // Dedup key only when both halves are present; a turn we can't key is
     // always kept rather than risk dropping a distinct call.
     let dedup_key = match (
@@ -131,6 +139,10 @@ fn parse_line(line: &str) -> Option<ParsedTurn> {
             // are billed inside `output_tokens` with no separate count we can
             // trust, so the reasoning-effort rule never fires on Claude data.
             reasoning_tokens: 0,
+            session_id,
+            workspace,
+            // Claude Code logs don't report the context-window size.
+            context_window: None,
         },
     })
 }

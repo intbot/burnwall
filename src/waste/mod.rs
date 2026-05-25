@@ -25,6 +25,9 @@ pub fn default_rules() -> Vec<Box<dyn WasteRule>> {
         Box::new(rules::CacheHitStarvation::default()),
         Box::new(rules::ModelOverreliance::default()),
         Box::new(rules::ReasoningEffortOveruse::default()),
+        Box::new(rules::ContextWindowSaturation::default()),
+        Box::new(rules::RunawayContextGrowth::default()),
+        Box::new(rules::MegaSessions::default()),
     ]
 }
 
@@ -52,4 +55,22 @@ pub fn analyze_with(entries: &[UsageEntry], rules: &[Box<dyn WasteRule>]) -> Vec
 /// normalizes a `-0.0` sum to `0.0` so the JSON/table output reads cleanly.
 pub fn total_waste_usd(findings: &[Finding]) -> f64 {
     findings.iter().map(|f| f.observed_waste_usd).sum::<f64>() + 0.0
+}
+
+/// Actual billed spend across the analyzed window (unknown-model entries cost
+/// 0, per the fail-open pricing policy). Used to cap the waste headline: rules
+/// overlap, so their summed estimate can exceed reality — the avoidable figure
+/// can never honestly exceed what was actually spent.
+pub fn total_spend_usd(entries: &[UsageEntry]) -> f64 {
+    entries
+        .iter()
+        .filter_map(|e| crate::pricing::calculate_cost(&e.model, &e.usage))
+        .sum::<f64>()
+        + 0.0
+}
+
+/// The headline "avoidable spend" figure: the summed findings, capped at actual
+/// spend so it never claims more waste than money spent.
+pub fn capped_waste_usd(findings: &[Finding], entries: &[UsageEntry]) -> f64 {
+    total_waste_usd(findings).min(total_spend_usd(entries))
 }

@@ -96,6 +96,10 @@ impl SecurityEngine {
     ///
     /// Non-JSON bodies return `None` (see fail-open in the module docs).
     pub fn scan(&self, body: &[u8]) -> Option<Violation> {
+        // Master switch — `security.enabled = false` forwards without scanning.
+        if !self.rules.enabled {
+            return None;
+        }
         // Strip a leading UTF-8 BOM: `serde_json` rejects it, which would
         // otherwise let a `\xef\xbb\xbf{…}` body slip past the scanner via
         // the fail-open path. Real clients never emit a BOM; this is

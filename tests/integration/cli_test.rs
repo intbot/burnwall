@@ -100,7 +100,8 @@ fn history_table_includes_seeded_day() {
         .success()
         .stdout(predicate::str::contains("Last 7 days"))
         .stdout(predicate::str::contains("Total"))
-        .stdout(predicate::str::contains("Estimated monthly"));
+        .stdout(predicate::str::contains("Monthly burndown"))
+        .stdout(predicate::str::contains("Projected EOM"));
 }
 
 #[test]
@@ -117,6 +118,67 @@ fn history_json_emits_array_of_rows() {
     let v: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON");
     assert_eq!(v["days"], 3);
     assert!(v["rows"].is_array());
+}
+
+#[test]
+fn history_json_includes_burndown() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    seed_storage(&path);
+
+    let output = burnwall(&path)
+        .args(["history", "--json"])
+        .output()
+        .expect("run");
+    assert!(output.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON");
+    assert!(v["burndown"]["spent_usd"].as_f64().unwrap() > 0.0);
+    assert!(v["burndown"]["projected_eom_usd"].as_f64().unwrap() > 0.0);
+    assert!(v["burndown"]["days_in_month"].as_u64().unwrap() >= 28);
+}
+
+// ─────────────────────────────── explore ──────────────────────────────
+
+#[test]
+fn explore_table_shows_proxied_breakdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    seed_storage(&path);
+    // Isolate log scraping to an empty dir so output is deterministic.
+    let empty = dir.path().join("empty-logs");
+
+    burnwall(&path)
+        .env("BURNWALL_CLAUDE_LOG_DIR", &empty)
+        .env("BURNWALL_CODEX_LOG_DIR", &empty)
+        .arg("explore")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Spend explorer"))
+        .stdout(predicate::str::contains("by provider / model"))
+        .stdout(predicate::str::contains("anthropic/claude-sonnet-4-6"))
+        .stdout(predicate::str::contains("by harness"))
+        .stdout(predicate::str::contains("by workspace"));
+}
+
+#[test]
+fn explore_json_has_dimensions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    seed_storage(&path);
+    let empty = dir.path().join("empty-logs");
+
+    let output = burnwall(&path)
+        .env("BURNWALL_CLAUDE_LOG_DIR", &empty)
+        .env("BURNWALL_CODEX_LOG_DIR", &empty)
+        .args(["explore", "--days", "14", "--json"])
+        .output()
+        .expect("run");
+    assert!(output.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON");
+    assert_eq!(v["window_days"], 14);
+    assert_eq!(v["proxied_by_model"][0]["provider"], "anthropic");
+    assert!(v["by_harness"].is_array());
+    assert!(v["by_workspace"].is_array());
 }
 
 // ─────────────────────────────── config ───────────────────────────────
@@ -189,6 +251,59 @@ fn config_set_rejects_unknown_key() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("unknown config key"));
+}
+
+#[test]
+fn config_doctor_reports_clean_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+
+    burnwall(&path)
+        .args(["config", "doctor"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("config doctor"))
+        .stdout(predicate::str::contains("Effective configuration"))
+        .stdout(predicate::str::contains("No problems found"));
+}
+
+#[test]
+fn config_doctor_flags_relaxing_toggles_and_deprecated_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    // Hand-write a config with a deprecated section + a relaxing toggle ON.
+    fs::write(
+        path.join("config.toml"),
+        "[proxy]\nport = 4100\nhost = \"127.0.0.1\"\ncache_injection = true\n\n[log_scrape]\nenabled = true\n",
+    )
+    .unwrap();
+
+    burnwall(&path)
+        .args(["config", "doctor"])
+        .assert()
+        .success() // warnings only → exit 0
+        .stdout(predicate::str::contains("cache_injection is ON"))
+        .stdout(predicate::str::contains("[log_scrape] is deprecated"));
+}
+
+#[test]
+fn config_doctor_errors_on_out_of_range_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    fs::write(
+        path.join("config.toml"),
+        "[budget]\ndaily = 50.0\nmonthly = 0.0\nwarn_percent = 150\n",
+    )
+    .unwrap();
+
+    burnwall(&path)
+        .args(["config", "doctor"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("out of range"));
 }
 
 // ============================ completions ============================

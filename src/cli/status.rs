@@ -14,6 +14,7 @@ use crate::logscrape::{self, ScrapeBreakdown};
 use crate::pricing;
 use crate::providers::TokenUsage;
 use crate::storage::{ModelBreakdown, Storage};
+use crate::waste;
 
 #[derive(Args, Debug)]
 pub struct StatusArgs {
@@ -46,11 +47,27 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
 
     // Tier-2: scrape local tool session logs for cross-tool spend that did
     // not go through the proxy. `None` when disabled; `Some([])` when
-    // enabled but no Claude Code / Codex activity today.
-    let log_scrape = if config.log_scrape.enabled {
-        Some(logscrape::scrape_for_date(&today))
+    // enabled but no Claude Code / Codex activity today. We collect once and
+    // reuse the entries for both today's aggregate and the waste teaser.
+    let (log_scrape, waste_per_day) = if config.any_scrape_enabled() {
+        let all = logscrape::collect_selected(config.scrape_claude_code(), config.scrape_codex());
+        let today_rows = logscrape::aggregate(all.clone(), &today);
+        // Advisory teaser: average avoidable spend/day over the last 7 days.
+        // Suppressed when the waste engine is disabled.
+        let per_day = if config.waste.enabled {
+            let cutoff = (now_local - chrono::Duration::days(6)).date_naive();
+            let recent: Vec<_> = all
+                .into_iter()
+                .filter(|e| e.timestamp.with_timezone(&chrono::Local).date_naive() >= cutoff)
+                .collect();
+            let findings = waste::analyze(&recent);
+            waste::capped_waste_usd(&findings, &recent) / 7.0
+        } else {
+            0.0
+        };
+        (Some(today_rows), per_day)
     } else {
-        None
+        (None, 0.0)
     };
 
     let budget = BudgetTracker::new((&config.budget).into());
@@ -73,6 +90,7 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
             log_scrape.as_deref(),
             projected_savings,
             mcp_events_today,
+            waste_per_day,
         )?;
     } else {
         write_table(
@@ -90,6 +108,7 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
             log_scrape.as_deref(),
             projected_savings,
             mcp_events_today,
+            waste_per_day,
         )?;
     }
     Ok(())
@@ -111,6 +130,7 @@ fn write_table(
     log_scrape: Option<&[ScrapeBreakdown]>,
     projected_savings: f64,
     mcp_events: i64,
+    waste_per_day: f64,
 ) -> std::io::Result<()> {
     writeln!(w, "📊 Today ({})", date)?;
     writeln!(
@@ -224,6 +244,13 @@ fn write_table(
             "      Enable with `burnwall config set proxy.cache_injection true`."
         )?;
     }
+    if waste_per_day >= 0.01 {
+        writeln!(
+            w,
+            "   💡 ~${:.2}/day of avoidable spend — run `burnwall waste`",
+            waste_per_day
+        )?;
+    }
     if let Some(age) = pricing_age_days {
         if age > 30 {
             writeln!(w)?;
@@ -265,6 +292,7 @@ fn write_json(
     log_scrape: Option<&[ScrapeBreakdown]>,
     projected_savings: f64,
     mcp_events: i64,
+    waste_per_day: f64,
 ) -> std::io::Result<()> {
     use serde_json::json;
     let bcfg = budget.config();
@@ -278,6 +306,7 @@ fn write_json(
         "cache_savings_usd": cache_savings,
         "cost_without_cache_usd": cost_without_cache,
         "projected_cache_savings_usd": projected_savings,
+        "avoidable_per_day_usd": waste_per_day,
         "mcp_events_today": mcp_events,
         "pricing_age_days": pricing_age_days,
         "pricing_stale": pricing_age_days.map(|d| d > 30).unwrap_or(false),
