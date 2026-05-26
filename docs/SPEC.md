@@ -1,9 +1,9 @@
 # Burnwall Specification
 
-## Version Scope
+## Scope
 
-This spec covers **v0.1** (CLI + proxy) through **v0.3** (VS Code extension).
-Features marked [v0.2], [v0.3], etc. are out of scope for the initial release.
+This spec describes Burnwall's CLI commands, proxy behavior, security engine,
+and storage schema.
 
 ---
 
@@ -421,23 +421,4 @@ file = "~/.burnwall/burnwall.log"
     daily_max_usd: 10
   ```
 
-## v0.3 Additions (Week 5-6)
 
-- VS Code extension: status bar item showing `💰 $7.23 | 📊 81% cache | 🛡️ 1 blocked`
-- Extension reads from SQLite database, polls every 5 seconds
-- Click status bar → output channel with detailed breakdown
-- Extension auto-detects if CLI is running, prompts to install if not
-
-## v0.4 Additions (future)
-
-- Google Gemini API support
-- Community security rule profiles
-- Context compression (experimental)
-- Smart model routing (experimental)
-
-## v0.5 Additions (future)
-
-- Cloud dashboard for teams (paid tier)
-- Team-wide spend visibility
-- Centralized security policy enforcement
-- SSO and audit log exports
