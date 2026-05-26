@@ -186,6 +186,20 @@ $ burnwall status
 - **No API key storage.** Keys pass through in headers and are never written to disk.
 - **Open source.** Audit the code yourself.
 
+## Terms of service
+
+Burnwall is a **transparent proxy for your own API traffic** — it carries the
+requests you were already sending, using *your own* API key, to the official
+`api.anthropic.com` / `api.openai.com` endpoints. It does **not**:
+
+- repackage a Pro/Max subscription or OAuth session into API traffic, and
+- pool keys or rotate accounts to get around provider rate limits.
+
+Requests are forwarded **unchanged**, with one opt-in exception: Anthropic
+prompt-cache markers, off by default and enabled only via `proxy.cache_injection`.
+Responses are never modified (see *How It Works*). In short — Burnwall instruments
+the traffic you already send; it doesn't change your relationship with the provider.
+
 ## License
 
 [FSL-1.1-MIT](LICENSE) — Functional Source License. Full source available. Free to use, modify, and self-host. Cannot be redistributed as a competing commercial product. Converts to MIT after 2 years.
