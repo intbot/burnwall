@@ -23,6 +23,7 @@ desktop.ini
 # Local-only files (not part of the published repo)
 internal/
 private/
+research/
 
 # Secrets / env files -- never commit
 .env

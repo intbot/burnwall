@@ -21,7 +21,7 @@
 //!
 //! Aider's analytics carry no cache breakdown, so `cache_read` /
 //! `cache_creation` are always 0 and `prompt_tokens` is the whole input.
-//! `main_model` is a LiteLLM-style id that may carry a `provider/` prefix
+//! `main_model` is a provider-prefixed id that may carry a `provider/` prefix
 //! (e.g. `openai/gpt-5.2`); the prefix is stripped so the name has a chance
 //! of matching Burnwall's pricing table. `cost` is recomputed downstream from
 //! the token counts like every other source.
@@ -99,7 +99,7 @@ fn parse_line(line: &str) -> Option<UsageEntry> {
     })
 }
 
-/// Strip a leading `provider/` segment from a LiteLLM-style model id so the
+/// Strip a leading `provider/` segment from a provider-prefixed model id so the
 /// bare model name can match the pricing table (`openai/gpt-5.2` → `gpt-5.2`).
 /// Names without a slash pass through unchanged.
 fn strip_provider_prefix(model: &str) -> String {

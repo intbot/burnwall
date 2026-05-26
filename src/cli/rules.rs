@@ -10,7 +10,7 @@
 //!   approval, never the pack's self-declared metadata (I4).
 //! - `revoke <id>` — remove an installed third-party pack.
 //!
-//! Remote `install <url>` + signing are deliberately out of scope (v0.7).
+//! Remote `install <url>` + signing are deliberately out of scope for now.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
