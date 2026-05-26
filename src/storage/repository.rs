@@ -16,6 +16,18 @@ use super::{
     Result, Storage,
 };
 
+/// Outcome of recording a tool advertised by an MCP server, relative to what
+/// we last fingerprinted for that (server, tool) pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpToolObservation {
+    /// First time this tool has been seen on this server.
+    New,
+    /// Seen before, definition unchanged.
+    Unchanged,
+    /// Seen before, but the definition changed since — a possible rug pull.
+    Changed,
+}
+
 impl Storage {
     /// Insert a request log row. Returns the new rowid.
     pub fn insert_request(&self, r: &RequestRecord) -> Result<i64> {
@@ -54,6 +66,52 @@ impl Storage {
                 params![e.timestamp, e.event_type, e.details, e.provider, e.model],
             )?;
             Ok(conn.last_insert_rowid())
+        })
+    }
+
+    /// Record a tool advertised by an MCP server and report how it compares
+    /// to the last fingerprint we stored for it. A `New` tool is inserted; a
+    /// `Changed` one has its fingerprint + `last_seen` updated so the next
+    /// change is measured from here; `Unchanged` just refreshes `last_seen`.
+    pub fn observe_mcp_tool(
+        &self,
+        server: &str,
+        tool_name: &str,
+        fingerprint: &str,
+    ) -> Result<McpToolObservation> {
+        self.with_conn(|conn| {
+            let existing: Option<String> = conn
+                .query_row(
+                    "SELECT fingerprint FROM mcp_tools WHERE server = ?1 AND tool_name = ?2",
+                    params![server, tool_name],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match existing {
+                None => {
+                    conn.execute(
+                        "INSERT INTO mcp_tools (server, tool_name, fingerprint) VALUES (?1,?2,?3)",
+                        params![server, tool_name, fingerprint],
+                    )?;
+                    Ok(McpToolObservation::New)
+                }
+                Some(prev) if prev == fingerprint => {
+                    conn.execute(
+                        "UPDATE mcp_tools SET last_seen = datetime('now')
+                         WHERE server = ?1 AND tool_name = ?2",
+                        params![server, tool_name],
+                    )?;
+                    Ok(McpToolObservation::Unchanged)
+                }
+                Some(_) => {
+                    conn.execute(
+                        "UPDATE mcp_tools SET fingerprint = ?1, last_seen = datetime('now')
+                         WHERE server = ?2 AND tool_name = ?3",
+                        params![fingerprint, server, tool_name],
+                    )?;
+                    Ok(McpToolObservation::Changed)
+                }
+            }
         })
     }
 

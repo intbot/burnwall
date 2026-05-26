@@ -19,9 +19,22 @@
 //!   errors. They just contribute nothing. A format mismatch yields *zero*
 //!   entries, never wrong numbers.
 //! - **Offline.** Pure local filesystem reads; no network.
+//!
+//! ### Supported tools
+//! Claude Code, Codex, OpenCode, and Aider write per-turn token usage to
+//! local files we can read accurately. Two tools are deliberately *not*
+//! parsed: **Cursor** keeps per-request usage server-side (its local
+//! `state.vscdb` has no reliable token counts), so any local total would be a
+//! misleading lower bound; **Cline** stores per-request tokens inside a
+//! double-encoded JSON string under per-editor storage roots, and its exact
+//! field shape needs confirming against a real `ui_messages.json` before we
+//! parse it — shipping it unverified would risk wrong numbers, which this
+//! module must never do.
 
+pub mod aider;
 pub mod claude_code;
 pub mod codex;
+pub mod opencode;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -88,21 +101,50 @@ impl ScrapeBreakdown {
     }
 }
 
+/// Which tools' logs to scrape, mirroring the per-tool `[tools]` config
+/// switches. Lets callers disable an individual tool without a growing
+/// positional argument list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tools {
+    pub claude_code: bool,
+    pub codex: bool,
+    pub opencode: bool,
+    pub aider: bool,
+}
+
+impl Tools {
+    /// Every supported tool enabled — used by `collect_all` and tests.
+    pub fn all() -> Self {
+        Self {
+            claude_code: true,
+            codex: true,
+            opencode: true,
+            aider: true,
+        }
+    }
+}
+
 /// Collect usage entries from every supported tool's logs. Fail-open: a
 /// tool with no log directory or unparseable logs contributes nothing.
 pub fn collect_all() -> Vec<UsageEntry> {
-    collect_selected(true, true)
+    collect_selected(Tools::all())
 }
 
 /// Collect entries only from the selected tools — honors the per-tool
 /// `[tools]` config switches so a disabled tool is never read.
-pub fn collect_selected(scrape_claude: bool, scrape_codex: bool) -> Vec<UsageEntry> {
+pub fn collect_selected(tools: Tools) -> Vec<UsageEntry> {
     let mut entries = Vec::new();
-    if scrape_claude {
+    if tools.claude_code {
         entries.extend(claude_code::collect());
     }
-    if scrape_codex {
+    if tools.codex {
         entries.extend(codex::collect());
+    }
+    if tools.opencode {
+        entries.extend(opencode::collect());
+    }
+    if tools.aider {
+        entries.extend(aider::collect());
     }
     entries
 }
@@ -169,10 +211,16 @@ pub fn subtotal(rows: &[ScrapeBreakdown]) -> f64 {
     rows.iter().map(|r| r.cost).sum()
 }
 
-/// Recursively collect `*.jsonl` files under `root`, newest paths last.
-/// Returns an empty vec if `root` does not exist or cannot be read;
-/// unreadable sub-entries are skipped (fail-open).
+/// Recursively collect `*.jsonl` files under `root`. See
+/// [`find_files_with_ext`].
 pub(crate) fn find_jsonl_files(root: &Path) -> Vec<PathBuf> {
+    find_files_with_ext(root, "jsonl")
+}
+
+/// Recursively collect files with extension `ext` under `root`. Returns an
+/// empty vec if `root` does not exist or cannot be read; unreadable
+/// sub-entries are skipped (fail-open).
+pub(crate) fn find_files_with_ext(root: &Path, ext: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -186,8 +234,7 @@ pub(crate) fn find_jsonl_files(root: &Path) -> Vec<PathBuf> {
             };
             if file_type.is_dir() {
                 stack.push(path);
-            } else if file_type.is_file()
-                && path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+            } else if file_type.is_file() && path.extension().and_then(|e| e.to_str()) == Some(ext)
             {
                 out.push(path);
             }

@@ -53,7 +53,7 @@ pub fn run_cmd(args: WasteArgs) -> anyhow::Result<()> {
 /// tools with no logs contribute nothing.
 fn collect_recent(cfg: &Config, days: i64) -> Vec<UsageEntry> {
     let cutoff = (Local::now() - Duration::days(days - 1)).date_naive();
-    logscrape::collect_selected(cfg.scrape_claude_code(), cfg.scrape_codex())
+    logscrape::collect_selected(cfg.scrape_tools())
         .into_iter()
         .filter(|e| e.timestamp.with_timezone(&Local).date_naive() >= cutoff)
         .collect()

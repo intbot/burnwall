@@ -44,9 +44,32 @@ impl Config {
         self.log_scrape.enabled && self.tools.codex
     }
 
+    /// Whether to scrape OpenCode logs.
+    pub fn scrape_opencode(&self) -> bool {
+        self.log_scrape.enabled && self.tools.opencode
+    }
+
+    /// Whether to scrape Aider logs.
+    pub fn scrape_aider(&self) -> bool {
+        self.log_scrape.enabled && self.tools.aider
+    }
+
     /// Whether any tool's logs are scraped at all.
     pub fn any_scrape_enabled(&self) -> bool {
-        self.scrape_claude_code() || self.scrape_codex()
+        self.scrape_claude_code()
+            || self.scrape_codex()
+            || self.scrape_opencode()
+            || self.scrape_aider()
+    }
+
+    /// The per-tool selection in the shape `logscrape` consumes.
+    pub fn scrape_tools(&self) -> crate::logscrape::Tools {
+        crate::logscrape::Tools {
+            claude_code: self.scrape_claude_code(),
+            codex: self.scrape_codex(),
+            opencode: self.scrape_opencode(),
+            aider: self.scrape_aider(),
+        }
     }
 }
 
@@ -179,6 +202,17 @@ impl Default for LogScrapeConfig {
 pub struct ToolsConfig {
     pub claude_code: bool,
     pub codex: bool,
+    // Added after the first `[tools]` shipped, so they carry per-field serde
+    // defaults — an existing config that wrote only `claude_code` + `codex`
+    // must still deserialize (a missing field would otherwise be an error).
+    #[serde(default = "default_true")]
+    pub opencode: bool,
+    #[serde(default = "default_true")]
+    pub aider: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for ToolsConfig {
@@ -186,6 +220,8 @@ impl Default for ToolsConfig {
         Self {
             claude_code: true,
             codex: true,
+            opencode: true,
+            aider: true,
         }
     }
 }

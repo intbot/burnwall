@@ -8,6 +8,8 @@
 //! through silently — we never block, never modify the request body,
 //! and never store argument payloads (those can contain prompt content).
 
+pub mod firewall;
+
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -26,7 +28,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::proxy::streaming::{self, ProxyBody};
 use crate::security::SecurityEngine;
-use crate::storage::{McpEvent, SecurityEvent, Storage};
+use crate::storage::{McpEvent, McpToolObservation, SecurityEvent, Storage};
 
 #[derive(Clone)]
 pub struct WatchState {
@@ -71,6 +73,15 @@ pub fn parse_tool_call(body: &[u8]) -> Option<ToolCall> {
         _ => None,
     });
     Some(ToolCall { name, id })
+}
+
+/// Return the JSON-RPC `method` of a request body, if it is parseable JSON
+/// with a string `method`. Used to recognise `tools/list` so its response can
+/// be inspected for poisoned / changed tool definitions.
+fn parse_rpc_method(body: &[u8]) -> Option<String> {
+    let body = body.strip_prefix(b"\xef\xbb\xbf").unwrap_or(body);
+    let v: Value = serde_json::from_slice(body).ok()?;
+    v.get("method").and_then(Value::as_str).map(str::to_string)
 }
 
 /// Bind `addr` and forward all traffic to `upstream` until cancelled.
@@ -172,6 +183,10 @@ async fn handle(
     } else {
         None
     };
+    // A `tools/list` reply advertises the server's tools — inspect it for
+    // poisoned / silently-changed definitions on the response path below.
+    let is_tools_list =
+        method == Method::POST && parse_rpc_method(&body_bytes).as_deref() == Some("tools/list");
 
     // Security scan: the same engine the LLM proxy uses, applied to the
     // raw JSON-RPC body. Walks every string leaf — that means `tools/call`
@@ -243,7 +258,23 @@ async fn handle(
         }
     }
 
-    let body = streaming::from_stream(upstream_resp.bytes_stream());
+    // For `tools/list` we buffer the (small JSON) reply, run the firewall
+    // inspection, then forward the exact same bytes — read-only, the response
+    // is never altered. Every other shape streams straight through unbuffered.
+    let body = if is_tools_list {
+        match upstream_resp.bytes().await {
+            Ok(bytes) => {
+                inspect_tools_list(&bytes, &state, &upstream_uri);
+                streaming::full(bytes)
+            }
+            Err(e) => {
+                warn!("mcp-watch upstream body error for {}: {}", upstream_uri, e);
+                return Ok(error_response(StatusCode::BAD_GATEWAY, "upstream_error"));
+            }
+        }
+    } else {
+        streaming::from_stream(upstream_resp.bytes_stream())
+    };
     let mut response = Response::builder().status(status.as_u16());
     let headers_mut = response
         .headers_mut()
@@ -260,6 +291,65 @@ async fn handle(
         }
     }
     Ok(response.body(body).expect("response: build failed"))
+}
+
+/// Inspect a buffered `tools/list` reply for poisoned or silently-changed
+/// tool definitions. Read-only: findings are recorded as `security_events`
+/// (so `burnwall security` surfaces them) and the caller forwards the
+/// response bytes unchanged. Fail-open — a non-`tools/list` body yields no
+/// tools and no findings.
+fn inspect_tools_list(body: &[u8], state: &WatchState, server: &str) {
+    for tool in firewall::parse_tools_list(body) {
+        // 1. Prompt-injection tells in the advertised name + description.
+        let surface = format!("{} {}", tool.name, tool.description);
+        if let Some(marker) = firewall::injection_marker(&surface) {
+            warn!(
+                "🛡️ MCP tool '{}' flagged: injection marker {:?}",
+                tool.name, marker
+            );
+            record_mcp_security(state, "mcp_tool_poisoning", marker, &tool.name);
+        }
+
+        // 2. Reuse the request-side denylist on the raw tool object: a
+        //    description smuggling a secret / path / command is caught by the
+        //    same patterns the proxy already enforces.
+        if let Ok(raw) = serde_json::to_vec(&tool.raw) {
+            if let Some(v) = state.security.scan(&raw) {
+                warn!("🛡️ MCP tool '{}' flagged: {}", tool.name, v.message());
+                record_mcp_security(state, v.kind.event_type(), &v.matched, &tool.name);
+            }
+        }
+
+        // 3. Rug pull — definition changed since we last fingerprinted it.
+        match state
+            .storage
+            .observe_mcp_tool(server, &tool.name, &tool.fingerprint)
+        {
+            Ok(McpToolObservation::Changed) => {
+                warn!(
+                    "🛡️ MCP tool '{}' definition changed since last seen (possible rug pull)",
+                    tool.name
+                );
+                record_mcp_security(state, "mcp_tool_changed", &tool.name, &tool.name);
+            }
+            Ok(_) => {}
+            Err(e) => error!("mcp_tools observe failed: {}", e),
+        }
+    }
+}
+
+/// Write a `security_events` row for an MCP firewall finding, honoring the
+/// `log_redact_details` config (the detail can name a path or pattern).
+fn record_mcp_security(state: &WatchState, event_type: &str, detail: &str, tool: &str) {
+    let detail = if state.security.rules().log_redact_details {
+        "<redacted>"
+    } else {
+        detail
+    };
+    let event = SecurityEvent::new(event_type, detail).with_provider("mcp", tool);
+    if let Err(e) = state.storage.insert_security_event(&event) {
+        error!("mcp security_event insert failed: {}", e);
+    }
 }
 
 fn error_response(status: StatusCode, kind: &str) -> Response<ProxyBody> {

@@ -122,6 +122,8 @@ pub fn set_dotted_key(config: &mut Config, key: &str, value: &str) -> Result<()>
         "logging.file" => config.logging.file = value.to_string(),
         "tools.claude_code" => config.tools.claude_code = parse(key, value)?,
         "tools.codex" => config.tools.codex = parse(key, value)?,
+        "tools.opencode" => config.tools.opencode = parse(key, value)?,
+        "tools.aider" => config.tools.aider = parse(key, value)?,
         "waste.enabled" => config.waste.enabled = parse(key, value)?,
         // Deprecated alias — still settable for one release.
         "log_scrape.enabled" => config.log_scrape.enabled = parse(key, value)?,

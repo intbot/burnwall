@@ -23,6 +23,7 @@ pub mod models;
 pub mod repository;
 
 pub use models::{DailyTotal, McpEvent, ModelBreakdown, RequestRecord, SecurityEvent};
+pub use repository::McpToolObservation;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS requests (
@@ -89,6 +90,21 @@ CREATE TABLE IF NOT EXISTS mcp_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_mcp_events_timestamp ON mcp_events(timestamp);
+
+-- Fingerprint of each tool an MCP server has advertised, keyed by
+-- (server, tool_name). Written by `burnwall mcp-watch` the first time a
+-- tool is seen in a `tools/list` reply; a later reply whose fingerprint
+-- differs is a silent post-approval change ("rug pull") and is recorded as
+-- a security_event. Holds no argument payloads or prompt content — only the
+-- tool's advertised identity.
+CREATE TABLE IF NOT EXISTS mcp_tools (
+    server TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    first_seen TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (server, tool_name)
+);
 "#;
 
 #[derive(Debug, thiserror::Error)]

@@ -1,0 +1,162 @@
+//! MCP tool-poisoning + rug-pull detection for `burnwall mcp-watch`.
+//!
+//! The watcher already scans `tools/call` *request* bodies with the same
+//! security engine the LLM proxy uses (path / command / mount / secret
+//! denylist). This module adds the response-side half: inspecting the tools
+//! an MCP server *advertises* in its `tools/list` reply.
+//!
+//! Two threats, both recognised in the OWASP MCP Top 10:
+//!
+//! - **Tool poisoning** — a malicious server hides instructions in a tool's
+//!   `description` / `inputSchema` (e.g. "ignore previous instructions",
+//!   "do not tell the user", zero-width hidden text, or an embedded secret /
+//!   path). The model reads these on load, before any call is made.
+//! - **Rug pull** — a tool the user already approved silently changes its
+//!   definition later. We fingerprint each tool the first time we see it and
+//!   flag any subsequent change (see [`AdvertisedTool::fingerprint`]).
+//!
+//! Everything here is **read-only inspection**: findings are recorded as
+//! `security_events`, the response bytes are forwarded byte-for-byte
+//! unchanged (CLAUDE.md: never modify a response), and a poisoned `tools/list`
+//! is never blocked — blocking the listing would break the client, and the
+//! value is the audit trail + the operator warning.
+//!
+//! Fail-open: a body that isn't a parseable `tools/list` response yields
+//! zero tools and zero findings — never an error, never a false positive.
+
+use serde_json::Value;
+
+/// One tool advertised in an MCP `tools/list` response.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdvertisedTool {
+    pub name: String,
+    pub description: String,
+    /// Stable content fingerprint over name + description + input schema.
+    /// Used to detect silent post-approval changes ("rug pulls"). This is
+    /// FNV-1a: deterministic across runs and platforms (so persisted
+    /// fingerprints stay comparable across binary upgrades), but it is a
+    /// change *tripwire*, not a collision-resistant cryptographic hash.
+    pub fingerprint: String,
+    /// The raw tool object, kept so the caller can re-scan it with the
+    /// existing `SecurityEngine` (secret / path / command patterns).
+    pub raw: Value,
+}
+
+/// Parse a JSON-RPC `tools/list` *response* body into its advertised tools.
+///
+/// Returns an empty vec for any non-`tools/list` shape, malformed JSON, or a
+/// body with no `result.tools` array — fail-open, never errors. Tolerates
+/// both a plain JSON body and MCP streamable-HTTP SSE framing (`data:` lines).
+pub fn parse_tools_list(body: &[u8]) -> Vec<AdvertisedTool> {
+    let Some(value) = parse_json_lenient(body) else {
+        return Vec::new();
+    };
+    let Some(tools) = value
+        .get("result")
+        .and_then(|r| r.get("tools"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    tools
+        .iter()
+        .filter_map(|tool| {
+            let name = tool.get("name").and_then(Value::as_str)?.to_string();
+            let description = tool
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let schema = tool.get("inputSchema").cloned().unwrap_or(Value::Null);
+            let fingerprint = fingerprint_tool(&name, &description, &schema);
+            Some(AdvertisedTool {
+                name,
+                description,
+                fingerprint,
+                raw: tool.clone(),
+            })
+        })
+        .collect()
+}
+
+/// Parse `body` as JSON, tolerating a leading UTF-8 BOM and MCP
+/// streamable-HTTP SSE framing. For SSE, the last non-empty `data:` payload
+/// that parses as JSON wins (a `tools/list` reply is a single result object).
+fn parse_json_lenient(body: &[u8]) -> Option<Value> {
+    let body = body.strip_prefix(b"\xef\xbb\xbf").unwrap_or(body);
+    if let Ok(v) = serde_json::from_slice::<Value>(body) {
+        return Some(v);
+    }
+    let text = std::str::from_utf8(body).ok()?;
+    text.lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .filter_map(|data| serde_json::from_str::<Value>(data.trim()).ok())
+        .next_back()
+}
+
+/// Phrases that appear in tool-poisoning proofs-of-concept but essentially
+/// never in a legitimate tool description. Matched case-insensitively as
+/// substrings. Kept deliberately tight to hold false positives near zero.
+const INJECTION_MARKERS: &[&str] = &[
+    "ignore previous instruction",
+    "ignore all previous",
+    "disregard previous",
+    "disregard all previous",
+    "do not tell the user",
+    "do not inform the user",
+    "without informing the user",
+    "without telling the user",
+    "do not mention this",
+    "<important>",
+    "</important>",
+    "system prompt",
+];
+
+/// Return the first prompt-injection tell found in `text`, or `None`.
+///
+/// Detects both the [`INJECTION_MARKERS`] phrases and any zero-width / hidden
+/// control character, which is a strong signal that instructions are being
+/// smuggled in text the user will not see rendered.
+pub fn injection_marker(text: &str) -> Option<&'static str> {
+    let lower = text.to_lowercase();
+    for marker in INJECTION_MARKERS {
+        if lower.contains(marker) {
+            return Some(marker);
+        }
+    }
+    if text.chars().any(is_hidden_char) {
+        return Some("<hidden-unicode>");
+    }
+    None
+}
+
+/// Zero-width and other invisible characters used to hide instructions.
+fn is_hidden_char(c: char) -> bool {
+    matches!(c,
+        '\u{200B}'..='\u{200F}'   // zero-width space/joiners + bidi marks
+        | '\u{202A}'..='\u{202E}' // bidi embedding/override
+        | '\u{2060}'..='\u{2064}' // word joiner + invisible math operators
+        | '\u{FEFF}'              // zero-width no-break space (BOM)
+    )
+}
+
+/// FNV-1a (64-bit) over name + description + canonicalised schema. serde_json
+/// orders object keys deterministically, so the same tool always hashes the
+/// same. Hex-encoded for storage.
+fn fingerprint_tool(name: &str, description: &str, schema: &Value) -> String {
+    let schema = serde_json::to_string(schema).unwrap_or_default();
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for part in [
+        name.as_bytes(),
+        b"\0",
+        description.as_bytes(),
+        b"\0",
+        schema.as_bytes(),
+    ] {
+        for &byte in part {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    format!("{hash:016x}")
+}

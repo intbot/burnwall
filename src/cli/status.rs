@@ -50,7 +50,7 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
     // enabled but no Claude Code / Codex activity today. We collect once and
     // reuse the entries for both today's aggregate and the waste teaser.
     let (log_scrape, waste_per_day) = if config.any_scrape_enabled() {
-        let all = logscrape::collect_selected(config.scrape_claude_code(), config.scrape_codex());
+        let all = logscrape::collect_selected(config.scrape_tools());
         let today_rows = logscrape::aggregate(all.clone(), &today);
         // Advisory teaser: average avoidable spend/day over the last 7 days.
         // Suppressed when the waste engine is disabled.

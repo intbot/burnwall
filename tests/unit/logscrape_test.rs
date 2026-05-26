@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use chrono::{DateTime, Duration, Local, NaiveDate, Utc};
 
-use burnwall::logscrape::{self, claude_code, codex, UsageEntry};
+use burnwall::logscrape::{self, aider, claude_code, codex, opencode, UsageEntry};
 use burnwall::providers::TokenUsage;
 
 fn fixture(name: &str) -> String {
@@ -207,6 +207,116 @@ fn codex_collect_reads_rollout_files() {
     assert!(entries
         .iter()
         .all(|e| e.tool == "codex" && e.model == "gpt-5.5"));
+}
+
+// ─────────────────────────── OpenCode parser ───────────────────────────
+
+#[test]
+fn opencode_parse_message_maps_separated_cache_buckets() {
+    let value: serde_json::Value = serde_json::from_str(&fixture("opencode_message.json")).unwrap();
+    let entry = opencode::parse_message(&value, Utc::now()).expect("assistant message");
+
+    assert_eq!(entry.tool, "opencode");
+    assert_eq!(entry.model, "claude-sonnet-4-6");
+    // OpenCode reports cache separately from input — no subtraction.
+    assert_eq!(entry.usage.input_tokens, 1200);
+    assert_eq!(entry.usage.output_tokens, 340);
+    assert_eq!(entry.usage.cache_read_tokens, 45000);
+    assert_eq!(entry.usage.cache_creation_tokens, 8000);
+    assert_eq!(entry.reasoning_tokens, 50);
+    assert_eq!(entry.session_id.as_deref(), Some("ses_oc_1"));
+    // `time.completed` (epoch ms) wins over the fallback.
+    assert_eq!(
+        entry.timestamp,
+        DateTime::from_timestamp_millis(1747209607000).unwrap()
+    );
+}
+
+#[test]
+fn opencode_parse_message_skips_non_assistant_and_empty() {
+    let user = serde_json::json!({"role": "user", "tokens": {"input": 5}});
+    assert!(opencode::parse_message(&user, Utc::now()).is_none());
+
+    let zero = serde_json::json!({
+        "role": "assistant", "modelID": "m",
+        "tokens": {"input": 0, "output": 0, "cache": {"read": 0, "write": 0}}
+    });
+    assert!(opencode::parse_message(&zero, Utc::now()).is_none());
+}
+
+#[test]
+fn opencode_parse_message_uses_mtime_fallback_without_time_field() {
+    let value = serde_json::json!({
+        "role": "assistant", "modelID": "claude-sonnet-4-6",
+        "tokens": {"input": 100, "output": 10}
+    });
+    let fallback = local_noon(0);
+    let entry = opencode::parse_message(&value, fallback).unwrap();
+    assert_eq!(entry.timestamp, fallback);
+}
+
+#[test]
+fn opencode_collect_reads_message_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = dir.path().join("ses_oc_1");
+    fs::create_dir_all(&session).unwrap();
+    fs::write(
+        session.join("msg_abc123.json"),
+        fixture("opencode_message.json"),
+    )
+    .unwrap();
+
+    let _guard = set_log_dir("BURNWALL_OPENCODE_LOG_DIR", dir.path());
+    let entries = opencode::collect();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].tool, "opencode");
+    assert_eq!(entries[0].model, "claude-sonnet-4-6");
+}
+
+// ─────────────────────────── Aider parser ───────────────────────────
+
+#[test]
+fn aider_parse_str_reads_message_send_events() {
+    let entries = aider::parse_str(&fixture("aider_analytics.jsonl"));
+    // 2 real sends; the /command line, the garbage line, and the zero-token
+    // send are all skipped.
+    assert_eq!(entries.len(), 2);
+
+    let first = &entries[0];
+    assert_eq!(first.tool, "aider");
+    // Provider prefix stripped so the bare name can match the pricing table.
+    assert_eq!(first.model, "gpt-5.2");
+    assert_eq!(first.usage.input_tokens, 10006);
+    assert_eq!(first.usage.output_tokens, 81);
+    // Aider analytics carry no cache breakdown.
+    assert_eq!(first.usage.cache_read_tokens, 0);
+    assert_eq!(first.usage.cache_creation_tokens, 0);
+    assert_eq!(
+        first.timestamp,
+        DateTime::from_timestamp(1747209605, 0).unwrap()
+    );
+
+    assert_eq!(entries[1].model, "claude-sonnet-4-6");
+}
+
+#[test]
+fn aider_collect_reads_analytics_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("analytics.jsonl");
+    fs::write(&path, fixture("aider_analytics.jsonl")).unwrap();
+
+    let _guard = set_log_dir("BURNWALL_AIDER_ANALYTICS", &path);
+    let entries = aider::collect();
+    assert_eq!(entries.len(), 2);
+    assert!(entries.iter().all(|e| e.tool == "aider"));
+}
+
+#[test]
+fn aider_collect_missing_file_is_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("nope.jsonl");
+    let _guard = set_log_dir("BURNWALL_AIDER_ANALYTICS", &missing);
+    assert!(aider::collect().is_empty());
 }
 
 // ──────────────────────── Aggregation ────────────────────────

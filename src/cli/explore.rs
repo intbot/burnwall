@@ -46,11 +46,10 @@ pub fn run_cmd(args: ExploreArgs) -> anyhow::Result<()> {
     // Cross-tool entries within the window (read-only log scrape), honoring
     // the per-tool `[tools]` switches.
     let cutoff = (Local::now() - Duration::days(days - 1)).date_naive();
-    let entries: Vec<UsageEntry> =
-        logscrape::collect_selected(cfg.scrape_claude_code(), cfg.scrape_codex())
-            .into_iter()
-            .filter(|e| e.timestamp.with_timezone(&Local).date_naive() >= cutoff)
-            .collect();
+    let entries: Vec<UsageEntry> = logscrape::collect_selected(cfg.scrape_tools())
+        .into_iter()
+        .filter(|e| e.timestamp.with_timezone(&Local).date_naive() >= cutoff)
+        .collect();
     let by_harness = dimension(&entries, |e| e.tool.to_string());
     let by_workspace = dimension(&entries, |e| {
         e.workspace
