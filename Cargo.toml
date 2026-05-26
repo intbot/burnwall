@@ -135,6 +135,18 @@ name = "mcp_firewall_test"
 path = "tests/unit/mcp_firewall_test.rs"
 
 [[test]]
+name = "mcp_routing_test"
+path = "tests/unit/mcp_routing_test.rs"
+
+[[test]]
+name = "mcp_cli_test"
+path = "tests/integration/mcp_cli_test.rs"
+
+[[test]]
+name = "dlp_test"
+path = "tests/unit/dlp_test.rs"
+
+[[test]]
 name = "rulepack_test"
 path = "tests/unit/rulepack_test.rs"
 

@@ -95,6 +95,17 @@ fn check_string(s: &str, rules: &Ruleset) -> Option<Violation> {
             }
         }
     }
+    // Egress / DLP last (opt-in, v0.6.5): exfiltration-prone structured data
+    // the credential denylist misses. Bounded like the pack-secret scan.
+    if rules.detect_egress {
+        let hay = capped(s, MAX_PACK_SCAN_INPUT);
+        if let Some(name) = super::dlp::first_match(hay) {
+            return Some(Violation {
+                kind: ViolationKind::Dlp,
+                matched: name.to_string(),
+            });
+        }
+    }
     None
 }
 

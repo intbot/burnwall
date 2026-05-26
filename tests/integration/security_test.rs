@@ -349,3 +349,43 @@ fn benign_strings_are_not_flagged_as_secrets() {
         assert!(first_match(s).is_none(), "false positive on: {s:?}");
     }
 }
+
+// ──────────────────────── Egress / DLP (v0.6.5) ────────────────────────
+
+#[test]
+fn dlp_is_off_by_default() {
+    // The default ruleset does not run DLP — a card number passes through.
+    let body = br#"{"x": "pay with 4111111111111111"}"#;
+    assert!(engine().scan(body).is_none());
+}
+
+#[test]
+fn dlp_blocks_credit_card_when_enabled() {
+    let rules = Ruleset {
+        detect_egress: true,
+        ..Ruleset::default()
+    };
+    let engine = SecurityEngine::new(rules);
+    let body = br#"{"note": "charge card 4111 1111 1111 1111 now"}"#;
+    let v = engine.scan(body).expect("expected a DLP violation");
+    assert_eq!(v.kind, ViolationKind::Dlp);
+    assert_eq!(v.matched, "credit card number");
+}
+
+#[test]
+fn dlp_blocks_ssn_when_enabled() {
+    let rules = Ruleset {
+        detect_egress: true,
+        ..Ruleset::default()
+    };
+    let engine = SecurityEngine::new(rules);
+    let body = br#"{"note": "ssn is 123-45-6789"}"#;
+    let v = engine.scan(body).expect("expected a DLP violation");
+    assert_eq!(v.kind, ViolationKind::Dlp);
+    assert_eq!(v.matched, "US Social Security number");
+}
+
+#[test]
+fn dlp_event_type_maps_to_dlp_blocked() {
+    assert_eq!(ViolationKind::Dlp.event_type(), "dlp_blocked");
+}

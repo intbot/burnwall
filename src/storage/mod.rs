@@ -22,7 +22,7 @@ use rusqlite::Connection;
 pub mod models;
 pub mod repository;
 
-pub use models::{DailyTotal, McpEvent, ModelBreakdown, RequestRecord, SecurityEvent};
+pub use models::{DailyTotal, McpEvent, McpToolRow, ModelBreakdown, RequestRecord, SecurityEvent};
 pub use repository::McpToolObservation;
 
 const SCHEMA: &str = r#"
@@ -97,10 +97,15 @@ CREATE INDEX IF NOT EXISTS idx_mcp_events_timestamp ON mcp_events(timestamp);
 -- differs is a silent post-approval change ("rug pull") and is recorded as
 -- a security_event. Holds no argument payloads or prompt content — only the
 -- tool's advertised identity.
+-- `trust_state` (v0.6.5): 'pending' (seen, not approved) or 'approved'
+-- (`burnwall mcp approve`). In enforce mode (`mcp.require_approval`) a
+-- `tools/call` to a tool that is not 'approved' is blocked. A rug-pull
+-- fingerprint change resets an approved tool back to 'pending'.
 CREATE TABLE IF NOT EXISTS mcp_tools (
     server TEXT NOT NULL,
     tool_name TEXT NOT NULL,
     fingerprint TEXT NOT NULL,
+    trust_state TEXT NOT NULL DEFAULT 'pending',
     first_seen TEXT NOT NULL DEFAULT (datetime('now')),
     last_seen TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (server, tool_name)
@@ -178,6 +183,34 @@ impl Storage {
 
 fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA)?;
+    // Forward-add columns introduced after a table first shipped. Idempotent:
+    // skipped when the column already exists (a DB created from the current
+    // SCHEMA already has it). Identifiers are hardcoded, not user input.
+    ensure_column(
+        conn,
+        "mcp_tools",
+        "trust_state",
+        "TEXT NOT NULL DEFAULT 'pending'",
+    )?;
+    Ok(())
+}
+
+/// Add `column` to `table` if it is not already present. A lightweight
+/// stand-in for a real migration runner — used only for additive, defaulted
+/// columns. `table`/`column`/`decl` are compile-time constants.
+fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let present = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(std::result::Result::ok)
+        .any(|name| name == column);
+    drop(stmt);
+    if !present {
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"),
+            [],
+        )?;
+    }
     Ok(())
 }
 

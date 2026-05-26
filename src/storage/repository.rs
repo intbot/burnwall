@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, OptionalExtension};
 
 use super::{
-    models::{DailyTotal, McpEvent, ModelBreakdown, RequestRecord, SecurityEvent},
+    models::{DailyTotal, McpEvent, McpToolRow, ModelBreakdown, RequestRecord, SecurityEvent},
     Result, Storage,
 };
 
@@ -104,14 +104,102 @@ impl Storage {
                     Ok(McpToolObservation::Unchanged)
                 }
                 Some(_) => {
+                    // A silent definition change resets approval to 'pending'
+                    // (v0.6.5): a tool that mutated must be re-approved before
+                    // an enforce-mode `tools/call` to it forwards again.
                     conn.execute(
-                        "UPDATE mcp_tools SET fingerprint = ?1, last_seen = datetime('now')
+                        "UPDATE mcp_tools
+                         SET fingerprint = ?1, trust_state = 'pending', last_seen = datetime('now')
                          WHERE server = ?2 AND tool_name = ?3",
                         params![fingerprint, server, tool_name],
                     )?;
                     Ok(McpToolObservation::Changed)
                 }
             }
+        })
+    }
+
+    /// The approval state of an MCP tool, or `None` if it has never been seen
+    /// in a `tools/list`. Drives enforce-mode gating of `tools/call`.
+    pub fn mcp_tool_trust_state(&self, server: &str, tool: &str) -> Result<Option<String>> {
+        self.with_conn(|conn| {
+            let state = conn
+                .query_row(
+                    "SELECT trust_state FROM mcp_tools WHERE server = ?1 AND tool_name = ?2",
+                    params![server, tool],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(state)
+        })
+    }
+
+    /// Approve one MCP tool. Returns `true` if a matching (seen) tool existed.
+    pub fn approve_mcp_tool(&self, server: &str, tool: &str) -> Result<bool> {
+        self.with_conn(|conn| {
+            let n = conn.execute(
+                "UPDATE mcp_tools SET trust_state = 'approved'
+                 WHERE server = ?1 AND tool_name = ?2",
+                params![server, tool],
+            )?;
+            Ok(n > 0)
+        })
+    }
+
+    /// Approve every tool currently seen for a server. Returns the count.
+    pub fn approve_mcp_server(&self, server: &str) -> Result<usize> {
+        self.with_conn(|conn| {
+            let n = conn.execute(
+                "UPDATE mcp_tools SET trust_state = 'approved' WHERE server = ?1",
+                params![server],
+            )?;
+            Ok(n)
+        })
+    }
+
+    /// Revoke approval for one tool (back to 'pending'). `true` if it existed.
+    pub fn revoke_mcp_tool(&self, server: &str, tool: &str) -> Result<bool> {
+        self.with_conn(|conn| {
+            let n = conn.execute(
+                "UPDATE mcp_tools SET trust_state = 'pending'
+                 WHERE server = ?1 AND tool_name = ?2",
+                params![server, tool],
+            )?;
+            Ok(n > 0)
+        })
+    }
+
+    /// Revoke approval for every tool of a server. Returns the count.
+    pub fn revoke_mcp_server(&self, server: &str) -> Result<usize> {
+        self.with_conn(|conn| {
+            let n = conn.execute(
+                "UPDATE mcp_tools SET trust_state = 'pending' WHERE server = ?1",
+                params![server],
+            )?;
+            Ok(n)
+        })
+    }
+
+    /// All advertised MCP tools and their trust state, ordered by server then
+    /// tool. Drives `burnwall mcp list`.
+    pub fn mcp_tools_all(&self) -> Result<Vec<McpToolRow>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT server, tool_name, trust_state, last_seen
+                 FROM mcp_tools
+                 ORDER BY server ASC, tool_name ASC",
+            )?;
+            let rows: rusqlite::Result<Vec<McpToolRow>> = stmt
+                .query_map([], |row| {
+                    Ok(McpToolRow {
+                        server: row.get(0)?,
+                        tool_name: row.get(1)?,
+                        trust_state: row.get(2)?,
+                        last_seen: row.get::<_, DateTime<Utc>>(3)?,
+                    })
+                })?
+                .collect();
+            Ok(rows?)
         })
     }
 
@@ -453,6 +541,33 @@ impl Storage {
                 |row| row.get(0),
             )?;
             Ok(count)
+        })
+    }
+
+    /// All MCP events from the last `days` local days, newest first.
+    /// `days = 1` = today only. Drives `burnwall mcp export`.
+    pub fn mcp_events_since_days(&self, days: i64) -> Result<Vec<McpEvent>> {
+        self.with_conn(|conn| {
+            let offset = format!("-{} days", days - 1);
+            let mut stmt = conn.prepare(
+                "SELECT id, timestamp, tool_name, rpc_id, upstream_status, upstream_uri
+                 FROM mcp_events
+                 WHERE DATE(timestamp, 'localtime') >= DATE('now', 'localtime', ?1)
+                 ORDER BY timestamp DESC",
+            )?;
+            let rows: rusqlite::Result<Vec<McpEvent>> = stmt
+                .query_map(params![offset], |row| {
+                    Ok(McpEvent {
+                        id: Some(row.get(0)?),
+                        timestamp: row.get::<_, DateTime<Utc>>(1)?,
+                        tool_name: row.get(2)?,
+                        rpc_id: row.get(3)?,
+                        upstream_status: row.get(4)?,
+                        upstream_uri: row.get(5)?,
+                    })
+                })?
+                .collect();
+            Ok(rows?)
         })
     }
 

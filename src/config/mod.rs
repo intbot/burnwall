@@ -11,8 +11,8 @@ pub mod project;
 pub mod types;
 
 pub use types::{
-    BudgetConfig, Config, LogScrapeConfig, LoggingConfig, LoopDetectionConfig, ProxyConfig,
-    RulesConfig, SecurityConfig, ToolsConfig, WasteConfig,
+    BudgetConfig, Config, LogScrapeConfig, LoggingConfig, LoopDetectionConfig, McpConfig,
+    McpServerConfig, ProxyConfig, RulesConfig, SecurityConfig, ToolsConfig, WasteConfig,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -128,6 +128,9 @@ pub fn set_dotted_key(config: &mut Config, key: &str, value: &str) -> Result<()>
         // Prefer `burnwall rules install <id>` (it validates the id); this
         // setter is the raw escape hatch and does not validate pack ids.
         "rules.enabled" => config.rules.enabled = split_csv(value),
+        "security.dlp" => config.security.dlp = parse(key, value)?,
+        // `[[mcp.servers]]` is an array of tables — edit the TOML directly.
+        "mcp.require_approval" => config.mcp.require_approval = parse(key, value)?,
         // Deprecated alias — still settable for one release.
         "log_scrape.enabled" => config.log_scrape.enabled = parse(key, value)?,
         _ => return Err(ConfigError::UnknownKey(key.to_string())),

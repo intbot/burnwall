@@ -390,6 +390,7 @@ deny_commands = [
 ]
 block_network_mounts = true    # block /Volumes/*, \\server\share, smb://, nfs://
 detect_secrets = true          # scan for API keys, private keys in outbound payloads
+dlp = false                    # opt-in egress check: Luhn-valid card numbers, US SSNs
 
 [loop_detection]
 enabled = true
@@ -400,7 +401,29 @@ max_cost_per_window = 2.0      # $2 in 5 min → flag as loop
 [logging]
 level = "info"                 # trace, debug, info, warn, error
 file = "~/.burnwall/burnwall.log"
+
+[mcp]
+require_approval = false       # enforce: block tools/call to unapproved tools
+
+# One watcher can front several MCP servers, routed by the first path
+# segment (`/<name>/...` → that server's upstream, prefix stripped).
+[[mcp.servers]]
+name = "filesystem"
+upstream = "http://localhost:8090"
 ```
+
+`burnwall mcp` manages the MCP tool-approval workflow and audit log:
+
+- `burnwall mcp list [--json]` — every `(server, tool)` seen, with its approval
+  state (`pending` / `approved`).
+- `burnwall mcp approve <server> [tool]` — approve one tool, or every tool of a
+  server. In enforce mode a `tools/call` to a tool that is not approved is held
+  with a 403 until you approve it; a tool whose definition later changes is
+  reset to `pending` automatically.
+- `burnwall mcp revoke <server> [tool]` — return a tool (or a server) to
+  `pending`.
+- `burnwall mcp export [--days N] [--format json|csv]` — portable record of MCP
+  tool-call activity and MCP-side security events.
 
 ---
 

@@ -7,7 +7,7 @@
 use chrono::{DateTime, Duration, Local, TimeZone, Utc};
 
 use burnwall::providers::TokenUsage;
-use burnwall::storage::{RequestRecord, SecurityEvent, Storage};
+use burnwall::storage::{McpToolObservation, RequestRecord, SecurityEvent, Storage};
 
 fn ts(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(y, m, d, h, mi, s).unwrap()
@@ -353,4 +353,157 @@ fn cache_projection_ignores_non_positive_and_non_finite_values() {
         .unwrap();
 
     assert_eq!(storage.cache_projection_for_date(&date).unwrap(), 0.0);
+}
+
+// ──────────────────── MCP tool trust state (v0.6.5) ───────────────────
+
+#[test]
+fn newly_observed_tool_is_pending() {
+    let storage = Storage::open_in_memory().unwrap();
+    assert_eq!(
+        storage
+            .observe_mcp_tool("github", "read_file", "fp1")
+            .unwrap(),
+        McpToolObservation::New,
+    );
+    assert_eq!(
+        storage
+            .mcp_tool_trust_state("github", "read_file")
+            .unwrap()
+            .as_deref(),
+        Some("pending"),
+    );
+}
+
+#[test]
+fn approve_flips_state_and_unchanged_observe_keeps_it() {
+    let storage = Storage::open_in_memory().unwrap();
+    storage
+        .observe_mcp_tool("github", "read_file", "fp1")
+        .unwrap();
+    assert!(storage.approve_mcp_tool("github", "read_file").unwrap());
+    assert_eq!(
+        storage
+            .mcp_tool_trust_state("github", "read_file")
+            .unwrap()
+            .as_deref(),
+        Some("approved"),
+    );
+    // Re-observing the same fingerprint must NOT clobber approval.
+    assert_eq!(
+        storage
+            .observe_mcp_tool("github", "read_file", "fp1")
+            .unwrap(),
+        McpToolObservation::Unchanged,
+    );
+    assert_eq!(
+        storage
+            .mcp_tool_trust_state("github", "read_file")
+            .unwrap()
+            .as_deref(),
+        Some("approved"),
+    );
+}
+
+#[test]
+fn rug_pull_change_resets_approval_to_pending() {
+    let storage = Storage::open_in_memory().unwrap();
+    storage
+        .observe_mcp_tool("github", "read_file", "fp1")
+        .unwrap();
+    storage.approve_mcp_tool("github", "read_file").unwrap();
+    // A changed fingerprint resets to pending — must be re-approved.
+    assert_eq!(
+        storage
+            .observe_mcp_tool("github", "read_file", "fp2")
+            .unwrap(),
+        McpToolObservation::Changed,
+    );
+    assert_eq!(
+        storage
+            .mcp_tool_trust_state("github", "read_file")
+            .unwrap()
+            .as_deref(),
+        Some("pending"),
+    );
+}
+
+#[test]
+fn revoke_returns_tool_to_pending() {
+    let storage = Storage::open_in_memory().unwrap();
+    storage.observe_mcp_tool("fs", "write", "fp").unwrap();
+    storage.approve_mcp_tool("fs", "write").unwrap();
+    assert!(storage.revoke_mcp_tool("fs", "write").unwrap());
+    assert_eq!(
+        storage
+            .mcp_tool_trust_state("fs", "write")
+            .unwrap()
+            .as_deref(),
+        Some("pending"),
+    );
+}
+
+#[test]
+fn approve_whole_server_approves_all_its_tools() {
+    let storage = Storage::open_in_memory().unwrap();
+    storage.observe_mcp_tool("fs", "read", "a").unwrap();
+    storage.observe_mcp_tool("fs", "write", "b").unwrap();
+    storage.observe_mcp_tool("other", "ping", "c").unwrap();
+
+    assert_eq!(storage.approve_mcp_server("fs").unwrap(), 2);
+    assert_eq!(
+        storage
+            .mcp_tool_trust_state("fs", "read")
+            .unwrap()
+            .as_deref(),
+        Some("approved"),
+    );
+    assert_eq!(
+        storage
+            .mcp_tool_trust_state("fs", "write")
+            .unwrap()
+            .as_deref(),
+        Some("approved"),
+    );
+    // The other server is untouched.
+    assert_eq!(
+        storage
+            .mcp_tool_trust_state("other", "ping")
+            .unwrap()
+            .as_deref(),
+        Some("pending"),
+    );
+}
+
+#[test]
+fn approve_unknown_tool_returns_false() {
+    let storage = Storage::open_in_memory().unwrap();
+    assert!(!storage.approve_mcp_tool("ghost", "nope").unwrap());
+    assert!(storage
+        .mcp_tool_trust_state("ghost", "nope")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn mcp_tools_all_lists_every_seen_tool_ordered() {
+    let storage = Storage::open_in_memory().unwrap();
+    storage.observe_mcp_tool("zeta", "t", "1").unwrap();
+    storage.observe_mcp_tool("alpha", "b", "2").unwrap();
+    storage.observe_mcp_tool("alpha", "a", "3").unwrap();
+
+    let rows = storage.mcp_tools_all().unwrap();
+    let keys: Vec<(String, String)> = rows
+        .iter()
+        .map(|r| (r.server.clone(), r.tool_name.clone()))
+        .collect();
+    assert_eq!(
+        keys,
+        vec![
+            ("alpha".into(), "a".into()),
+            ("alpha".into(), "b".into()),
+            ("zeta".into(), "t".into()),
+        ],
+    );
+    assert!(rows.iter().all(|r| r.trust_state == "pending"));
 }

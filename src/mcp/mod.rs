@@ -32,7 +32,18 @@ use crate::storage::{McpEvent, McpToolObservation, SecurityEvent, Storage};
 
 #[derive(Clone)]
 pub struct WatchState {
+    /// Fallback upstream for paths that match no named [`servers`] entry —
+    /// this is the `--upstream` value and preserves the v0.5 single-server
+    /// behavior. Empty string means "no default" (multi-server-only).
     pub upstream: String,
+    /// Named upstream MCP servers for multi-server routing (v0.6.5). A request
+    /// to `/<name>/...` forwards to the matching server with the prefix
+    /// stripped. Empty in the single-upstream case.
+    pub servers: Vec<McpServer>,
+    /// Enforce mode (v0.6.5). When `true`, a `tools/call` to a tool that has
+    /// not been approved (`burnwall mcp approve`) is blocked with 403 instead
+    /// of forwarded. Off by default — observe-only, as in v0.5.
+    pub require_approval: bool,
     pub http_client: reqwest::Client,
     pub storage: Arc<Storage>,
     /// Same engine as the LLM proxy uses. Applied to every MCP request
@@ -40,6 +51,90 @@ pub struct WatchState {
     /// `tools/call` arguments. A violation returns 403, writes a
     /// `security_events` row, and never forwards.
     pub security: Arc<SecurityEngine>,
+}
+
+impl WatchState {
+    /// Construct a single-upstream watcher (the v0.5 shape): one fallback
+    /// upstream, no named servers, observe-only. Multi-server / enforce-mode
+    /// callers set the extra fields directly.
+    pub fn single_upstream(
+        upstream: String,
+        http_client: reqwest::Client,
+        storage: Arc<Storage>,
+        security: Arc<SecurityEngine>,
+    ) -> Self {
+        Self {
+            upstream,
+            servers: Vec::new(),
+            require_approval: false,
+            http_client,
+            storage,
+            security,
+        }
+    }
+
+    /// Resolve a request path against this state's routing table.
+    fn route(&self, path: &str) -> Option<Route> {
+        let default = if self.upstream.is_empty() {
+            None
+        } else {
+            Some(self.upstream.as_str())
+        };
+        resolve_route(&self.servers, default, path)
+    }
+}
+
+/// One named upstream MCP server for multi-server routing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServer {
+    pub name: String,
+    pub upstream: String,
+}
+
+/// The resolved target for a request: which configured server (the stable
+/// fingerprint key), its upstream base URL, and the path to forward (with the
+/// `/<name>` prefix stripped for a named server).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Route {
+    pub server: String,
+    pub upstream: String,
+    pub forward_path: String,
+}
+
+/// Pure routing: pick the upstream for `path` (no query string).
+///
+/// A named server matches `/<name>` exactly or `/<name>/...` (the prefix is
+/// stripped from `forward_path`); a partial token like `/<name>foo` does NOT
+/// match. If no named server matches, fall back to `default_upstream`
+/// (forwarding the path unchanged, server name `"default"`). Returns `None`
+/// only when nothing matches and there is no default — the caller answers 404.
+pub fn resolve_route(
+    servers: &[McpServer],
+    default_upstream: Option<&str>,
+    path: &str,
+) -> Option<Route> {
+    for s in servers {
+        let prefix = format!("/{}", s.name);
+        if path == prefix {
+            return Some(Route {
+                server: s.name.clone(),
+                upstream: s.upstream.clone(),
+                forward_path: "/".to_string(),
+            });
+        }
+        if let Some(rest) = path.strip_prefix(&format!("{prefix}/")) {
+            return Some(Route {
+                server: s.name.clone(),
+                upstream: s.upstream.clone(),
+                forward_path: format!("/{rest}"),
+            });
+        }
+    }
+    default_upstream.map(|up| Route {
+        server: "default".to_string(),
+        upstream: up.to_string(),
+        forward_path: path.to_string(),
+    })
 }
 
 /// Parsed JSON-RPC `tools/call` request, captured for the event log.
@@ -159,13 +254,27 @@ async fn handle(
     state: Arc<WatchState>,
 ) -> Result<Response<ProxyBody>, Infallible> {
     let method = req.method().clone();
-    let path_and_query = req
+    let path = req.uri().path().to_string();
+    let query = req
         .uri()
-        .path_and_query()
-        .map(|p| p.as_str())
-        .unwrap_or("/")
-        .to_string();
-    let upstream_uri = format!("{}{}", state.upstream.trim_end_matches('/'), path_and_query);
+        .query()
+        .map(|q| format!("?{q}"))
+        .unwrap_or_default();
+
+    // Resolve the upstream for this path (named server prefix or fallback).
+    let route = match state.route(&path) {
+        Some(r) => r,
+        None => {
+            warn!("mcp-watch: no route for path {path}");
+            return Ok(error_response(StatusCode::NOT_FOUND, "no_route"));
+        }
+    };
+    let upstream_uri = format!(
+        "{}{}{}",
+        route.upstream.trim_end_matches('/'),
+        route.forward_path,
+        query
+    );
 
     let (parts, body) = req.into_parts();
     let body_bytes = match body.collect().await {
@@ -212,6 +321,34 @@ async fn handle(
             error!("mcp security_event insert failed: {}", e);
         }
         return Ok(error_response(StatusCode::FORBIDDEN, "security_blocked"));
+    }
+
+    // Enforce mode (v0.6.5): a `tools/call` to a tool that has not been
+    // approved is held — blocked with 403, never forwarded — until the user
+    // runs `burnwall mcp approve`. A never-listed or rug-pulled (reset to
+    // pending) tool is therefore also blocked. Observe-only (the default)
+    // skips this entirely.
+    if state.require_approval {
+        if let Some(call) = tool_call.as_ref() {
+            let approved = matches!(
+                state
+                    .storage
+                    .mcp_tool_trust_state(&route.server, &call.name),
+                Ok(Some(ref s)) if s == "approved"
+            );
+            if !approved {
+                warn!(
+                    "🛡️ MCP tools/call to unapproved tool '{}' on '{}' blocked (enforce mode)",
+                    call.name, route.server
+                );
+                let event = SecurityEvent::new("mcp_tool_unapproved", &route.server)
+                    .with_provider("mcp", &call.name);
+                if let Err(e) = state.storage.insert_security_event(&event) {
+                    error!("mcp security_event insert failed: {}", e);
+                }
+                return Ok(error_response(StatusCode::FORBIDDEN, "approval_required"));
+            }
+        }
     }
 
     let mut outbound_headers = HeaderMap::new();
@@ -264,7 +401,7 @@ async fn handle(
     let body = if is_tools_list {
         match upstream_resp.bytes().await {
             Ok(bytes) => {
-                inspect_tools_list(&bytes, &state, &upstream_uri);
+                inspect_tools_list(&bytes, &state, &route.server);
                 streaming::full(bytes)
             }
             Err(e) => {

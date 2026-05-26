@@ -8,6 +8,7 @@ pub mod daemon;
 pub mod explore;
 pub mod history;
 pub mod init;
+pub mod mcp;
 pub mod mcp_watch;
 pub mod rules;
 pub mod security;
@@ -43,6 +44,8 @@ pub enum Command {
     Completions(completions::CompletionsArgs),
     /// Pass-through MCP HTTP proxy that logs tools/call invocations.
     McpWatch(mcp_watch::McpWatchArgs),
+    /// Manage MCP tool approvals and export the MCP audit log.
+    Mcp(mcp::McpArgs),
     /// Report cost-waste patterns found in local AI session logs.
     Waste(waste::WasteArgs),
     /// Explore spend by model, harness, and workspace over a window.
@@ -63,6 +66,7 @@ impl Cli {
             Command::Security(args) => security::run_cmd(args),
             Command::Completions(args) => completions::run_cmd(args),
             Command::McpWatch(args) => mcp_watch::run_cmd(args).await,
+            Command::Mcp(args) => mcp::run_cmd(args),
             Command::Waste(args) => waste::run_cmd(args),
             Command::Explore(args) => explore::run_cmd(args),
             Command::Rules(args) => rules::run_cmd(args),

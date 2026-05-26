@@ -17,16 +17,20 @@ use crate::storage::Storage;
 
 #[derive(Args, Debug)]
 pub struct McpWatchArgs {
-    /// MCP server to forward requests to (e.g. `http://localhost:8080`).
-    /// Required — the watcher has no built-in upstream.
+    /// MCP server to forward unmatched paths to (e.g. `http://localhost:8080`).
+    /// Optional when `[[mcp.servers]]` are configured; required otherwise.
     #[arg(long)]
-    pub upstream: String,
+    pub upstream: Option<String>,
     /// TCP port to listen on. Defaults to 4101 (one above the proxy).
     #[arg(long, default_value_t = 4101)]
     pub port: u16,
     /// Address to bind on.
     #[arg(long, default_value = "127.0.0.1")]
     pub host: String,
+    /// Enforce mode: block `tools/call` to tools not yet approved with
+    /// `burnwall mcp approve`. Overrides `mcp.require_approval` from config.
+    #[arg(long)]
+    pub require_approval: bool,
 }
 
 pub async fn run_cmd(args: McpWatchArgs) -> anyhow::Result<()> {
@@ -55,6 +59,25 @@ pub async fn run_cmd(args: McpWatchArgs) -> anyhow::Result<()> {
     }
     let security = Arc::new(SecurityEngine::new(ruleset));
 
+    // Named upstream servers for multi-server routing (v0.6.5). A `--upstream`
+    // (if any) is the fallback for unmatched paths; with neither, we can't
+    // route anything.
+    let servers: Vec<mcp::McpServer> = user_config
+        .mcp
+        .servers
+        .iter()
+        .map(|s| mcp::McpServer {
+            name: s.name.clone(),
+            upstream: s.upstream.clone(),
+        })
+        .collect();
+    if args.upstream.is_none() && servers.is_empty() {
+        anyhow::bail!(
+            "no upstream — pass --upstream <url> or configure [[mcp.servers]] in config.toml"
+        );
+    }
+    let require_approval = args.require_approval || user_config.mcp.require_approval;
+
     let host: IpAddr = args
         .host
         .parse()
@@ -63,14 +86,29 @@ pub async fn run_cmd(args: McpWatchArgs) -> anyhow::Result<()> {
 
     println!("🛡️  Burnwall mcp-watch v{}", env!("CARGO_PKG_VERSION"));
     println!("   Listen:   http://{}:{}", args.host, args.port);
-    println!("   Upstream: {}", args.upstream);
+    match &args.upstream {
+        Some(u) => println!("   Upstream: {u} (default route)"),
+        None => println!("   Upstream: (none — routed by [[mcp.servers]] only)"),
+    }
+    for s in &servers {
+        println!("     /{} → {}", s.name, s.upstream);
+    }
     println!(
-        "   Security: {} deny paths, {} allow paths, {} deny commands, mounts={}, secrets={}",
+        "   Approval: {}",
+        if require_approval {
+            "ENFORCE — tools/call to unapproved tools is blocked (see `burnwall mcp`)"
+        } else {
+            "observe-only (set mcp.require_approval to enforce)"
+        }
+    );
+    println!(
+        "   Security: {} deny paths, {} allow paths, {} deny commands, mounts={}, secrets={}, dlp={}",
         security.rules().deny_paths.len(),
         security.rules().allow_paths.len(),
         security.rules().deny_commands.len(),
         security.rules().block_network_mounts,
         security.rules().detect_secrets,
+        security.rules().detect_egress,
     );
     if let Some((path, profile)) = &project_profile {
         println!(
@@ -84,7 +122,9 @@ pub async fn run_cmd(args: McpWatchArgs) -> anyhow::Result<()> {
     println!("   Ready. Press Ctrl-C to stop.");
 
     let state = WatchState {
-        upstream: args.upstream.clone(),
+        upstream: args.upstream.clone().unwrap_or_default(),
+        servers,
+        require_approval,
         http_client: reqwest::Client::new(),
         storage,
         security,

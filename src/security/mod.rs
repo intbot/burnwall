@@ -17,6 +17,7 @@
 //! user's workflow is worse than missing one scan, and non-JSON bodies are
 //! typically non-chat endpoints (e.g. health checks).
 
+pub mod dlp;
 pub mod packs;
 pub mod rules;
 pub mod scanner;
@@ -33,6 +34,8 @@ pub enum ViolationKind {
     Command,
     Mount,
     Secret,
+    /// Egress / DLP — exfiltration-prone data (card numbers, SSNs). v0.6.5.
+    Dlp,
 }
 
 impl ViolationKind {
@@ -43,6 +46,7 @@ impl ViolationKind {
             ViolationKind::Command => "command_blocked",
             ViolationKind::Mount => "mount_blocked",
             ViolationKind::Secret => "secret_detected",
+            ViolationKind::Dlp => "dlp_blocked",
         }
     }
 }
@@ -72,6 +76,12 @@ impl Violation {
             }
             ViolationKind::Secret => {
                 format!("payload contains a {} pattern", self.matched)
+            }
+            ViolationKind::Dlp => {
+                format!(
+                    "payload contains possible data exfiltration: {}",
+                    self.matched
+                )
             }
         }
     }

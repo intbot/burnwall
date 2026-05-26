@@ -158,6 +158,18 @@ impl McpEvent {
     }
 }
 
+/// One advertised MCP tool's trust record (v0.6.5), surfaced by
+/// `burnwall mcp list`. Holds only the tool's advertised identity + approval
+/// state — no argument payloads or prompt content.
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpToolRow {
+    pub server: String,
+    pub tool_name: String,
+    /// `"pending"` or `"approved"`.
+    pub trust_state: String,
+    pub last_seen: DateTime<Utc>,
+}
+
 /// One row of the `burnwall status` provider/model breakdown table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelBreakdown {

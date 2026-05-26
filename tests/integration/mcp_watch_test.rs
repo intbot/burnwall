@@ -97,12 +97,12 @@ async fn tools_call_is_forwarded_and_logged_with_upstream_status() {
         .await;
 
     let storage = Arc::new(Storage::open_in_memory().unwrap());
-    let state = WatchState {
-        upstream: upstream.uri(),
-        http_client: reqwest::Client::new(),
-        storage: storage.clone(),
-        security: Arc::new(SecurityEngine::with_defaults()),
-    };
+    let state = WatchState::single_upstream(
+        upstream.uri(),
+        reqwest::Client::new(),
+        storage.clone(),
+        Arc::new(SecurityEngine::with_defaults()),
+    );
     let addr = spawn_watcher(state).await;
 
     let resp = client()
@@ -144,12 +144,12 @@ async fn non_tool_call_methods_pass_through_without_recording() {
         .await;
 
     let storage = Arc::new(Storage::open_in_memory().unwrap());
-    let state = WatchState {
-        upstream: upstream.uri(),
-        http_client: reqwest::Client::new(),
-        storage: storage.clone(),
-        security: Arc::new(SecurityEngine::with_defaults()),
-    };
+    let state = WatchState::single_upstream(
+        upstream.uri(),
+        reqwest::Client::new(),
+        storage.clone(),
+        Arc::new(SecurityEngine::with_defaults()),
+    );
     let addr = spawn_watcher(state).await;
 
     let resp = client()
@@ -176,15 +176,15 @@ async fn upstream_failure_still_records_tool_call_with_status_zero() {
     let dead_upstream = "http://127.0.0.1:1";
 
     let storage = Arc::new(Storage::open_in_memory().unwrap());
-    let state = WatchState {
-        upstream: dead_upstream.to_string(),
-        http_client: reqwest::Client::builder()
+    let state = WatchState::single_upstream(
+        dead_upstream.to_string(),
+        reqwest::Client::builder()
             .timeout(Duration::from_millis(300))
             .build()
             .unwrap(),
-        storage: storage.clone(),
-        security: Arc::new(SecurityEngine::with_defaults()),
-    };
+        storage.clone(),
+        Arc::new(SecurityEngine::with_defaults()),
+    );
     let addr = spawn_watcher(state).await;
 
     let resp = client()
@@ -220,12 +220,12 @@ async fn upstream_path_and_query_are_preserved() {
         .await;
 
     let storage = Arc::new(Storage::open_in_memory().unwrap());
-    let state = WatchState {
-        upstream: upstream.uri(),
-        http_client: reqwest::Client::new(),
-        storage: storage.clone(),
-        security: Arc::new(SecurityEngine::with_defaults()),
-    };
+    let state = WatchState::single_upstream(
+        upstream.uri(),
+        reqwest::Client::new(),
+        storage.clone(),
+        Arc::new(SecurityEngine::with_defaults()),
+    );
     let addr = spawn_watcher(state).await;
 
     let resp = client()
@@ -254,12 +254,12 @@ async fn tools_call_with_denied_path_in_arguments_returns_403_and_never_forwards
         .await;
 
     let storage = Arc::new(Storage::open_in_memory().unwrap());
-    let state = WatchState {
-        upstream: upstream.uri(),
-        http_client: reqwest::Client::new(),
-        storage: storage.clone(),
-        security: Arc::new(SecurityEngine::with_defaults()),
-    };
+    let state = WatchState::single_upstream(
+        upstream.uri(),
+        reqwest::Client::new(),
+        storage.clone(),
+        Arc::new(SecurityEngine::with_defaults()),
+    );
     let addr = spawn_watcher(state).await;
 
     let resp = client()
@@ -323,12 +323,12 @@ async fn poisoned_tool_description_is_flagged_but_response_forwarded_unchanged()
         .await;
 
     let storage = Arc::new(Storage::open_in_memory().unwrap());
-    let state = WatchState {
-        upstream: upstream.uri(),
-        http_client: reqwest::Client::new(),
-        storage: storage.clone(),
-        security: Arc::new(SecurityEngine::with_defaults()),
-    };
+    let state = WatchState::single_upstream(
+        upstream.uri(),
+        reqwest::Client::new(),
+        storage.clone(),
+        Arc::new(SecurityEngine::with_defaults()),
+    );
     let addr = spawn_watcher(state).await;
 
     let resp = client()
@@ -373,12 +373,12 @@ async fn tool_definition_change_is_flagged_as_rug_pull() {
         .await;
 
     let storage = Arc::new(Storage::open_in_memory().unwrap());
-    let state = WatchState {
-        upstream: upstream.uri(),
-        http_client: reqwest::Client::new(),
-        storage: storage.clone(),
-        security: Arc::new(SecurityEngine::with_defaults()),
-    };
+    let state = WatchState::single_upstream(
+        upstream.uri(),
+        reqwest::Client::new(),
+        storage.clone(),
+        Arc::new(SecurityEngine::with_defaults()),
+    );
     let addr = spawn_watcher(state).await;
 
     // Call 1 — first sighting, fingerprint recorded, no change flagged.
@@ -426,12 +426,12 @@ async fn denied_command_in_tool_arguments_is_blocked() {
         .await;
 
     let storage = Arc::new(Storage::open_in_memory().unwrap());
-    let state = WatchState {
-        upstream: upstream.uri(),
-        http_client: reqwest::Client::new(),
-        storage: storage.clone(),
-        security: Arc::new(SecurityEngine::with_defaults()),
-    };
+    let state = WatchState::single_upstream(
+        upstream.uri(),
+        reqwest::Client::new(),
+        storage.clone(),
+        Arc::new(SecurityEngine::with_defaults()),
+    );
     let addr = spawn_watcher(state).await;
 
     let resp = client()
@@ -463,12 +463,12 @@ async fn secret_pattern_in_tool_arguments_is_blocked() {
         .await;
 
     let storage = Arc::new(Storage::open_in_memory().unwrap());
-    let state = WatchState {
-        upstream: upstream.uri(),
-        http_client: reqwest::Client::new(),
-        storage: storage.clone(),
-        security: Arc::new(SecurityEngine::with_defaults()),
-    };
+    let state = WatchState::single_upstream(
+        upstream.uri(),
+        reqwest::Client::new(),
+        storage.clone(),
+        Arc::new(SecurityEngine::with_defaults()),
+    );
     let addr = spawn_watcher(state).await;
 
     let resp = client()
@@ -490,4 +490,137 @@ async fn secret_pattern_in_tool_arguments_is_blocked() {
     let sec = storage.security_events_for_date(&today()).unwrap();
     assert_eq!(sec.len(), 1);
     assert_eq!(sec[0].event_type, "secret_detected");
+}
+
+// ─────────────────── Approval workflow / enforce mode (v0.6.5) ───────────────────
+
+/// An enforce-mode watcher in front of `upstream` (single default route).
+fn enforce_state(upstream: String, storage: Arc<Storage>) -> WatchState {
+    WatchState {
+        upstream,
+        servers: Vec::new(),
+        require_approval: true,
+        http_client: reqwest::Client::new(),
+        storage,
+        security: Arc::new(SecurityEngine::with_defaults()),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enforce_mode_blocks_unapproved_tools_call() {
+    // Upstream must never be hit — the approval gate blocks before forward.
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&upstream)
+        .await;
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = enforce_state(upstream.uri(), storage.clone());
+    let addr = spawn_watcher(state).await;
+
+    let resp = client()
+        .post(format!("http://{}/mcp", addr))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "read_file", "arguments": {"path": "ok.txt"}},
+            "id": 1,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "approval_required");
+
+    // A security event records the held call (provider=mcp, model=tool).
+    let sec = storage.security_events_for_date(&today()).unwrap();
+    assert_eq!(sec.len(), 1);
+    assert_eq!(sec[0].event_type, "mcp_tool_unapproved");
+    assert_eq!(sec[0].provider.as_deref(), Some("mcp"));
+    assert_eq!(sec[0].model.as_deref(), Some("read_file"));
+    // The blocked call is NOT an mcp_events (forwarded) row.
+    assert!(storage.mcp_events_for_date(&today()).unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enforce_mode_forwards_an_approved_tool() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": "ok"})),
+        )
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    // Seed the tool as seen + approved on the default route's server name.
+    storage
+        .observe_mcp_tool("default", "read_file", "fp")
+        .unwrap();
+    assert!(storage.approve_mcp_tool("default", "read_file").unwrap());
+
+    let state = enforce_state(upstream.uri(), storage.clone());
+    let addr = spawn_watcher(state).await;
+
+    let resp = client()
+        .post(format!("http://{}/mcp", addr))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "read_file", "arguments": {"path": "ok.txt"}},
+            "id": 1,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["result"], "ok");
+
+    // Forwarded → recorded in mcp_events; no approval block event.
+    assert_eq!(storage.mcp_events_for_date(&today()).unwrap().len(), 1);
+    let sec = storage.security_events_for_date(&today()).unwrap();
+    assert!(sec.iter().all(|e| e.event_type != "mcp_tool_unapproved"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn observe_mode_forwards_unapproved_tools_call() {
+    // Default (require_approval = false): an unapproved call still forwards.
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": "ok"})),
+        )
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = WatchState::single_upstream(
+        upstream.uri(),
+        reqwest::Client::new(),
+        storage.clone(),
+        Arc::new(SecurityEngine::with_defaults()),
+    );
+    let addr = spawn_watcher(state).await;
+
+    let resp = client()
+        .post(format!("http://{}/mcp", addr))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "anything", "arguments": {}},
+            "id": 1,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(storage.mcp_events_for_date(&today()).unwrap().len(), 1);
 }

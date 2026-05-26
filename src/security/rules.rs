@@ -31,6 +31,10 @@ pub struct Ruleset {
     pub deny_commands: Vec<String>,
     pub block_network_mounts: bool,
     pub detect_secrets: bool,
+    /// Egress / DLP detection (v0.6.5). When `true`, the scanner also flags
+    /// exfiltration-prone data the credential denylist misses (Luhn-valid
+    /// card numbers, US SSNs). Off by default — opt-in, errs toward precision.
+    pub detect_egress: bool,
     /// Extra secret patterns contributed by installed rule packs (v0.6).
     /// Built-in patterns live in [`super::secrets::PATTERNS`] and are always
     /// checked first; these are *additive* and gated by `detect_secrets`.
@@ -56,6 +60,7 @@ impl Default for Ruleset {
                 .collect(),
             block_network_mounts: true,
             detect_secrets: true,
+            detect_egress: false,
             secret_patterns: Vec::new(),
             log_redact_details: false,
         }

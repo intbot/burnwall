@@ -22,6 +22,8 @@ pub struct Config {
     pub waste: WasteConfig,
     #[serde(default)]
     pub rules: RulesConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
     /// Deprecated: superseded by `[tools]`. Kept for one release as a global
     /// kill switch (`enabled = false` disables all log scraping). Prefer the
     /// per-tool `[tools]` switches. Only written back when set to a
@@ -129,6 +131,12 @@ pub struct SecurityConfig {
     /// out of stored data for users who sync or share the database.
     #[serde(default)]
     pub log_redact_details: bool,
+    /// Egress / DLP detection (v0.6.5). When `true`, the scanner also blocks
+    /// payloads carrying exfiltration-prone data the credential denylist does
+    /// not cover (Luhn-valid card numbers, US SSNs). Off by default — it errs
+    /// toward precision and is opt-in like other request-rewriting toggles.
+    #[serde(default)]
+    pub dlp: bool,
 }
 
 impl Default for SecurityConfig {
@@ -146,6 +154,7 @@ impl Default for SecurityConfig {
             block_network_mounts: true,
             detect_secrets: true,
             log_redact_details: false,
+            dlp: false,
         }
     }
 }
@@ -253,6 +262,28 @@ pub struct RulesConfig {
     pub enabled: Vec<String>,
 }
 
+/// `[mcp]` — `burnwall mcp-watch` runtime depth (v0.6.5). `servers` lets one
+/// watcher front several MCP servers, routed by the first path segment
+/// (`/<name>/...`). `require_approval` turns on enforce mode: a `tools/call`
+/// to a tool that has not been approved via `burnwall mcp approve` is blocked
+/// (403) instead of forwarded. Both default off / empty, so an upgrade keeps
+/// the v0.5 single-upstream, observe-only behavior until the user opts in.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct McpConfig {
+    #[serde(default)]
+    pub require_approval: bool,
+    #[serde(default)]
+    pub servers: Vec<McpServerConfig>,
+}
+
+/// One named upstream MCP server for multi-server routing. Requests to
+/// `/<name>` or `/<name>/...` forward to `upstream` with the prefix stripped.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub upstream: String,
+}
+
 /// Convert the persistent config's budget block into the runtime
 /// [`crate::budget::BudgetConfig`] used by [`BudgetTracker`].
 impl From<&BudgetConfig> for crate::budget::BudgetConfig {
@@ -279,6 +310,7 @@ impl From<&SecurityConfig> for crate::security::Ruleset {
             deny_commands: c.deny_commands.clone(),
             block_network_mounts: c.block_network_mounts,
             detect_secrets: c.detect_secrets,
+            detect_egress: c.dlp,
             // Pack-contributed patterns are merged in later (Phase B startup
             // wiring), like a discovered project profile.
             secret_patterns: Vec::new(),
