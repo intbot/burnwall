@@ -49,13 +49,14 @@ fi
 
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN*)
-    # Windows: ln -s under Git Bash often copies instead of linking, so use
-    # the native mklink with Windows-style paths.
+    # Windows: ln -s under Git Bash often copies instead of linking. Use a
+    # native directory junction (mklink /J) — it links local directories
+    # without needing Developer Mode or an elevated shell. cygpath gives the
+    # Windows-style paths; MSYS_NO_PATHCONV stops MSYS mangling the /J switch.
     win_target="$(cygpath -w "$target_dir")"
     win_source="$(cygpath -w "$source_dir")"
-    if ! cmd //c mklink /D "$win_target" "$win_source" >/dev/null; then
-      echo "setup-private: failed to create symlink." >&2
-      echo "               on Windows this needs Developer Mode or an elevated shell." >&2
+    if ! MSYS_NO_PATHCONV=1 cmd /c mklink /J "$win_target" "$win_source" >/dev/null; then
+      echo "setup-private: failed to create junction to '$source_dir'." >&2
       exit 1
     fi
     ;;
