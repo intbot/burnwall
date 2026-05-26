@@ -105,6 +105,19 @@ CREATE TABLE IF NOT EXISTS mcp_tools (
     last_seen TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (server, tool_name)
 );
+
+-- Trust-On-First-Use pins for installed third-party rule packs (v0.6). A pack
+-- under <data dir>/rules/ is applied at startup ONLY if its current SHA-256
+-- matches the pinned `sha256` here (invariant I6) — an edited/unapproved pack
+-- is skipped. `burnwall rules add` writes the pin after the user approves;
+-- `rules revoke` deletes it. Official packs are bundled/trusted and do not
+-- appear here (invariant I4).
+CREATE TABLE IF NOT EXISTS rule_trust (
+    pack_id     TEXT PRIMARY KEY,
+    source_path TEXT NOT NULL,
+    sha256      TEXT NOT NULL,
+    approved_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 "#;
 
 #[derive(Debug, thiserror::Error)]

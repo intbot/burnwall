@@ -1,0 +1,18 @@
+# Burnwall official rule pack — Infrastructure / IaC.
+# Bundled in the binary (inherently trusted). Declarative + deny-only.
+id = "infrastructure"
+name = "Infrastructure security rules"
+version = "1.0.0"
+
+# Terraform state files store secrets in plaintext; agents should not read them.
+deny_paths = [
+    "/terraform.tfstate",
+    "/terraform.tfstate.backup",
+]
+
+# Genuinely destructive infrastructure commands.
+deny_commands = [
+    "terraform destroy",
+    "terraform apply -auto-approve",
+    "kubectl delete namespace",
+]

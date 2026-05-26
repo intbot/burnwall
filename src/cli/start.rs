@@ -64,6 +64,24 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
     let mut ruleset: crate::security::Ruleset = (&user_config.security).into();
     let mut budget_cfg: crate::budget::BudgetConfig = (&user_config.budget).into();
 
+    // Enabled official rule packs (v0.6): bundled, inherently-trusted packs the
+    // user turned on with `burnwall rules install`. Each only EXTENDS the deny
+    // lists (invariant I2). Applied before the project profile.
+    for id in &user_config.rules.enabled {
+        match crate::security::packs::load_official(id) {
+            Some(pack) => pack.apply_to_ruleset(&mut ruleset),
+            None => {
+                tracing::warn!("configured rule pack '{id}' is not a known official pack; skipping")
+            }
+        }
+    }
+
+    // Approved third-party rule packs (v0.6): files under `<data dir>/rules/`,
+    // applied ONLY when the file's current SHA-256 matches the pinned approval
+    // (invariant I6). An edited or unapproved pack is skipped with a warning —
+    // never silently trusted. `burnwall rules add` installs + pins them.
+    apply_third_party_packs(&storage, &mut ruleset);
+
     // Per-project profile: discover a `.burnwall.yaml` by walking up from the
     // working directory and layer its rules onto the global config. deny_paths
     // extend the denylist, allow_paths add exceptions, and budget.daily_max_usd
@@ -109,6 +127,7 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
         &security,
         &budget,
         project_profile.as_ref(),
+        &user_config.rules.enabled,
         cache_injection,
     );
 
@@ -153,6 +172,43 @@ fn init_tracing() {
         .try_init();
 }
 
+/// Apply approved third-party rule packs from `<data dir>/rules/*.toml`. Each
+/// is applied only when its current content hash matches the TOFU pin in
+/// storage (invariant I6); edited or unapproved packs are skipped with a
+/// warning. Fail-open: an unreadable dir / file contributes nothing.
+fn apply_third_party_packs(storage: &Arc<Storage>, ruleset: &mut crate::security::Ruleset) {
+    let Ok(dir) = crate::storage::data_dir().map(|d| d.join("rules")) else {
+        return;
+    };
+    let Ok(read) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Some(pack) = crate::security::packs::RulePack::parse(&content) else {
+            continue;
+        };
+        let hash = crate::security::packs::content_hash(content.as_bytes());
+        match storage.rule_pack_approved_hash(&pack.id) {
+            Ok(Some(approved)) if approved == hash => pack.apply_to_ruleset(ruleset),
+            Ok(Some(_)) => tracing::warn!(
+                "rule pack '{}' changed since approval — skipped; re-run `burnwall rules add` to approve",
+                pack.id
+            ),
+            _ => tracing::warn!(
+                "rule pack '{}' is not approved — skipped (run `burnwall rules add`)",
+                pack.id
+            ),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn print_banner(
     host: &str,
@@ -162,6 +218,7 @@ fn print_banner(
     security: &Arc<SecurityEngine>,
     budget: &Arc<BudgetTracker>,
     project_profile: Option<&(std::path::PathBuf, config::project::ProjectProfile)>,
+    rule_packs: &[String],
     cache_injection: bool,
 ) {
     let _ = storage;
@@ -178,6 +235,13 @@ fn print_banner(
         security.rules().block_network_mounts,
         security.rules().detect_secrets,
     );
+    if !rule_packs.is_empty() {
+        println!(
+            "   Rules:    {} official pack(s): {}",
+            rule_packs.len(),
+            rule_packs.join(", ")
+        );
+    }
     let cfg = budget.config();
     if cfg.daily_usd > 0.0 {
         println!(

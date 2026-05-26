@@ -1,0 +1,12 @@
+# Burnwall official rule pack — React / frontend.
+# Bundled in the binary (inherently trusted). Declarative + deny-only.
+id = "react"
+name = "React / frontend security rules"
+version = "1.0.0"
+
+# Local/production env files commonly hold API keys that must not leave the box.
+deny_paths = [
+    "/.env.local",
+    "/.env.production",
+    "/.env.development.local",
+]

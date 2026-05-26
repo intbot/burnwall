@@ -298,3 +298,54 @@ fn allow_path_exempts_path_but_not_secret() {
     let v = engine.scan(body).expect("violation");
     assert_eq!(v.kind, ViolationKind::Secret);
 }
+
+// ─────────────────── Secret patterns (v0.6 additions) ───────────────────
+
+#[test]
+fn detects_new_provider_secret_patterns() {
+    use burnwall::security::secrets::first_match;
+    // Synthetic positives (exact lengths; not real credentials).
+    assert!(
+        first_match(&format!("AIza{}", "a".repeat(35))).is_some(),
+        "Google API key"
+    );
+    assert!(
+        first_match(&format!("GOCSPX-{}", "a".repeat(28))).is_some(),
+        "Google OAuth secret"
+    );
+    assert!(
+        first_match(&format!("sk_live_{}", "a".repeat(24))).is_some(),
+        "Stripe secret key"
+    );
+    assert!(
+        first_match(&format!("github_pat_{}", "a".repeat(82))).is_some(),
+        "GitHub fine-grained PAT"
+    );
+    assert!(
+        first_match(&format!("npm_{}", "a".repeat(36))).is_some(),
+        "npm token"
+    );
+    assert!(
+        first_match(&format!("SG.{}.{}", "a".repeat(22), "b".repeat(43))).is_some(),
+        "SendGrid key"
+    );
+}
+
+#[test]
+fn benign_strings_are_not_flagged_as_secrets() {
+    use burnwall::security::secrets::first_match;
+    let benign = [
+        "hello world",
+        "the npm_ registry is great",
+        "AIza",
+        "sk_live_short",
+        "GOCSPX-tooshort",
+        "please run npm install",
+        "/usr/local/bin/python",
+        "SECRET_KEY is configured in settings",
+        "github_pat_ is the prefix",
+    ];
+    for s in benign {
+        assert!(first_match(s).is_none(), "false positive on: {s:?}");
+    }
+}

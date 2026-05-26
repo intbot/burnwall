@@ -115,6 +115,49 @@ impl Storage {
         })
     }
 
+    /// Record (or update) a Trust-On-First-Use approval for a third-party rule
+    /// pack: pins its content hash so a later edit re-flags it (invariant I6).
+    pub fn approve_rule_pack(&self, pack_id: &str, source_path: &str, sha256: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO rule_trust (pack_id, source_path, sha256, approved_at)
+                 VALUES (?1, ?2, ?3, datetime('now'))
+                 ON CONFLICT(pack_id) DO UPDATE SET
+                     source_path = excluded.source_path,
+                     sha256 = excluded.sha256,
+                     approved_at = datetime('now')",
+                params![pack_id, source_path, sha256],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The pinned (approved) content hash for a third-party rule pack, if any.
+    pub fn rule_pack_approved_hash(&self, pack_id: &str) -> Result<Option<String>> {
+        self.with_conn(|conn| {
+            let hash = conn
+                .query_row(
+                    "SELECT sha256 FROM rule_trust WHERE pack_id = ?1",
+                    params![pack_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(hash)
+        })
+    }
+
+    /// Remove a third-party rule pack's approval. Returns `true` if a row was
+    /// deleted.
+    pub fn revoke_rule_pack(&self, pack_id: &str) -> Result<bool> {
+        self.with_conn(|conn| {
+            let n = conn.execute(
+                "DELETE FROM rule_trust WHERE pack_id = ?1",
+                params![pack_id],
+            )?;
+            Ok(n > 0)
+        })
+    }
+
     /// Fetch a single request by rowid. Returns `Ok(None)` if not found.
     pub fn get_request(&self, id: i64) -> Result<Option<RequestRecord>> {
         self.with_conn(|conn| {

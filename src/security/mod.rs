@@ -17,10 +17,12 @@
 //! user's workflow is worse than missing one scan, and non-JSON bodies are
 //! typically non-chat endpoints (e.g. health checks).
 
+pub mod packs;
 pub mod rules;
 pub mod scanner;
 pub mod secrets;
 
+pub use packs::RulePack;
 pub use rules::Ruleset;
 
 /// What kind of rule matched, used both to format the user-facing message

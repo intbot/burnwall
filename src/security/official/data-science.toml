@@ -1,0 +1,11 @@
+# Burnwall official rule pack — Data science / ML.
+# Bundled in the binary (inherently trusted). Declarative + deny-only.
+id = "data-science"
+name = "Data science security rules"
+version = "1.0.0"
+
+# Credential files for common data/ML platforms.
+deny_paths = [
+    "/.kaggle/kaggle.json",
+    "/.netrc",
+]

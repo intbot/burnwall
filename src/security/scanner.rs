@@ -73,14 +73,47 @@ fn check_string(s: &str, rules: &Ruleset) -> Option<Violation> {
         });
     }
     if rules.detect_secrets {
+        // Built-in patterns scan the FULL leaf — we must never miss a known
+        // credential. (These are linear-time and few.)
         if let Some(name) = secrets::first_match(s) {
             return Some(Violation {
                 kind: ViolationKind::Secret,
                 matched: name.to_string(),
             });
         }
+        // Pack-contributed patterns are additive (extra detection). Cap the
+        // input they run against (invariant I5) — an adversarial pack can't
+        // weaken the built-ins above, so a miss here only forgoes a bonus
+        // catch, never a built-in one.
+        if !rules.secret_patterns.is_empty() {
+            let hay = capped(s, MAX_PACK_SCAN_INPUT);
+            if let Some(name) = secrets::first_match_in(hay, &rules.secret_patterns) {
+                return Some(Violation {
+                    kind: ViolationKind::Secret,
+                    matched: name.to_string(),
+                });
+            }
+        }
     }
     None
+}
+
+/// Upper bound on the input length that pack-authored secret patterns run
+/// against. Built-in checks are uncapped; this only bounds the untrusted,
+/// additive pack scan (invariant I5).
+const MAX_PACK_SCAN_INPUT: usize = 1024 * 1024;
+
+/// Largest prefix of `s` no longer than `max` bytes that ends on a UTF-8 char
+/// boundary. Returns `s` unchanged when it already fits.
+fn capped(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Best-effort label for which mount needle hit, for the violation message.

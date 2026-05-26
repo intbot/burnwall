@@ -20,6 +20,8 @@ pub struct Config {
     pub tools: ToolsConfig,
     #[serde(default)]
     pub waste: WasteConfig,
+    #[serde(default)]
+    pub rules: RulesConfig,
     /// Deprecated: superseded by `[tools]`. Kept for one release as a global
     /// kill switch (`enabled = false` disables all log scraping). Prefer the
     /// per-tool `[tools]` switches. Only written back when set to a
@@ -241,6 +243,16 @@ impl Default for WasteConfig {
     }
 }
 
+/// Enabled official rule packs (v0.6). Each id names a bundled official pack;
+/// `burnwall rules install <id>` adds to this list and `burnwall start` merges
+/// the pack onto the runtime ruleset. A pack only ever EXTENDS the denylist
+/// (invariant I2). Empty by default — no packs enabled.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RulesConfig {
+    #[serde(default)]
+    pub enabled: Vec<String>,
+}
+
 /// Convert the persistent config's budget block into the runtime
 /// [`crate::budget::BudgetConfig`] used by [`BudgetTracker`].
 impl From<&BudgetConfig> for crate::budget::BudgetConfig {
@@ -267,6 +279,9 @@ impl From<&SecurityConfig> for crate::security::Ruleset {
             deny_commands: c.deny_commands.clone(),
             block_network_mounts: c.block_network_mounts,
             detect_secrets: c.detect_secrets,
+            // Pack-contributed patterns are merged in later (Phase B startup
+            // wiring), like a discovered project profile.
+            secret_patterns: Vec::new(),
             log_redact_details: c.log_redact_details,
         }
     }

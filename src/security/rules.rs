@@ -31,6 +31,12 @@ pub struct Ruleset {
     pub deny_commands: Vec<String>,
     pub block_network_mounts: bool,
     pub detect_secrets: bool,
+    /// Extra secret patterns contributed by installed rule packs (v0.6).
+    /// Built-in patterns live in [`super::secrets::PATTERNS`] and are always
+    /// checked first; these are *additive* and gated by `detect_secrets`.
+    /// A rule pack can only ever EXTEND this list — never an allow list or a
+    /// global toggle (invariant I2).
+    pub secret_patterns: Vec<super::secrets::SecretPattern>,
     /// When true, storage rows for blocked requests strip the matched-rule
     /// detail (e.g. "~/.ssh") and keep only the event-type label. The 403
     /// response to the agent is unaffected so legitimate users still see
@@ -50,6 +56,7 @@ impl Default for Ruleset {
                 .collect(),
             block_network_mounts: true,
             detect_secrets: true,
+            secret_patterns: Vec::new(),
             log_redact_details: false,
         }
     }

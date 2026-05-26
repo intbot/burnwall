@@ -9,6 +9,7 @@ pub mod explore;
 pub mod history;
 pub mod init;
 pub mod mcp_watch;
+pub mod rules;
 pub mod security;
 pub mod start;
 pub mod status;
@@ -46,6 +47,8 @@ pub enum Command {
     Waste(waste::WasteArgs),
     /// Explore spend by model, harness, and workspace over a window.
     Explore(explore::ExploreArgs),
+    /// Manage security-rule packs (list / install official packs).
+    Rules(rules::RulesArgs),
 }
 
 impl Cli {
@@ -62,6 +65,7 @@ impl Cli {
             Command::McpWatch(args) => mcp_watch::run_cmd(args).await,
             Command::Waste(args) => waste::run_cmd(args),
             Command::Explore(args) => explore::run_cmd(args),
+            Command::Rules(args) => rules::run_cmd(args),
         }
     }
 }

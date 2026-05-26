@@ -12,7 +12,7 @@ pub mod types;
 
 pub use types::{
     BudgetConfig, Config, LogScrapeConfig, LoggingConfig, LoopDetectionConfig, ProxyConfig,
-    SecurityConfig, ToolsConfig, WasteConfig,
+    RulesConfig, SecurityConfig, ToolsConfig, WasteConfig,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -125,6 +125,9 @@ pub fn set_dotted_key(config: &mut Config, key: &str, value: &str) -> Result<()>
         "tools.opencode" => config.tools.opencode = parse(key, value)?,
         "tools.aider" => config.tools.aider = parse(key, value)?,
         "waste.enabled" => config.waste.enabled = parse(key, value)?,
+        // Prefer `burnwall rules install <id>` (it validates the id); this
+        // setter is the raw escape hatch and does not validate pack ids.
+        "rules.enabled" => config.rules.enabled = split_csv(value),
         // Deprecated alias — still settable for one release.
         "log_scrape.enabled" => config.log_scrape.enabled = parse(key, value)?,
         _ => return Err(ConfigError::UnknownKey(key.to_string())),

@@ -53,6 +53,7 @@ regex = "1"                          # Pattern matching for security rules
 dashmap = "6"                        # Concurrent hashmap for loop detection
 uuid = { version = "1", features = ["v4"] }
 futures-util = "0.3"                 # Stream adapters for SSE response pass-through
+sha2 = "0.10"                        # SHA-256 content pin for third-party rule-pack trust (TOFU)
 
 # Process control for daemon mode + `burnwall stop`
 [target.'cfg(unix)'.dependencies]
@@ -132,6 +133,14 @@ path = "tests/integration/mcp_watch_test.rs"
 [[test]]
 name = "mcp_firewall_test"
 path = "tests/unit/mcp_firewall_test.rs"
+
+[[test]]
+name = "rulepack_test"
+path = "tests/unit/rulepack_test.rs"
+
+[[test]]
+name = "rules_test"
+path = "tests/integration/rules_test.rs"
 
 [[test]]
 name = "waste_test"
