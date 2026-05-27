@@ -2,6 +2,67 @@
 
 All notable changes to Burnwall.
 
+## [0.6.5] — 2026-05-26
+
+### Added
+
+- `burnwall mcp-watch` can front **multiple MCP servers** from a single watcher,
+  routed by the first path segment. Configure them under `[[mcp.servers]]`; a
+  `--upstream` still works as the fallback for unmatched paths.
+- **MCP tool approval workflow.** Enforce mode (`mcp.require_approval`, or
+  `--require-approval`) holds a `tools/call` to a tool you haven't approved with a
+  403 until you approve it; a tool whose definition later changes is reset to
+  pending automatically. Manage approvals with `burnwall mcp list`,
+  `burnwall mcp approve <server> [tool]`, and `burnwall mcp revoke`. Off by
+  default — the watcher stays observe-only until you opt in.
+- `burnwall mcp export [--days N] [--format json|csv]` — export the MCP audit log
+  (tool calls plus MCP-side security events) as JSON or CSV.
+- **Egress / DLP check** (`[security].dlp`, opt-in). Blocks Luhn-valid credit-card
+  numbers and US Social Security numbers in outbound payloads, including inside MCP
+  tool-call arguments. Reports the category (e.g. "credit card number"), never the
+  value.
+
+## [0.6.0] — 2026-05-25
+
+### Added
+
+- **Community security rule packs.** Declarative TOML packs that extend the
+  path / command / secret denylist. Bundled official packs ship in the binary:
+  `django`, `react`, `infrastructure`, `data-science`. `burnwall rules list`,
+  `burnwall rules install <id>`, and `burnwall rules test <pack> <file>` (a
+  playground that shows what a pack would block against a sample request).
+- **Third-party rule packs** via `burnwall rules add <file>` with
+  Trust-On-First-Use: you review exactly what a pack adds, its contents are
+  SHA-256-pinned, and any later edit re-prompts for approval. `burnwall rules
+  revoke` removes one.
+- More built-in secret patterns: Google API key, Google OAuth client secret,
+  Stripe live keys, GitHub fine-grained PAT, npm token, SendGrid key.
+
+### Security
+
+- Rule packs are **deny-only / append-only** by construction — a pack can only add
+  restrictions, never loosen them, and cannot toggle global switches. User-authored
+  regexes are size-capped and compiled with the non-backtracking `regex` engine, so
+  a malformed or hostile pattern is skipped rather than able to hang the proxy.
+
+## [0.5.0] — 2026-05-25
+
+### Added
+
+- **MCP firewall.** `burnwall mcp-watch` now inspects `tools/list` responses for
+  tool poisoning (injection phrases, hidden/zero-width unicode, smuggled
+  paths/commands/secrets) and rug-pulls (a tool's definition silently changing
+  after you've seen it). Findings are recorded as security events; responses are
+  forwarded byte-for-byte unchanged.
+- Cross-tool cost tracking now also reads **OpenCode** and **Aider** session logs,
+  alongside Claude Code and Codex.
+- `docs/SECURITY_FRAMEWORKS.md` — maps Burnwall's coverage to the OWASP LLM /
+  Agentic Top 10 and the EU AI Act (honest about partial coverage).
+
+### Changed
+
+- The `[tools]` config section gained `opencode` and `aider` toggles (default on).
+
 ## [0.4.0] — 2026-05-25
 
 ### Added

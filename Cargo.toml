@@ -1,6 +1,6 @@
 [package]
 name = "burnwall"
-version = "0.4.0"
+version = "0.6.5"
 edition = "2021"
 description = "Local proxy for AI coding tools (Claude Code, Codex CLI, Aider): cache-aware cost tracking, path/command security checks, daily budget enforcement. Zero telemetry."
 license = "FSL-1.1-MIT"
