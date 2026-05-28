@@ -22,13 +22,17 @@ ci = "github"
 installers = ["shell", "powershell", "homebrew", "npm", "msi"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
-# Where the Homebrew formula is published (a GitHub repo named homebrew-*).
+# Where the Homebrew formula is published (the existing tap repo).
 # Requires a HOMEBREW_TAP_TOKEN secret (PAT, repo scope) on THIS repo.
-tap = "intbot/homebrew-tap"
-# Publish fan-out. Built-ins ("homebrew", "npm") publish to their registries;
-# the "./publish-*" entries are the custom reusable workflows in .github/workflows/.
-# The custom legs self-skip (green, no-op) when their API token secret is absent,
-# so they are safe to ship dormant until the keys are added at v0.9.
-publish-jobs = ["homebrew", "npm", "./publish-crates", "./publish-nuget", "./publish-pypi"]
+tap = "intbot/homebrew-burnwall"
+# Publish fan-out. Only the custom reusable workflows are wired today; each
+# self-skips (green, no-op) when its API token secret is absent, so a tag
+# releases cleanly before any credentials exist. The "homebrew"/"npm" built-in
+# publish jobs are intentionally NOT listed yet: they hard-fail without their
+# secret/tap, which would redden the release and block `announce`. Their
+# installers stay enabled above, so the formula + npm package are still built
+# and attached to the GitHub Release — just not auto-pushed to the tap/registry.
+# At v0.9, add the secrets + tap token, then re-add "homebrew", "npm" here.
+publish-jobs = ["./publish-crates", "./publish-nuget", "./publish-pypi"]
 # Run a plan-only check on PRs (don't try to build/publish on every PR).
 pr-run-mode = "plan"
