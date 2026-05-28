@@ -36,6 +36,12 @@ pub async fn handle(
                 state.upstream_openai.clone(),
                 path["/openai".len()..].to_string(),
             ))
+        } else if path == "/google" || path.starts_with("/google/") {
+            Some((
+                "google",
+                state.upstream_google.clone(),
+                path["/google".len()..].to_string(),
+            ))
         } else {
             None
         };
@@ -47,15 +53,18 @@ pub async fn handle(
             return Ok(error_response(
                 StatusCode::NOT_FOUND,
                 "proxy_error",
-                "Unknown route. Use /anthropic/* or /openai/* prefix.",
+                "Unknown route. Use /anthropic/*, /openai/*, or /google/* prefix.",
             ));
         }
     };
 
-    let mut upstream_uri = format!("{}{}", upstream_base, rest);
+    // The path + query that gets appended to each candidate base URL. Built
+    // once here so endpoint failover can retry the same request shape against
+    // alternate upstreams.
+    let mut path_and_query = rest.clone();
     if let Some(q) = req.uri().query() {
-        upstream_uri.push('?');
-        upstream_uri.push_str(q);
+        path_and_query.push('?');
+        path_and_query.push_str(q);
     }
 
     // ─── read request body once (security scan needs it; forwarding too) ───
@@ -185,10 +194,11 @@ pub async fn handle(
         body_bytes
     };
 
-    // ─── forward + tee-parse ───
+    // ─── forward (with optional failover) + tee-parse ───
     match forwarding::forward(
         parts.method,
-        &upstream_uri,
+        &upstream_base,
+        &path_and_query,
         parts.headers,
         forward_body,
         &state,
@@ -199,7 +209,10 @@ pub async fn handle(
     {
         Ok(resp) => Ok(resp),
         Err(e) => {
-            warn!("upstream error for {}: {}", upstream_uri, e);
+            warn!(
+                "upstream error for {}{}: {}",
+                upstream_base, path_and_query, e
+            );
             Ok(error_response(
                 StatusCode::BAD_GATEWAY,
                 "proxy_error",

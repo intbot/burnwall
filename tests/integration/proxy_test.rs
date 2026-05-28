@@ -209,7 +209,7 @@ async fn returns_404_for_unknown_route() {
     let proxy = spawn_proxy(state).await;
 
     let resp = client()
-        .get(format!("http://{}/google/v1/models", proxy))
+        .get(format!("http://{}/cohere/v1/models", proxy))
         .send()
         .await
         .expect("proxy GET");

@@ -2,6 +2,36 @@
 
 All notable changes to Burnwall.
 
+## [0.7.0] — 2026-05-27
+
+### Added
+
+- **Same-model endpoint failover + circuit breaking** (`[resilience]`, opt-in).
+  When an upstream is unreachable or returns a 5xx, Burnwall reroutes the same
+  request to the next configured endpoint for that provider (e.g. a Bedrock or
+  Vertex base URL for a Claude/Gemini model) — the request shape is identical,
+  so it is a transparent reroute, not a translation. A per-endpoint circuit
+  breaker (`failure_threshold`, `cooldown_seconds`) stops hammering a dead
+  endpoint and lets it recover with a half-open probe. Off by default — a single
+  upstream and verbatim 5xx pass-through is unchanged until you configure it.
+- **`burnwall metrics [--days N] [--json]`** — per-model latency (p50/p95),
+  error rate, and throughput, computed locally from the request log. The local
+  answer to hosted LLM observability. Metadata only — no prompt content. The
+  proxy now records each forwarded request's upstream latency and HTTP status.
+- **`burnwall digest [--days N] [--json]`** — an Agent Bill of Materials for a
+  window: which models ran and what they cost, which MCP servers/tools were
+  touched, how many tool calls were made, which security checks fired, and total
+  turns. Assembled from existing metadata; never reads prompt content.
+- **OpenTelemetry GenAI spans** (`[observability].otel_spans`, opt-in). Each
+  forwarded request emits one span following the OTel GenAI semantic conventions
+  (`gen_ai.*`) as line-delimited JSON to a local file (`otel_file`). Payload-free
+  and file-only — no network export, consistent with Burnwall's zero-telemetry
+  stance. Interop without leaking prompts.
+- **Google Gemini support** — `/google/*` route to the Gemini API, a
+  `generateContent` + SSE response parser (`usageMetadata` token accounting with
+  cached-content split and thinking-token folding), and pricing for
+  `gemini-2.5-pro`, `gemini-2.5-flash`, and `gemini-2.0-flash`.
+
 ## [0.6.5] — 2026-05-26
 
 ### Added

@@ -5,7 +5,7 @@
 
 use std::fs;
 
-use burnwall::providers::{anthropic, openai, TokenUsage};
+use burnwall::providers::{anthropic, google, openai, TokenUsage};
 
 fn fixture(name: &str) -> Vec<u8> {
     let path = format!("tests/fixtures/{}", name);
@@ -119,4 +119,71 @@ fn openai_missing_prompt_tokens_details_defaults_to_zero_cache() {
 #[test]
 fn openai_invalid_json_returns_error() {
     assert!(openai::parse(b"<html>").is_err());
+}
+
+// ──────────────────────────────── Google ────────────────────────────────
+
+#[test]
+fn google_uncached_yields_full_prompt_as_input() {
+    let parsed = google::parse(&fixture("google_uncached.json")).expect("parse");
+
+    assert_eq!(parsed.model, "gemini-2.5-pro");
+    assert_eq!(
+        parsed.usage,
+        TokenUsage {
+            input_tokens: 4096,
+            output_tokens: 256,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+        }
+    );
+}
+
+#[test]
+fn google_cached_subtracts_cache_and_folds_thoughts_into_output() {
+    let parsed = google::parse(&fixture("google_cached.json")).expect("parse");
+
+    // promptTokenCount=2048, cached=1536 → input=512, cache_read=1536.
+    // candidates=200 + thoughts=100 → output=300.
+    assert_eq!(parsed.model, "gemini-2.5-flash");
+    assert_eq!(
+        parsed.usage,
+        TokenUsage {
+            input_tokens: 512,
+            output_tokens: 300,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 1536,
+        }
+    );
+}
+
+#[test]
+fn google_missing_model_version_falls_back_to_gemini() {
+    let body = br#"{"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":50}}"#;
+    let parsed = google::parse(body).expect("parse without modelVersion");
+    assert_eq!(parsed.model, "gemini");
+    assert_eq!(parsed.usage.input_tokens, 100);
+    assert_eq!(parsed.usage.output_tokens, 50);
+}
+
+#[test]
+fn google_invalid_json_returns_error() {
+    assert!(google::parse(b"not json").is_err());
+}
+
+#[test]
+fn google_missing_usage_metadata_returns_error() {
+    let body = br#"{"candidates":[],"modelVersion":"gemini-2.5-pro"}"#;
+    assert!(google::parse(body).is_err());
+}
+
+#[test]
+fn google_sse_stream_reads_cumulative_usage() {
+    let sse = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hi\"}]}}],\"modelVersion\":\"gemini-2.5-flash\"}\n\
+\n\
+data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" there\"}]}}],\"usageMetadata\":{\"promptTokenCount\":1000,\"candidatesTokenCount\":40},\"modelVersion\":\"gemini-2.5-flash\"}\n\n";
+    let parsed = google::parse_sse(sse.as_bytes()).expect("sse parse");
+    assert_eq!(parsed.model, "gemini-2.5-flash");
+    assert_eq!(parsed.usage.input_tokens, 1000);
+    assert_eq!(parsed.usage.output_tokens, 40);
 }

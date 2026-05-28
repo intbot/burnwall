@@ -9,7 +9,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::collections::HashMap;
+
 use burnwall::budget::{BudgetConfig, BudgetTracker, LoopDetector};
+use burnwall::observe::otel::SpanWriter;
+use burnwall::proxy::resilience::Resilience;
 use burnwall::proxy::{serve, AppState};
 use burnwall::security::SecurityEngine;
 use burnwall::storage::Storage;
@@ -73,6 +77,9 @@ async fn safe_anthropic_request_records_cost() {
         loop_detector: Arc::new(LoopDetector::with_defaults()),
         storage: storage.clone(),
         cache_injection: false,
+        upstream_google: "http://127.0.0.1:1".to_string(),
+        resilience: Default::default(),
+        otel: None,
     };
     let addr = spawn_proxy(state).await;
 
@@ -135,6 +142,9 @@ async fn safe_openai_request_records_cost_with_cache() {
         loop_detector: Arc::new(LoopDetector::with_defaults()),
         storage: storage.clone(),
         cache_injection: false,
+        upstream_google: "http://127.0.0.1:1".to_string(),
+        resilience: Default::default(),
+        otel: None,
     };
     let addr = spawn_proxy(state).await;
 
@@ -179,6 +189,9 @@ async fn security_violation_returns_403_and_records_event() {
         loop_detector: Arc::new(LoopDetector::with_defaults()),
         storage: storage.clone(),
         cache_injection: false,
+        upstream_google: "http://127.0.0.1:1".to_string(),
+        resilience: Default::default(),
+        otel: None,
     };
     let addr = spawn_proxy(state).await;
 
@@ -249,6 +262,9 @@ async fn budget_exceeded_returns_429_without_forwarding() {
         loop_detector: Arc::new(LoopDetector::with_defaults()),
         storage: storage.clone(),
         cache_injection: false,
+        upstream_google: "http://127.0.0.1:1".to_string(),
+        resilience: Default::default(),
+        otel: None,
     };
     let addr = spawn_proxy(state).await;
 
@@ -311,6 +327,9 @@ data: {\"type\":\"message_stop\"}\n\n";
         loop_detector: Arc::new(LoopDetector::with_defaults()),
         storage: storage.clone(),
         cache_injection: false,
+        upstream_google: "http://127.0.0.1:1".to_string(),
+        resilience: Default::default(),
+        otel: None,
     };
     let addr = spawn_proxy(state).await;
 
@@ -376,6 +395,9 @@ async fn budget_warning_does_not_block() {
         loop_detector: Arc::new(LoopDetector::with_defaults()),
         storage: Arc::new(Storage::open_in_memory().unwrap()),
         cache_injection: false,
+        upstream_google: "http://127.0.0.1:1".to_string(),
+        resilience: Default::default(),
+        otel: None,
     };
     let addr = spawn_proxy(state).await;
 
@@ -423,6 +445,9 @@ async fn loop_detection_blocks_after_threshold_identical_requests() {
         loop_detector: detector,
         storage: storage.clone(),
         cache_injection: false,
+        upstream_google: "http://127.0.0.1:1".to_string(),
+        resilience: Default::default(),
+        otel: None,
     };
     let addr = spawn_proxy(state).await;
 
@@ -499,6 +524,9 @@ async fn security_log_redact_details_strips_rule_from_storage() {
         loop_detector: Arc::new(LoopDetector::with_defaults()),
         storage: storage.clone(),
         cache_injection: false,
+        upstream_google: "http://127.0.0.1:1".to_string(),
+        resilience: Default::default(),
+        otel: None,
     };
     let addr = spawn_proxy(state).await;
 
@@ -571,6 +599,9 @@ async fn distinct_requests_dont_trip_loop_detector() {
         )),
         storage: storage.clone(),
         cache_injection: false,
+        upstream_google: "http://127.0.0.1:1".to_string(),
+        resilience: Default::default(),
+        otel: None,
     };
     let addr = spawn_proxy(state).await;
 
@@ -614,6 +645,9 @@ async fn cache_injection_rewrites_outbound_anthropic_body_when_enabled() {
         loop_detector: Arc::new(LoopDetector::with_defaults()),
         storage: storage.clone(),
         cache_injection: true,
+        upstream_google: "http://127.0.0.1:1".to_string(),
+        resilience: Default::default(),
+        otel: None,
     };
     let addr = spawn_proxy(state).await;
 
@@ -687,6 +721,9 @@ async fn cache_injection_off_forwards_body_unchanged() {
         loop_detector: Arc::new(LoopDetector::with_defaults()),
         storage: storage.clone(),
         cache_injection: false,
+        upstream_google: "http://127.0.0.1:1".to_string(),
+        resilience: Default::default(),
+        otel: None,
     };
     let addr = spawn_proxy(state).await;
 
@@ -738,6 +775,9 @@ async fn utf8_bom_prefixed_body_still_triggers_security_scan() {
         loop_detector: Arc::new(LoopDetector::with_defaults()),
         storage: storage.clone(),
         cache_injection: false,
+        upstream_google: "http://127.0.0.1:1".to_string(),
+        resilience: Default::default(),
+        otel: None,
     };
     let addr = spawn_proxy(state).await;
 
@@ -772,4 +812,224 @@ async fn utf8_bom_prefixed_body_still_triggers_security_scan() {
     settle().await;
     let events = storage.security_events_for_date(&today()).unwrap();
     assert_eq!(events.len(), 1, "BOM-prefixed body should still get logged");
+}
+
+// ─────────────────────────── v0.7: Gemini route ───────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gemini_request_records_cost_and_latency() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1beta/models/gemini-2.5-flash:generateContent"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "candidates": [{"content": {"parts": [{"text": "hi"}], "role": "model"}}],
+            "usageMetadata": {
+                "promptTokenCount": 2048,
+                "candidatesTokenCount": 200,
+                "cachedContentTokenCount": 1536,
+                "thoughtsTokenCount": 100
+            },
+            "modelVersion": "gemini-2.5-flash"
+        })))
+        .expect(1)
+        .mount(&mock)
+        .await;
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = AppState {
+        upstream_anthropic: "http://127.0.0.1:1".to_string(),
+        upstream_openai: "http://127.0.0.1:1".to_string(),
+        upstream_google: mock.uri(),
+        http_client: reqwest::Client::new(),
+        security: Arc::new(SecurityEngine::with_defaults()),
+        budget: Arc::new(BudgetTracker::with_defaults()),
+        loop_detector: Arc::new(LoopDetector::with_defaults()),
+        storage: storage.clone(),
+        cache_injection: false,
+        resilience: Default::default(),
+        otel: None,
+    };
+    let addr = spawn_proxy(state).await;
+
+    let resp = client()
+        .post(format!(
+            "http://{}/google/v1beta/models/gemini-2.5-flash:generateContent",
+            addr
+        ))
+        .json(&json!({"contents": [{"parts": [{"text": "hi"}]}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let _ = resp.bytes().await.unwrap();
+    settle().await;
+
+    let rows = storage.requests_for_date(&today()).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].provider, "google");
+    assert_eq!(rows[0].model, "gemini-2.5-flash");
+    assert_eq!(rows[0].input_tokens, 512); // 2048 - 1536
+    assert_eq!(rows[0].cache_read_tokens, 1536);
+    assert_eq!(rows[0].output_tokens, 300); // 200 + 100 thoughts
+    assert_eq!(rows[0].http_status, Some(200));
+    assert!(rows[0].latency_ms.is_some(), "latency recorded");
+    // gemini-2.5-flash: 512*0.30 + 1536*0.075 + 300*2.50, /1M = 0.0010188
+    assert!(
+        (rows[0].cost_usd - 0.0010188).abs() < 1e-7,
+        "got {}",
+        rows[0].cost_usd
+    );
+}
+
+// ───────────────────────── v0.7: endpoint failover ─────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failover_reroutes_to_healthy_endpoint_on_5xx() {
+    // Primary always 503; backup answers 200. With resilience enabled the
+    // proxy should advance to the backup and return its 200.
+    let primary = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&primary)
+        .await;
+
+    let backup = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_ok",
+            "model": "claude-sonnet-4-6",
+            "usage": {"input_tokens": 100, "output_tokens": 20}
+        })))
+        .expect(1)
+        .mount(&backup)
+        .await;
+
+    let mut failover = HashMap::new();
+    failover.insert("anthropic".to_string(), vec![primary.uri(), backup.uri()]);
+    let resilience = Arc::new(Resilience::new(true, 3, Duration::from_secs(30), failover));
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = AppState {
+        upstream_anthropic: primary.uri(),
+        upstream_openai: "http://127.0.0.1:1".to_string(),
+        upstream_google: "http://127.0.0.1:1".to_string(),
+        http_client: reqwest::Client::new(),
+        security: Arc::new(SecurityEngine::with_defaults()),
+        budget: Arc::new(BudgetTracker::with_defaults()),
+        loop_detector: Arc::new(LoopDetector::with_defaults()),
+        storage: storage.clone(),
+        cache_injection: false,
+        resilience,
+        otel: None,
+    };
+    let addr = spawn_proxy(state).await;
+
+    let resp = client()
+        .post(format!("http://{}/anthropic/v1/messages", addr))
+        .json(&json!({"model": "claude-sonnet-4-6"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "should have failed over to the backup");
+    let _ = resp.bytes().await.unwrap();
+    settle().await;
+
+    let rows = storage.requests_for_date(&today()).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].http_status, Some(200));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failover_disabled_forwards_5xx_verbatim() {
+    let primary = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&primary)
+        .await;
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = AppState {
+        upstream_anthropic: primary.uri(),
+        upstream_openai: "http://127.0.0.1:1".to_string(),
+        upstream_google: "http://127.0.0.1:1".to_string(),
+        http_client: reqwest::Client::new(),
+        security: Arc::new(SecurityEngine::with_defaults()),
+        budget: Arc::new(BudgetTracker::with_defaults()),
+        loop_detector: Arc::new(LoopDetector::with_defaults()),
+        storage: storage.clone(),
+        cache_injection: false,
+        resilience: Default::default(), // disabled
+        otel: None,
+    };
+    let addr = spawn_proxy(state).await;
+
+    let resp = client()
+        .post(format!("http://{}/anthropic/v1/messages", addr))
+        .json(&json!({"model": "claude-sonnet-4-6"}))
+        .send()
+        .await
+        .unwrap();
+    // With resilience off, a 5xx passes straight through.
+    assert_eq!(resp.status(), 503);
+}
+
+// ─────────────────────────── v0.7: OTel spans ───────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn otel_span_written_for_forwarded_request() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_otel",
+            "model": "claude-sonnet-4-6",
+            "usage": {"input_tokens": 1000, "output_tokens": 500}
+        })))
+        .mount(&mock)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let span_path = dir.path().join("spans.jsonl");
+    let writer = Arc::new(SpanWriter::open(&span_path).unwrap());
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = AppState {
+        upstream_anthropic: mock.uri(),
+        upstream_openai: "http://127.0.0.1:1".to_string(),
+        upstream_google: "http://127.0.0.1:1".to_string(),
+        http_client: reqwest::Client::new(),
+        security: Arc::new(SecurityEngine::with_defaults()),
+        budget: Arc::new(BudgetTracker::with_defaults()),
+        loop_detector: Arc::new(LoopDetector::with_defaults()),
+        storage: storage.clone(),
+        cache_injection: false,
+        resilience: Default::default(),
+        otel: Some(writer),
+    };
+    let addr = spawn_proxy(state).await;
+
+    let resp = client()
+        .post(format!("http://{}/anthropic/v1/messages", addr))
+        .json(&json!({"model": "claude-sonnet-4-6"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let _ = resp.bytes().await.unwrap();
+    settle().await;
+
+    let text = std::fs::read_to_string(&span_path).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 1, "one span per forwarded request");
+    let span: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(span["attributes"]["gen_ai.system"], "anthropic");
+    assert_eq!(
+        span["attributes"]["gen_ai.request.model"],
+        "claude-sonnet-4-6"
+    );
+    assert_eq!(span["attributes"]["gen_ai.usage.input_tokens"], 1000);
+    assert_eq!(span["attributes"]["http.response.status_code"], 200);
 }

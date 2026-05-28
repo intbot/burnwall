@@ -36,8 +36,9 @@ impl Storage {
                 "INSERT INTO requests (
                     timestamp, provider, model,
                     input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
-                    cost_usd, blocked, block_reason, session_id, request_hash
-                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                    cost_usd, blocked, block_reason, session_id, request_hash,
+                    latency_ms, http_status
+                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
                 params![
                     r.timestamp,
                     r.provider,
@@ -51,6 +52,8 @@ impl Storage {
                     r.block_reason,
                     r.session_id,
                     r.request_hash,
+                    r.latency_ms,
+                    r.http_status,
                 ],
             )?;
             Ok(conn.last_insert_rowid())
@@ -253,7 +256,8 @@ impl Storage {
                 .query_row(
                     "SELECT id, timestamp, provider, model,
                             input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
-                            cost_usd, blocked, block_reason, session_id, request_hash
+                            cost_usd, blocked, block_reason, session_id, request_hash,
+                            latency_ms, http_status
                      FROM requests WHERE id = ?1",
                     params![id],
                     row_to_request,
@@ -284,7 +288,8 @@ impl Storage {
             let mut stmt = conn.prepare(
                 "SELECT id, timestamp, provider, model,
                         input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
-                        cost_usd, blocked, block_reason, session_id, request_hash
+                        cost_usd, blocked, block_reason, session_id, request_hash,
+                        latency_ms, http_status
                  FROM requests
                  WHERE DATE(timestamp, 'localtime') = ?1
                  ORDER BY timestamp ASC",
@@ -420,6 +425,38 @@ impl Storage {
                         cache_creation_tokens: row.get::<_, i64>(5)? as u64,
                         cache_read_tokens: row.get::<_, i64>(6)? as u64,
                         output_tokens: row.get::<_, i64>(7)? as u64,
+                    })
+                })?
+                .collect();
+            Ok(rows?)
+        })
+    }
+
+    /// Per-request latency + status samples over the last `days` local days,
+    /// for forwarded (non-blocked) requests that recorded a latency. Drives
+    /// `burnwall metrics`. Blocked rows are excluded — they never reached an
+    /// upstream, so they carry no latency/status.
+    pub fn latency_samples_since_days(
+        &self,
+        days: i64,
+    ) -> Result<Vec<crate::observe::metrics::LatencySample>> {
+        self.with_conn(|conn| {
+            let offset = format!("-{} days", days - 1);
+            let mut stmt = conn.prepare(
+                "SELECT provider, model, latency_ms, http_status
+                 FROM requests
+                 WHERE DATE(timestamp, 'localtime') >= DATE('now', 'localtime', ?1)
+                   AND blocked = 0
+                   AND latency_ms IS NOT NULL
+                 ORDER BY timestamp ASC",
+            )?;
+            let rows: rusqlite::Result<Vec<_>> = stmt
+                .query_map(params![offset], |row| {
+                    Ok(crate::observe::metrics::LatencySample {
+                        provider: row.get(0)?,
+                        model: row.get(1)?,
+                        latency_ms: row.get(2)?,
+                        http_status: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
                     })
                 })?
                 .collect();
@@ -655,5 +692,7 @@ fn row_to_request(row: &rusqlite::Row) -> rusqlite::Result<RequestRecord> {
         block_reason: row.get(10)?,
         session_id: row.get(11)?,
         request_hash: row.get(12)?,
+        latency_ms: row.get(13)?,
+        http_status: row.get(14)?,
     })
 }

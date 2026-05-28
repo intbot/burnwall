@@ -86,8 +86,11 @@ Route based on URL path prefix:
 ```
 /anthropic/v1/messages     → https://api.anthropic.com/v1/messages
 /openai/v1/chat/completions → https://api.openai.com/v1/chat/completions
-/google/v1/...             → https://generativelanguage.googleapis.com/... (future)
+/google/v1beta/models/...  → https://generativelanguage.googleapis.com/v1beta/models/...
 ```
+
+Each provider's upstream base URL is overridable via `burnwall start`
+(`--anthropic-url` / `--openai-url` / `--google-url`).
 
 Strip the provider prefix, forward everything else (path, query params, headers, body) unchanged.
 
@@ -110,6 +113,7 @@ Upstream SSE → [chunk 1] → forward to client
 
 For Anthropic: the `message_stop` event followed by usage in the `message_delta` event.
 For OpenAI: the final chunk with `"finish_reason": "stop"` and `usage` field (when `stream_options.include_usage` is true).
+For Google: `usageMetadata` on the final `streamGenerateContent` chunk — the cached-content split comes from `cachedContentTokenCount`, and thinking tokens fold into output.
 
 If the stream doesn't include usage data (some configurations), estimate from token counting or log as "unknown cost."
 
@@ -185,6 +189,46 @@ All Burnwall data lives in `~/.burnwall/`:
   burnwall.log       — log file (when running as daemon)
   burnwall.pid       — PID file (when running as daemon)
   pricing.toml         — user pricing overrides (optional)
+  otel-spans.jsonl     — OTel GenAI spans (only if [observability].otel_spans)
 ```
 
 On Windows: `%USERPROFILE%\.burnwall\`
+
+## v0.7 Components
+
+Three additions layer onto the pipeline above without changing the
+read-only, fail-open contract:
+
+### Provider Parsers — Google Gemini
+`providers/google.rs` parses `generateContent` / `streamGenerateContent`
+responses, reading token counts from `usageMetadata` (cached-content split,
+thinking tokens folded into output). Pricing covers `gemini-2.5-pro`,
+`gemini-2.5-flash`, and `gemini-2.0-flash`. The `/google/*` route forwards to
+`generativelanguage.googleapis.com`.
+
+### Observability (`observe/`)
+Two metadata-only consumers of the request log:
+
+- **`burnwall metrics`** aggregates per-request upstream latency (now recorded
+  alongside HTTP status on the response path) into per-model p50/p95, error
+  rate, and throughput.
+- **`burnwall digest`** assembles an Agent Bill of Materials for a window —
+  models + cost, MCP servers/tools, tool-call counts, security checks fired,
+  turns — from existing rows.
+- **OpenTelemetry GenAI spans** (`observe/otel.rs`): when
+  `[observability].otel_spans` is on, each forwarded request emits one
+  `gen_ai.*` span as line-delimited JSON to a local file. Payload-free and
+  file-only — no network export, consistent with the zero-telemetry stance.
+
+None of these read prompt content.
+
+### Resilience (`proxy/resilience.rs`)
+Opt-in same-model endpoint failover plus a per-endpoint circuit breaker. When
+`[resilience]` is enabled and the primary upstream is unreachable or returns
+5xx, the forwarder retries the identical request against the next configured
+endpoint for that provider, skipping endpoints whose circuit is open. A
+`CircuitBreaker` (`DashMap`-backed, in-memory) counts consecutive failures;
+at `failure_threshold` the endpoint opens for `cooldown_seconds`, after which
+one half-open probe decides whether it closes or re-opens. State is in-memory
+only — a restart starts clean. Off by default: a single upstream with verbatim
+5xx pass-through is unchanged until configured.

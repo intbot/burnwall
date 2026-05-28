@@ -39,7 +39,9 @@ CREATE TABLE IF NOT EXISTS requests (
     blocked INTEGER NOT NULL DEFAULT 0,
     block_reason TEXT,
     session_id TEXT,
-    request_hash TEXT
+    request_hash TEXT,
+    latency_ms INTEGER,
+    http_status INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_requests_timestamp ON requests(timestamp);
@@ -192,6 +194,9 @@ fn migrate(conn: &Connection) -> Result<()> {
         "trust_state",
         "TEXT NOT NULL DEFAULT 'pending'",
     )?;
+    // v0.7 observability: per-request upstream latency + HTTP status.
+    ensure_column(conn, "requests", "latency_ms", "INTEGER")?;
+    ensure_column(conn, "requests", "http_status", "INTEGER")?;
     Ok(())
 }
 

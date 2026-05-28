@@ -118,6 +118,35 @@ fn cost_openai_cached_matches_hand_calculation() {
 }
 
 #[test]
+fn lookup_disambiguates_gemini_pro_from_flash() {
+    let pro = get_pricing("gemini-2.5-pro").expect("pro");
+    let flash = get_pricing("gemini-2.5-flash").expect("flash");
+    assert!((pro.input_per_mtok - 1.25).abs() < EPSILON);
+    assert!((flash.input_per_mtok - 0.30).abs() < EPSILON);
+    // Date-stamped variant still resolves.
+    let dated = get_pricing("gemini-2.5-flash-002").expect("dated flash");
+    assert_eq!(flash, dated);
+}
+
+#[test]
+fn cost_gemini_cached_matches_hand_calculation() {
+    // google_cached.json with gemini-2.5-flash rates (0.30, 0.0, 0.075, 2.50).
+    // Split: input=512, output=300, cache_read=1536.
+    //   input:      512  / 1M * 0.30  = 0.0001536
+    //   cache_read: 1536 / 1M * 0.075 = 0.0001152
+    //   output:     300  / 1M * 2.50  = 0.00075
+    //   total                           0.0010188
+    let usage = TokenUsage {
+        input_tokens: 512,
+        output_tokens: 300,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 1536,
+    };
+    let pricing = get_pricing("gemini-2.5-flash").expect("pricing");
+    approx_eq(cost(&usage, pricing), 0.0010188, "gemini flash cached cost");
+}
+
+#[test]
 fn cost_zero_usage_is_zero() {
     let pricing = get_pricing("claude-opus-4-7").expect("pricing");
     approx_eq(cost(&TokenUsage::default(), pricing), 0.0, "zero usage");

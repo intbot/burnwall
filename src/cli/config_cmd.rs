@@ -74,6 +74,8 @@ const KNOWN_SECTIONS: &[&str] = &[
     "waste",
     "rules",
     "mcp",
+    "resilience",
+    "observability",
     "log_scrape",
 ];
 
