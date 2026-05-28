@@ -2,7 +2,7 @@
   "name": "burnwall",
   "displayName": "Burnwall",
   "description": "Cost + security for your AI coding agents, at a glance — reads your local Burnwall CLI.",
-  "version": "0.9.0",
+  "version": "0.9.2",
   "publisher": "intbot",
   "license": "FSL-1.1-MIT",
   "repository": { "type": "git", "url": "https://github.com/intbot/burnwall" },
@@ -12,7 +12,8 @@
   "main": "./out/src/extension.js",
   "contributes": {
     "commands": [
-      { "command": "burnwall.showBreakdown", "title": "Burnwall: Show Today's Breakdown" },
+      { "command": "burnwall.showPanel", "title": "Burnwall: Open Panel" },
+      { "command": "burnwall.showBreakdown", "title": "Burnwall: Show Today's Breakdown (terminal)" },
       { "command": "burnwall.refresh", "title": "Burnwall: Refresh" },
       { "command": "burnwall.install", "title": "Burnwall: Install the CLI" }
     ],

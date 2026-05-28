@@ -503,6 +503,8 @@ fn enforce_state(upstream: String, storage: Arc<Storage>) -> WatchState {
         http_client: reqwest::Client::new(),
         storage,
         security: Arc::new(SecurityEngine::with_defaults()),
+        auto_approve: Vec::new(),
+        auto_deny: Vec::new(),
     }
 }
 

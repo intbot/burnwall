@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 pub mod audit;
 pub mod completions;
 pub mod config_cmd;
+pub mod cost_per_pr;
 pub mod daemon;
 pub mod digest;
 pub mod explore;
@@ -64,6 +65,8 @@ pub enum Command {
     Audit(audit::AuditArgs),
     /// Shareable weekly/monthly summary (spend, blocks, top models).
     Report(report::ReportArgs),
+    /// Approximate cost of the current git branch / PR (local logs + git).
+    CostPerPr(cost_per_pr::CostPerPrArgs),
 }
 
 impl Cli {
@@ -86,6 +89,7 @@ impl Cli {
             Command::Digest(args) => digest::run_cmd(args),
             Command::Audit(args) => audit::run_cmd(args),
             Command::Report(args) => report::run_cmd(args),
+            Command::CostPerPr(args) => cost_per_pr::run_cmd(args),
         }
     }
 }

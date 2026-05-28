@@ -9,9 +9,14 @@ const execFileAsync = promisify(execFile);
 
 /** Run `burnwall status --json` and return its stdout. */
 export async function runStatusJson(cliPath: string): Promise<string> {
-  const { stdout } = await execFileAsync(cliPath, ["status", "--json"], {
+  return runJson(cliPath, ["status", "--json"]);
+}
+
+/** Run `burnwall <args>` and return its stdout (args should include `--json`). */
+export async function runJson(cliPath: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync(cliPath, args, {
     timeout: 10_000,
-    maxBuffer: 4 * 1024 * 1024,
+    maxBuffer: 8 * 1024 * 1024,
   });
   return stdout;
 }

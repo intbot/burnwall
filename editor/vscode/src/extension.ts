@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 
 import { cliAvailable, runStatusJson } from "./cli";
 import { StatusJson, statusBarText, summarize, tooltip } from "./format";
+import { showPanel } from "./panel";
 
 const INSTALL_URL = "https://github.com/intbot/burnwall#install";
 
@@ -16,6 +17,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand("burnwall.refresh", refresh),
     vscode.commands.registerCommand("burnwall.showBreakdown", showBreakdown),
+    vscode.commands.registerCommand("burnwall.showPanel", () => showPanel(cliPath())),
     vscode.commands.registerCommand("burnwall.install", () =>
       vscode.env.openExternal(vscode.Uri.parse(INSTALL_URL)),
     ),
@@ -53,7 +55,7 @@ async function refresh(): Promise<void> {
     const summary = summarize(json);
     item.text = statusBarText(summary);
     item.tooltip = tooltip(summary);
-    item.command = "burnwall.showBreakdown";
+    item.command = "burnwall.showPanel";
   } catch (err) {
     item.text = "$(flame) Burnwall: error";
     item.tooltip = `Failed to read burnwall status: ${err}`;

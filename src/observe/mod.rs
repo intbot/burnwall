@@ -9,6 +9,7 @@
 //!   line-delimited JSON to a local file (never shipped over the network).
 //!   Opt-in. For interop with OTel-aware tooling without leaking payloads.
 
+pub mod attribution;
 pub mod digest;
 pub mod metrics;
 pub mod otel;
