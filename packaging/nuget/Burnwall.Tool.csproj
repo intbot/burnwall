@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- net8.0 with RollForward=Major runs on the net8/net9/net10 runtimes, so
+         the tool installs for the widest set of .NET developers. -->
+    <TargetFramework>net8.0</TargetFramework>
+    <RollForward>Major</RollForward>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!-- Package as a `dotnet tool`. Installed via `dotnet tool install -g burnwall`,
+         invoked as `burnwall`. -->
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>burnwall</ToolCommandName>
+    <PackageId>burnwall</PackageId>
+    <!-- Overridden at pack time by the CI workflow: -p:Version=<tag without v>. -->
+    <Version>0.0.0-dev</Version>
+
+    <Authors>intbot</Authors>
+    <Description>AI agent firewall for AI coding tools: cache-aware cost tracking, path/command security checks, and daily budget enforcement. Zero telemetry. This package wraps the native burnwall binary.</Description>
+    <PackageProjectUrl>https://github.com/intbot/burnwall</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/intbot/burnwall</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>ai;llm;security;proxy;cost-tracking</PackageTags>
+    <!-- FSL-1.1-MIT is not an SPDX identifier, so reference the license file. -->
+    <PackageLicenseFile>LICENSE</PackageLicenseFile>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Packaged at the root of the .nupkg for the license/readme metadata above. -->
+    <None Include="../../LICENSE" Pack="true" PackagePath="" />
+    <None Include="../../README.md" Pack="true" PackagePath="" />
+
+    <!-- Native binaries staged by the CI workflow into native/<rid>/burnwall[.exe].
+         They are placed next to the tool's DLL (tools/<tfm>/any/) so the shim can
+         find them at AppContext.BaseDirectory/native/<rid>/. Empty locally; the
+         release workflow populates it from the GitHub Release artifacts. -->
+    <None Include="native/**/*">
+      <Pack>true</Pack>
+      <!-- PackagePath is just the base directory (trailing slash). NuGet appends
+           each file's path relative to the glob root, i.e. <rid>/burnwall[.exe].
+           Do NOT add %(RecursiveDir) or the filename here, or the <rid> folder
+           gets doubled (and extension-less Unix binaries get mistaken for dirs). -->
+      <PackagePath>tools/$(TargetFramework)/any/native/</PackagePath>
+    </None>
+  </ItemGroup>
+
+</Project>

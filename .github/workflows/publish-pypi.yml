@@ -1,0 +1,72 @@
+# Custom dist publish leg: PyPI (platform wheels wrapping the native binary).
+# Called by the dist-generated release workflow via publish-jobs = ["./publish-pypi"].
+# Build-once rule: no recompilation. We download the binaries dist already built,
+# wrap each in a platform-tagged wheel (pip installs the matching one onto PATH),
+# and upload. Plain X.Y.Z releases only; prerelease tags are skipped (see build_wheels.py).
+name: Publish PyPI
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+jobs:
+  pypi:
+    runs-on: ubuntu-latest
+    env:
+      PLAN: ${{ inputs.plan }}
+      GH_TOKEN: ${{ github.token }}
+      TWINE_USERNAME: __token__
+      TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Resolve tag and version from plan
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG=$(echo "$PLAN" | jq -r '.announcement_tag')
+          [ -n "$TAG" ] && [ "$TAG" != "null" ] || { echo "no announcement_tag in plan"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download release binaries (built once by dist)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          gh release download "${{ steps.meta.outputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir artifacts \
+            --pattern 'burnwall-*.tar.xz' \
+            --pattern 'burnwall-*.zip'
+
+      - name: Build platform wheels
+        shell: bash
+        env:
+          BURNWALL_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip setuptools wheel twine
+          python packaging/pypi/build_wheels.py
+
+      - name: Upload to PyPI (skips if no token)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${TWINE_PASSWORD:-}" ]; then
+            echo "::notice title=PyPI::PYPI_API_TOKEN not set — built wheels but skipping upload."
+            exit 0
+          fi
+          if ! ls dist_wheels/*.whl >/dev/null 2>&1; then
+            echo "::notice title=PyPI::no wheels built (prerelease tag?) — nothing to upload."
+            exit 0
+          fi
+          twine upload --non-interactive --skip-existing dist_wheels/*.whl

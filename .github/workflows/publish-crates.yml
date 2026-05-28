@@ -1,0 +1,37 @@
+# Custom dist publish leg: crates.io (source publish).
+# Called by the dist-generated release workflow via publish-jobs = ["./publish-crates"].
+# dist passes the release `plan` (JSON); we only need it to confirm we are on a tag.
+# The crate version is whatever is in Cargo.toml at the tag — that is the source of truth.
+name: Publish crates.io
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+jobs:
+  crates:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Publish to crates.io (skips if no token)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "::notice title=crates.io::CARGO_REGISTRY_TOKEN not set — skipping crates.io publish."
+            exit 0
+          fi
+          # NOTE: requires Cargo.toml to use `license-file` (FSL-1.1-MIT is not a
+          # valid SPDX id, so crates.io rejects it as the `license` field).
+          cargo publish --locked --token "$CARGO_REGISTRY_TOKEN"
