@@ -179,6 +179,31 @@ pub struct McpToolRow {
     pub last_seen: DateTime<Utc>,
 }
 
+/// One sealed audit receipt (v0.8). A signed link in the hash chain over the
+/// `requests` + `security_events` log. Holds only metadata — never prompt
+/// content. `content_hash` covers the canonical text of the source row;
+/// `hash` = SHA-256(prev_hash || content_hash); `signature` is Ed25519 over
+/// `hash`. See `src/audit/mod.rs`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReceiptRow {
+    pub seq: i64,
+    pub sealed_at: String,
+    /// `"request"` or `"security_event"`.
+    pub source: String,
+    pub source_id: i64,
+    /// The source row's timestamp (RFC 3339).
+    pub timestamp: String,
+    /// `"forward"`, `"block"`, or `"security"`.
+    pub action: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub detail: Option<String>,
+    pub content_hash: String,
+    pub prev_hash: String,
+    pub hash: String,
+    pub signature: String,
+}
+
 /// One row of the `burnwall status` provider/model breakdown table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelBreakdown {

@@ -22,7 +22,9 @@ use rusqlite::Connection;
 pub mod models;
 pub mod repository;
 
-pub use models::{DailyTotal, McpEvent, McpToolRow, ModelBreakdown, RequestRecord, SecurityEvent};
+pub use models::{
+    DailyTotal, McpEvent, McpToolRow, ModelBreakdown, ReceiptRow, RequestRecord, SecurityEvent,
+};
 pub use repository::McpToolObservation;
 
 const SCHEMA: &str = r#"
@@ -125,6 +127,34 @@ CREATE TABLE IF NOT EXISTS rule_trust (
     sha256      TEXT NOT NULL,
     approved_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Cryptographic audit receipts (v0.8). `burnwall audit seal` appends one
+-- receipt per forwarded/blocked request and per security event, in
+-- chronological order, forming a hash chain signed with a local Ed25519 key.
+-- `content_hash` is a SHA-256 over the canonical text of the SOURCE row, so a
+-- later edit to that row is detectable; `hash` = SHA-256(prev_hash || content_hash),
+-- so deleting/reordering any receipt breaks every later link; `signature` is
+-- Ed25519 over `hash`, so the chain cannot be forged without the key. Metadata
+-- only — the underlying rows never hold prompt content. `burnwall audit verify`
+-- re-walks the chain and re-derives each `content_hash` from its source row.
+CREATE TABLE IF NOT EXISTS audit_receipts (
+    seq          INTEGER PRIMARY KEY AUTOINCREMENT,
+    sealed_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    source       TEXT NOT NULL,        -- 'request' | 'security_event'
+    source_id    INTEGER NOT NULL,     -- rowid in the source table
+    timestamp    TEXT NOT NULL,        -- the source row's timestamp (RFC 3339)
+    action       TEXT NOT NULL,        -- 'forward' | 'block' | 'security'
+    provider     TEXT,
+    model        TEXT,
+    detail       TEXT,
+    content_hash TEXT NOT NULL,
+    prev_hash    TEXT NOT NULL,
+    hash         TEXT NOT NULL,
+    signature    TEXT NOT NULL,
+    UNIQUE(source, source_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_receipts_timestamp ON audit_receipts(timestamp);
 "#;
 
 #[derive(Debug, thiserror::Error)]

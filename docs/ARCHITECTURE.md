@@ -232,3 +232,30 @@ at `failure_threshold` the endpoint opens for `cooldown_seconds`, after which
 one half-open probe decides whether it closes or re-opens. State is in-memory
 only — a restart starts clean. Off by default: a single upstream with verbatim
 5xx pass-through is unchanged until configured.
+
+## v0.8 Components
+
+### Audit & compliance (`audit/`)
+Local, metadata-only audit and compliance artifacts built on the existing
+request + security logs. Read-only — they never read prompt content.
+
+- **Cryptographic audit receipts** (`audit/mod.rs`): `burnwall audit seal`
+  appends, for each not-yet-sealed `requests` / `security_events` row (in
+  chronological order), a signed link in a hash chain. `content_hash` =
+  SHA-256 over the source row's canonical text; `hash` = SHA-256(prev_hash ‖
+  content_hash); `signature` = Ed25519 over `hash`. The key lives at
+  `~/.burnwall/audit_ed25519.key` (0600, generated on first use). Receipts
+  go in a new `audit_receipts` table with `UNIQUE(source, source_id)`, so
+  sealing is idempotent. `verify` re-walks the chain and re-derives each
+  `content_hash` from the live row, so edits/deletions/reorders of either a
+  receipt or a sealed source row are detected, and the chain can't be extended
+  without the key. **Seal-on-demand, not on the hot path** — the proxy is
+  untouched, preserving its latency budget; you seal periodically or before an
+  audit.
+- **CycloneDX AIBOM** (`audit/aibom.rs`): renders the shared `observe::digest`
+  `Digest` as a CycloneDX 1.6 BOM (models → components, MCP servers → services).
+- **SARIF export** (`audit/sarif.rs`): renders `security_events` as a SARIF
+  2.1.0 run (one rule per event type, one result per block) for GitHub code
+  scanning.
+- **`burnwall report`** (`cli/report.rs`): a shareable period summary rendered
+  from the same `Digest`, in text / JSON / CSV.

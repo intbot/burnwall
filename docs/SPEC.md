@@ -220,6 +220,43 @@ Flags:
   total_cost_usd, models, mcp_tool_calls, distinct_mcp_tools, mcp_tools,
   security_by_type, distinct_targets)
 
+### `burnwall report [--days N] [--format text|json|csv]`
+
+A shareable period summary (default window: 30 days): spend, request/blocked
+activity, top models by cost, and security blocks by type. Built from the same
+metadata as `digest`; never reads prompt content. `--format csv` emits the
+per-model spend rows; `--format json` the full structure.
+
+### `burnwall audit <subcommand>`
+
+Cryptographic audit receipts and compliance exports (all metadata only).
+
+- `burnwall audit seal` — walk the request + security-event logs and append, in
+  chronological order, a signed link in a hash chain for each not-yet-sealed
+  action. Each receipt stores a SHA-256 of the source row's canonical contents
+  (`content_hash`), chained as `hash = SHA-256(prev_hash ‖ content_hash)`, and
+  signed with a local Ed25519 key at `~/.burnwall/audit_ed25519.key` (generated
+  0600 on first use). Idempotent — already-sealed rows are skipped.
+- `burnwall audit verify` — re-walk the chain: check every hash link, re-derive
+  each `content_hash` from the live source row, and verify each Ed25519
+  signature. Prints the public key. Exits non-zero if the chain is tampered
+  (a receipt or a sealed row was edited, deleted, or reordered).
+- `burnwall audit export [--format json|csv]` — dump the receipt log.
+- `burnwall audit aibom [--days N]` — export a CycloneDX 1.6 AI Bill of
+  Materials for the window (models as components, MCP servers as services).
+- `burnwall audit sarif [--days N]` — export security blocks as SARIF 2.1.0
+  for GitHub code scanning.
+
+```
+$ burnwall audit seal
+🔏 Sealed 2 new receipts into the audit chain.
+   Public key: 85369a5c3c6f586823d45c9d182e1e177598dae37b0c7791f65c1aa7cb68bec7
+
+$ burnwall audit verify
+✅ Audit chain intact — 2 receipts verified.
+   Public key: 85369a5c3c6f586823d45c9d182e1e177598dae37b0c7791f65c1aa7cb68bec7
+```
+
 ### `burnwall config set <key> <value>`
 
 Set configuration values.
