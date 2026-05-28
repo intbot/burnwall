@@ -208,6 +208,15 @@ fn write_table(
             "   💰 Budget: ${:.2} / ${:.2} ({:.1}%)",
             today_cost, bcfg.daily_usd, pct
         )?;
+        // Soft alert (v0.9.1): a non-blocking heads-up once spend crosses the
+        // configured warn threshold but is still under the hard daily limit.
+        if bcfg.warn_percent > 0 && pct >= bcfg.warn_percent as f64 && pct < 100.0 {
+            writeln!(
+                w,
+                "   ⚠️  Soft alert: {:.0}% of today's budget used (warns at {}%).",
+                pct, bcfg.warn_percent
+            )?;
+        }
     } else {
         writeln!(
             w,

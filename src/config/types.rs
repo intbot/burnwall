@@ -292,6 +292,18 @@ pub struct McpConfig {
     pub require_approval: bool,
     #[serde(default)]
     pub servers: Vec<McpServerConfig>,
+    /// Auto-approve policy (v0.9.1): glob patterns matched against
+    /// `"<server>/<tool>"`. In enforce mode a matching `tools/call` skips the
+    /// approval gate (forwards without a prompt). Opt-in — it *loosens*
+    /// enforcement, so list only tools you trust. Globs support `*`
+    /// (e.g. `filesystem/read_file`, `filesystem/*`, `*`).
+    #[serde(default)]
+    pub auto_approve: Vec<String>,
+    /// Auto-deny policy (v0.9.1): glob patterns matched against
+    /// `"<server>/<tool>"`. A matching `tools/call` is **always** blocked (403),
+    /// regardless of approval — checked before everything else.
+    #[serde(default)]
+    pub auto_deny: Vec<String>,
 }
 
 /// One named upstream MCP server for multi-server routing. Requests to

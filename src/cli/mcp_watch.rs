@@ -121,6 +121,14 @@ pub async fn run_cmd(args: McpWatchArgs) -> anyhow::Result<()> {
     println!("   Logging tools/call invocations to ~/.burnwall/burnwall.db (mcp_events table).");
     println!("   Ready. Press Ctrl-C to stop.");
 
+    if !user_config.mcp.auto_approve.is_empty() || !user_config.mcp.auto_deny.is_empty() {
+        println!(
+            "   Policy:   {} auto-approve, {} auto-deny glob(s)",
+            user_config.mcp.auto_approve.len(),
+            user_config.mcp.auto_deny.len(),
+        );
+    }
+
     let state = WatchState {
         upstream: args.upstream.clone().unwrap_or_default(),
         servers,
@@ -128,6 +136,8 @@ pub async fn run_cmd(args: McpWatchArgs) -> anyhow::Result<()> {
         http_client: reqwest::Client::new(),
         storage,
         security,
+        auto_approve: user_config.mcp.auto_approve.clone(),
+        auto_deny: user_config.mcp.auto_deny.clone(),
     };
 
     let listener = tokio::net::TcpListener::bind(addr)

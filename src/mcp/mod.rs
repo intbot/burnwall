@@ -51,6 +51,11 @@ pub struct WatchState {
     /// `tools/call` arguments. A violation returns 403, writes a
     /// `security_events` row, and never forwards.
     pub security: Arc<SecurityEngine>,
+    /// Auto-approve globs (v0.9.1) matched against `"<server>/<tool>"`: in
+    /// enforce mode a match skips the approval gate. Empty by default.
+    pub auto_approve: Vec<String>,
+    /// Auto-deny globs (v0.9.1): a match is always blocked, before approval.
+    pub auto_deny: Vec<String>,
 }
 
 impl WatchState {
@@ -70,6 +75,8 @@ impl WatchState {
             http_client,
             storage,
             security,
+            auto_approve: Vec::new(),
+            auto_deny: Vec::new(),
         }
     }
 
@@ -249,6 +256,40 @@ fn is_hop_by_hop(name: &str) -> bool {
     HOP_BY_HOP.iter().any(|h| name.eq_ignore_ascii_case(h))
 }
 
+/// Match a `"<server>/<tool>"` key against a list of `*`-globs (the MCP
+/// auto-approve / auto-deny policy, v0.9.1).
+fn policy_matches(patterns: &[String], key: &str) -> bool {
+    patterns.iter().any(|p| glob_match(p, key))
+}
+
+/// Minimal glob: `*` matches any (possibly empty) sequence; everything else is
+/// a literal byte. Linear two-pointer matcher with backtracking on `*`.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let (p, t) = (pattern.as_bytes(), text.as_bytes());
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star, mut mark) = (None, 0usize);
+    while ti < t.len() {
+        if pi < p.len() && p[pi] == b'*' {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if pi < p.len() && p[pi] == t[ti] {
+            pi += 1;
+            ti += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == b'*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
 async fn handle(
     req: Request<Incoming>,
     state: Arc<WatchState>,
@@ -323,19 +364,37 @@ async fn handle(
         return Ok(error_response(StatusCode::FORBIDDEN, "security_blocked"));
     }
 
+    // Auto-policy (v0.9.1): `[mcp].auto_deny` globs always block a matching
+    // `tools/call` (before approval), regardless of mode. Matched against
+    // "<server>/<tool>".
+    if let Some(call) = tool_call.as_ref() {
+        let key = format!("{}/{}", route.server, call.name);
+        if policy_matches(&state.auto_deny, &key) {
+            warn!("🛡️ MCP tools/call '{}' blocked by [mcp].auto_deny", key);
+            let event = SecurityEvent::new("mcp_tool_unapproved", &route.server)
+                .with_provider("mcp", &call.name);
+            if let Err(e) = state.storage.insert_security_event(&event) {
+                error!("mcp security_event insert failed: {}", e);
+            }
+            return Ok(error_response(StatusCode::FORBIDDEN, "auto_denied"));
+        }
+    }
+
     // Enforce mode (v0.6.5): a `tools/call` to a tool that has not been
     // approved is held — blocked with 403, never forwarded — until the user
     // runs `burnwall mcp approve`. A never-listed or rug-pulled (reset to
     // pending) tool is therefore also blocked. Observe-only (the default)
-    // skips this entirely.
+    // skips this entirely. v0.9.1: `[mcp].auto_approve` globs skip the gate.
     if state.require_approval {
         if let Some(call) = tool_call.as_ref() {
-            let approved = matches!(
-                state
-                    .storage
-                    .mcp_tool_trust_state(&route.server, &call.name),
-                Ok(Some(ref s)) if s == "approved"
-            );
+            let key = format!("{}/{}", route.server, call.name);
+            let approved = policy_matches(&state.auto_approve, &key)
+                || matches!(
+                    state
+                        .storage
+                        .mcp_tool_trust_state(&route.server, &call.name),
+                    Ok(Some(ref s)) if s == "approved"
+                );
             if !approved {
                 warn!(
                     "🛡️ MCP tools/call to unapproved tool '{}' on '{}' blocked (enforce mode)",
@@ -496,4 +555,30 @@ fn error_response(status: StatusCode, kind: &str) -> Response<ProxyBody> {
         .header("content-type", "application/json")
         .body(streaming::full(Bytes::from(body)))
         .expect("error_response: response builder failed")
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::{glob_match, policy_matches};
+
+    #[test]
+    fn glob_matches_literals_and_wildcards() {
+        assert!(glob_match("fs/read", "fs/read"));
+        assert!(glob_match("fs/*", "fs/read"));
+        assert!(glob_match("*/read", "fs/read"));
+        assert!(glob_match("*", "anything/here"));
+        assert!(glob_match("fs/read*", "fs/read_file"));
+        assert!(!glob_match("fs/read", "fs/write"));
+        assert!(!glob_match("fs/*", "other/read"));
+        assert!(!glob_match("fs/read", "fs/read_file")); // no implicit trailing *
+    }
+
+    #[test]
+    fn policy_matches_any_pattern() {
+        let pats = vec!["filesystem/*".to_string(), "*/exec".to_string()];
+        assert!(policy_matches(&pats, "filesystem/read_file"));
+        assert!(policy_matches(&pats, "shell/exec"));
+        assert!(!policy_matches(&pats, "shell/read"));
+        assert!(!policy_matches(&[], "filesystem/read_file"));
+    }
 }
