@@ -2,7 +2,11 @@
 
 **Track what your AI coding agent costs. Block what it shouldn't touch.**
 
+**100% local. Zero telemetry.** No data leaves your machine except the API call you already make. Burnwall is a single binary that runs *in front of* your existing tools — not a hosted gateway your traffic routes through.
+
 Burnwall is a local proxy for AI coding tools — Claude Code, Codex CLI, Aider, OpenCode, Cline. It combines cache-aware cost accounting, path-and-command security checks on every tool call, cross-tool spend aggregation, and zero telemetry — without sending your prompts to a SaaS dashboard.
+
+**Works with** Claude Code, Cursor, Codex, Aider, OpenRouter, and any OpenAI/Anthropic-compatible gateway — point its base URL at Burnwall. See [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md).
 
 If you've ever woken up to a four-figure API bill from an agent loop, or wondered whether your agent has been quietly `cat`-ing `~/.ssh/id_rsa` into the context window: Burnwall is the seatbelt.
 
