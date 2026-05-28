@@ -2,9 +2,11 @@
 """Build platform-specific PyPI wheels that wrap the prebuilt burnwall binary.
 
 Reuses the exact binaries dist already built and attached to the GitHub Release
-(downloaded into ./artifacts) -- nothing is recompiled here. Each wheel carries
-one binary and the correct platform tag, so `pip install burnwall` fetches the
-right one and puts it on PATH. Output goes to ./dist_wheels.
+(downloaded into ./artifacts) -- nothing is recompiled here. For each platform we
+stage that platform's binary into burnwall_launcher/_bin/ and build a wheel with
+the matching platform tag, so `pip install burnwall` fetches the right one. The
+binary ships as package data; a console-script entry point execs it (see
+burnwall_launcher/__init__.py). Output goes to ./dist_wheels.
 
 Only plain X.Y.Z releases are published; prerelease tags (e.g. 0.9.0-rc.1) are
 skipped because they are not valid PEP 440 versions without normalization.
@@ -23,7 +25,9 @@ ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 ARTIFACTS = ROOT / "artifacts"
 OUT = ROOT / "dist_wheels"
-STAGE = HERE / "stage"
+BIN_DIR = HERE / "burnwall_launcher" / "_bin"
+BUILD = HERE / "build"
+UNPACK = HERE / "_unpack"
 SETUP = HERE / "setup.py"
 README = ROOT / "README.md"
 
@@ -44,38 +48,39 @@ def fail(message):
     sys.exit(1)
 
 
-def extract_binary(target, ext, binary_name):
-    """Pull the burnwall binary out of one release archive into STAGE."""
+def stage_binary(target, ext, binary_name):
+    """Extract one release archive's binary into burnwall_launcher/_bin/."""
     archive = ARTIFACTS / f"burnwall-{target}.{ext}"
     if not archive.exists():
         fail(f"missing release archive {archive}")
 
-    unpack = STAGE / "_unpack"
-    if unpack.exists():
-        shutil.rmtree(unpack)
-    unpack.mkdir(parents=True)
+    if UNPACK.exists():
+        shutil.rmtree(UNPACK)
+    UNPACK.mkdir(parents=True)
 
     if ext == "zip":
         with zipfile.ZipFile(archive) as archive_file:
-            archive_file.extractall(unpack)
+            archive_file.extractall(UNPACK)
     else:
         with tarfile.open(archive) as archive_file:
-            archive_file.extractall(unpack)
+            archive_file.extractall(UNPACK)
 
     found = next(
-        (p for p in unpack.rglob("*")
+        (p for p in UNPACK.rglob("*")
          if p.is_file() and p.name in ("burnwall", "burnwall.exe")),
         None,
     )
     if found is None:
         fail(f"no burnwall binary inside {archive}")
 
-    staged = STAGE / binary_name
-    shutil.copy2(found, staged)
+    if BIN_DIR.exists():
+        shutil.rmtree(BIN_DIR)
+    BIN_DIR.mkdir(parents=True)
+    dest = BIN_DIR / binary_name
+    shutil.copy2(found, dest)
     if not binary_name.endswith(".exe"):
-        staged.chmod(0o755)
-    shutil.rmtree(unpack)
-    return staged
+        dest.chmod(0o755)
+    shutil.rmtree(UNPACK)
 
 
 def main():
@@ -86,27 +91,24 @@ def main():
         )
         return
 
-    for directory in (OUT, STAGE):
-        if directory.exists():
-            shutil.rmtree(directory)
-        directory.mkdir(parents=True)
+    if OUT.exists():
+        shutil.rmtree(OUT)
+    OUT.mkdir(parents=True)
 
     for target, (ext, platform_tag, binary_name) in PLATFORMS.items():
-        staged = extract_binary(target, ext, binary_name)
+        stage_binary(target, ext, binary_name)
+
+        if BUILD.exists():
+            shutil.rmtree(BUILD)
 
         env = dict(os.environ)
-        env["BURNWALL_BINARY"] = str(staged)
         env["BURNWALL_VERSION"] = VERSION
         env["BURNWALL_README"] = str(README)
-
-        build_dir = STAGE / "build"
-        if build_dir.exists():
-            shutil.rmtree(build_dir)
 
         subprocess.run(
             [
                 sys.executable, str(SETUP),
-                "build", "--build-base", str(build_dir),
+                "build", "--build-base", str(BUILD),
                 "bdist_wheel", "--plat-name", platform_tag,
                 "--dist-dir", str(OUT),
             ],
@@ -115,7 +117,9 @@ def main():
             check=True,
         )
 
-        staged.unlink()  # clear before staging the next platform's binary
+    # Don't leave a stray platform binary staged in the source tree.
+    if BIN_DIR.exists():
+        shutil.rmtree(BIN_DIR)
 
     wheels = sorted(OUT.glob("*.whl"))
     if not wheels:

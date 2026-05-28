@@ -4,6 +4,8 @@ nuget/native/
 nuget/bin/
 nuget/obj/
 nuget-out/
+pypi/burnwall_launcher/_bin/
+pypi/_unpack/
 pypi/stage/
 pypi/build/
 pypi/*.egg-info/
