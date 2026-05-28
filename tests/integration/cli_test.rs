@@ -433,3 +433,101 @@ fn config_set_rejects_invalid_value() {
         .failure()
         .stderr(predicate::str::contains("invalid value"));
 }
+
+// ───────────────────────── metrics + digest (v0.7) ─────────────────────────
+
+fn seed_with_latency(dir: &PathBuf) {
+    fs::create_dir_all(dir).unwrap();
+    let path = dir.join("burnwall.db");
+    let storage = Storage::open(&path).expect("open");
+    let usage = TokenUsage {
+        input_tokens: 1000,
+        output_tokens: 500,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+    };
+    for (lat, status) in [(120i64, 200i64), (240, 200), (360, 500)] {
+        let mut r =
+            RequestRecord::successful("anthropic", "claude-sonnet-4-6", &usage, 0.0105, None);
+        r.timestamp = Utc::now();
+        r.latency_ms = Some(lat);
+        r.http_status = Some(status);
+        storage.insert_request(&r).unwrap();
+    }
+}
+
+#[test]
+fn metrics_table_shows_percentiles() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    seed_with_latency(&path);
+
+    burnwall(&path)
+        .arg("metrics")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Latency & reliability"))
+        .stdout(predicate::str::contains("anthropic/claude-sonnet-4-6"));
+}
+
+#[test]
+fn metrics_json_is_valid() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    seed_with_latency(&path);
+
+    let output = burnwall(&path)
+        .args(["metrics", "--json"])
+        .output()
+        .expect("run");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(v["models"][0]["requests"], 3);
+    assert_eq!(v["models"][0]["errors"], 1);
+    assert_eq!(v["models"][0]["p50_ms"], 240);
+}
+
+#[test]
+fn metrics_empty_db_does_not_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    burnwall(&path)
+        .arg("metrics")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no forwarded requests"));
+}
+
+#[test]
+fn digest_table_shows_bill_of_materials() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    seed_storage(&path);
+
+    burnwall(&path)
+        .arg("digest")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Agent Bill of Materials"))
+        .stdout(predicate::str::contains("anthropic/claude-sonnet-4-6"))
+        .stdout(predicate::str::contains("Security checks fired: 1"));
+}
+
+#[test]
+fn digest_json_is_valid() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    seed_storage(&path);
+
+    let output = burnwall(&path)
+        .args(["digest", "--json"])
+        .output()
+        .expect("run");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(v["models"][0]["provider"], "anthropic");
+    assert_eq!(v["security_by_type"][0]["event_type"], "path_blocked");
+}

@@ -30,6 +30,11 @@ pub struct RequestRecord {
     pub session_id: Option<String>,
     /// Optional content hash for loop detection (v0.2). Always `None` in v0.1.
     pub request_hash: Option<String>,
+    /// Upstream round-trip latency in ms (v0.7). `None` for blocked rows
+    /// (nothing was forwarded) and rows from before this column existed.
+    pub latency_ms: Option<i64>,
+    /// Upstream HTTP status (v0.7). `None` for blocked rows.
+    pub http_status: Option<i64>,
 }
 
 impl RequestRecord {
@@ -55,6 +60,8 @@ impl RequestRecord {
             block_reason: None,
             session_id,
             request_hash: None,
+            latency_ms: None,
+            http_status: None,
         }
     }
 
@@ -75,6 +82,8 @@ impl RequestRecord {
             block_reason: Some(reason.to_string()),
             session_id,
             request_hash: None,
+            latency_ms: None,
+            http_status: None,
         }
     }
 }

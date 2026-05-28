@@ -24,8 +24,10 @@ use crate::storage::Storage;
 pub mod cache_injection;
 pub mod forwarding;
 pub mod handler;
+pub mod resilience;
 pub mod streaming;
 
+pub use resilience::Resilience;
 pub use streaming::{BoxError, ProxyBody};
 
 /// Shared, immutable-from-the-handler-side state. Each component is `Arc`'d
@@ -35,6 +37,8 @@ pub use streaming::{BoxError, ProxyBody};
 pub struct AppState {
     pub upstream_anthropic: String,
     pub upstream_openai: String,
+    /// Google Gemini upstream base (v0.7). Routed via `/google/*`.
+    pub upstream_google: String,
     pub http_client: reqwest::Client,
     pub security: Arc<SecurityEngine>,
     pub budget: Arc<BudgetTracker>,
@@ -44,6 +48,13 @@ pub struct AppState {
     /// Off by default — turned on via `proxy.cache_injection` or the
     /// `--rewrite-anthropic-cache` flag on `burnwall start`.
     pub cache_injection: bool,
+    /// Endpoint failover + circuit breaking (v0.7). `Default` is a disabled
+    /// no-op, so the proxy behaves exactly as before unless `[resilience]` is
+    /// configured.
+    pub resilience: Arc<Resilience>,
+    /// OTel GenAI span sink (v0.7). `None` when `[observability].otel_spans`
+    /// is off (the default).
+    pub otel: Option<Arc<crate::observe::otel::SpanWriter>>,
 }
 
 impl AppState {
@@ -55,12 +66,15 @@ impl AppState {
         Self {
             upstream_anthropic,
             upstream_openai,
+            upstream_google: "https://generativelanguage.googleapis.com".to_string(),
             http_client: reqwest::Client::new(),
             security: Arc::new(SecurityEngine::with_defaults()),
             budget: Arc::new(BudgetTracker::with_defaults()),
             loop_detector: Arc::new(LoopDetector::with_defaults()),
             storage: Arc::new(Storage::open_in_memory().expect("in-memory storage cannot fail")),
             cache_injection: false,
+            resilience: Arc::new(Resilience::default()),
+            otel: None,
         }
     }
 

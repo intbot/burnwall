@@ -24,6 +24,10 @@ pub struct Config {
     pub rules: RulesConfig,
     #[serde(default)]
     pub mcp: McpConfig,
+    #[serde(default)]
+    pub resilience: ResilienceConfig,
+    #[serde(default)]
+    pub observability: ObservabilityConfig,
     /// Deprecated: superseded by `[tools]`. Kept for one release as a global
     /// kill switch (`enabled = false` disables all log scraping). Prefer the
     /// per-tool `[tools]` switches. Only written back when set to a
@@ -284,6 +288,54 @@ pub struct McpServerConfig {
     pub upstream: String,
 }
 
+/// `[resilience]` — same-model endpoint failover + circuit breaking (v0.7).
+/// Off by default: `enabled = false` keeps the single-upstream behavior. When
+/// on, the proxy tries each provider's `endpoints` in order, skipping ones the
+/// circuit breaker has opened, and falls through to the next on a connection
+/// error or 5xx. Metadata only — the request body forwards unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ResilienceConfig {
+    pub enabled: bool,
+    /// Consecutive failures before an endpoint's circuit opens.
+    pub failure_threshold: u32,
+    /// How long an opened circuit stays open before a half-open probe.
+    pub cooldown_seconds: u64,
+    /// Per-provider ordered fallback endpoints (base URLs). The primary
+    /// upstream is always tried first; these are tried after it, in order.
+    #[serde(default)]
+    pub endpoints: Vec<FailoverEndpoints>,
+}
+
+impl Default for ResilienceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            failure_threshold: 3,
+            cooldown_seconds: 30,
+            endpoints: Vec::new(),
+        }
+    }
+}
+
+/// Failover base URLs for one provider (`anthropic` / `openai` / `google`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FailoverEndpoints {
+    pub provider: String,
+    pub urls: Vec<String>,
+}
+
+/// `[observability]` — local, metadata-only observability (v0.7). `otel_spans`
+/// turns on OpenTelemetry GenAI span emission to `otel_file` (line-delimited
+/// JSON, no prompt content, no network). Both off / empty by default.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ObservabilityConfig {
+    #[serde(default)]
+    pub otel_spans: bool,
+    /// Span file path. Empty → `<data dir>/otel-spans.jsonl`.
+    #[serde(default)]
+    pub otel_file: String,
+}
+
 /// Convert the persistent config's budget block into the runtime
 /// [`crate::budget::BudgetConfig`] used by [`BudgetTracker`].
 impl From<&BudgetConfig> for crate::budget::BudgetConfig {
@@ -316,6 +368,27 @@ impl From<&SecurityConfig> for crate::security::Ruleset {
             secret_patterns: Vec::new(),
             log_redact_details: c.log_redact_details,
         }
+    }
+}
+
+impl ResilienceConfig {
+    /// Build the runtime [`crate::proxy::resilience::Resilience`] from this
+    /// config block, indexing the per-provider failover lists by provider name.
+    pub fn to_runtime(&self) -> crate::proxy::resilience::Resilience {
+        use std::collections::HashMap;
+        let mut failover: HashMap<String, Vec<String>> = HashMap::new();
+        for ep in &self.endpoints {
+            failover
+                .entry(ep.provider.clone())
+                .or_default()
+                .extend(ep.urls.iter().cloned());
+        }
+        crate::proxy::resilience::Resilience::new(
+            self.enabled,
+            self.failure_threshold,
+            std::time::Duration::from_secs(self.cooldown_seconds),
+            failover,
+        )
     }
 }
 

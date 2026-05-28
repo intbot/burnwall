@@ -33,6 +33,9 @@ pub struct StartArgs {
     /// Override the OpenAI upstream URL.
     #[arg(long, default_value = "https://api.openai.com")]
     pub upstream_openai: String,
+    /// Override the Google Gemini upstream URL.
+    #[arg(long, default_value = "https://generativelanguage.googleapis.com")]
+    pub upstream_google: String,
     /// Auto-inject Anthropic `cache_control` markers on outbound requests.
     /// Overrides `proxy.cache_injection` from config when present.
     #[arg(long)]
@@ -119,6 +122,32 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
 
     let cache_injection = args.rewrite_anthropic_cache || user_config.proxy.cache_injection;
 
+    // Resilience: same-model endpoint failover + circuit breaking. Disabled
+    // unless `[resilience]` is configured.
+    let resilience = Arc::new(user_config.resilience.to_runtime());
+
+    // OTel GenAI spans: opt-in, file-only (no network). Default path lives
+    // under the data dir. A failure to open the file is non-fatal — we warn
+    // and run without span emission rather than refusing to start.
+    let otel = if user_config.observability.otel_spans {
+        let path = if user_config.observability.otel_file.trim().is_empty() {
+            crate::storage::data_dir()
+                .map(|d| d.join("otel-spans.jsonl"))
+                .unwrap_or_else(|_| std::path::PathBuf::from("otel-spans.jsonl"))
+        } else {
+            std::path::PathBuf::from(&user_config.observability.otel_file)
+        };
+        match crate::observe::otel::SpanWriter::open(&path) {
+            Ok(w) => Some(Arc::new(w)),
+            Err(e) => {
+                tracing::warn!("could not open OTel span file {}: {e}", path.display());
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     print_banner(
         &host_str,
         port,
@@ -129,17 +158,22 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
         project_profile.as_ref(),
         &user_config.rules.enabled,
         cache_injection,
+        &resilience,
+        otel.as_deref(),
     );
 
     let state = AppState {
         upstream_anthropic: args.upstream_anthropic.clone(),
         upstream_openai: args.upstream_openai.clone(),
+        upstream_google: args.upstream_google.clone(),
         http_client: reqwest::Client::new(),
         security,
         budget,
         loop_detector,
         storage,
         cache_injection,
+        resilience,
+        otel,
     };
 
     let host: IpAddr = host_str
@@ -220,6 +254,8 @@ fn print_banner(
     project_profile: Option<&(std::path::PathBuf, config::project::ProjectProfile)>,
     rule_packs: &[String],
     cache_injection: bool,
+    resilience: &Arc<crate::proxy::resilience::Resilience>,
+    otel: Option<&crate::observe::otel::SpanWriter>,
 ) {
     let _ = storage;
     println!("🛡️  Burnwall v{}", env!("CARGO_PKG_VERSION"));
@@ -227,6 +263,7 @@ fn print_banner(
     println!("   Routes:");
     println!("     /anthropic/* → {}", args.upstream_anthropic);
     println!("     /openai/*    → {}", args.upstream_openai);
+    println!("     /google/*    → {}", args.upstream_google);
     println!(
         "   Security: {} deny paths, {} allow paths, {} deny commands, mounts={}, secrets={}",
         security.rules().deny_paths.len(),
@@ -267,6 +304,12 @@ fn print_banner(
     }
     if cache_injection {
         println!("   Cache:    Anthropic cache_control injection ON");
+    }
+    if resilience.enabled {
+        println!("   Resilience: endpoint failover ON (circuit breaker active)");
+    }
+    if let Some(w) = otel {
+        println!("   OTel:     GenAI spans → {}", w.path().display());
     }
     println!("   Ready. Press Ctrl-C to stop.");
 }

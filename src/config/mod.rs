@@ -11,8 +11,9 @@ pub mod project;
 pub mod types;
 
 pub use types::{
-    BudgetConfig, Config, LogScrapeConfig, LoggingConfig, LoopDetectionConfig, McpConfig,
-    McpServerConfig, ProxyConfig, RulesConfig, SecurityConfig, ToolsConfig, WasteConfig,
+    BudgetConfig, Config, FailoverEndpoints, LogScrapeConfig, LoggingConfig, LoopDetectionConfig,
+    McpConfig, McpServerConfig, ObservabilityConfig, ProxyConfig, ResilienceConfig, RulesConfig,
+    SecurityConfig, ToolsConfig, WasteConfig,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -131,6 +132,12 @@ pub fn set_dotted_key(config: &mut Config, key: &str, value: &str) -> Result<()>
         "security.dlp" => config.security.dlp = parse(key, value)?,
         // `[[mcp.servers]]` is an array of tables — edit the TOML directly.
         "mcp.require_approval" => config.mcp.require_approval = parse(key, value)?,
+        "resilience.enabled" => config.resilience.enabled = parse(key, value)?,
+        "resilience.failure_threshold" => config.resilience.failure_threshold = parse(key, value)?,
+        "resilience.cooldown_seconds" => config.resilience.cooldown_seconds = parse(key, value)?,
+        // `[[resilience.endpoints]]` is an array of tables — edit the TOML directly.
+        "observability.otel_spans" => config.observability.otel_spans = parse(key, value)?,
+        "observability.otel_file" => config.observability.otel_file = value.to_string(),
         // Deprecated alias — still settable for one release.
         "log_scrape.enabled" => config.log_scrape.enabled = parse(key, value)?,
         _ => return Err(ConfigError::UnknownKey(key.to_string())),

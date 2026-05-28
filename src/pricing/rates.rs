@@ -24,7 +24,7 @@
 /// Date the embedded rate card was last edited, `YYYY-MM-DD`. Bump
 /// whenever you change [`KNOWN_MODELS`]. The status command warns the user
 /// if this date is more than 30 days behind today.
-pub const PRICING_LAST_UPDATED: &str = "2026-05-13";
+pub const PRICING_LAST_UPDATED: &str = "2026-05-27";
 
 /// USD per million tokens, broken out by token type.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -101,6 +101,37 @@ pub const KNOWN_MODELS: &[(&str, ModelPricing)] = &[
             cache_write_per_mtok: 0.0,
             cache_read_per_mtok: 0.625,
             output_per_mtok: 10.00,
+        },
+    ),
+    // ─────────── Google Gemini (as of May 2026) ───────────
+    // Implicit caching — no explicit cache-write cost on the response path.
+    // Longest prefixes first: `gemini-2.5-pro` / `-flash` before any shorter
+    // family key, per the module docs.
+    (
+        "gemini-2.5-pro",
+        ModelPricing {
+            input_per_mtok: 1.25,
+            cache_write_per_mtok: 0.0,
+            cache_read_per_mtok: 0.3125,
+            output_per_mtok: 10.00,
+        },
+    ),
+    (
+        "gemini-2.5-flash",
+        ModelPricing {
+            input_per_mtok: 0.30,
+            cache_write_per_mtok: 0.0,
+            cache_read_per_mtok: 0.075,
+            output_per_mtok: 2.50,
+        },
+    ),
+    (
+        "gemini-2.0-flash",
+        ModelPricing {
+            input_per_mtok: 0.10,
+            cache_write_per_mtok: 0.0,
+            cache_read_per_mtok: 0.025,
+            output_per_mtok: 0.40,
         },
     ),
 ];

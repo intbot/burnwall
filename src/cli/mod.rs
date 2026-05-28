@@ -5,11 +5,13 @@ use clap::{Parser, Subcommand};
 pub mod completions;
 pub mod config_cmd;
 pub mod daemon;
+pub mod digest;
 pub mod explore;
 pub mod history;
 pub mod init;
 pub mod mcp;
 pub mod mcp_watch;
+pub mod metrics;
 pub mod rules;
 pub mod security;
 pub mod start;
@@ -52,6 +54,10 @@ pub enum Command {
     Explore(explore::ExploreArgs),
     /// Manage security-rule packs (list / install official packs).
     Rules(rules::RulesArgs),
+    /// Per-model latency (p50/p95), error rate, and throughput.
+    Metrics(metrics::MetricsArgs),
+    /// Agent Bill of Materials: models, MCP tools, security checks, cost.
+    Digest(digest::DigestArgs),
 }
 
 impl Cli {
@@ -70,6 +76,8 @@ impl Cli {
             Command::Waste(args) => waste::run_cmd(args),
             Command::Explore(args) => explore::run_cmd(args),
             Command::Rules(args) => rules::run_cmd(args),
+            Command::Metrics(args) => metrics::run_cmd(args),
+            Command::Digest(args) => digest::run_cmd(args),
         }
     }
 }

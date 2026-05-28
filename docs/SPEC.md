@@ -154,6 +154,72 @@ Flags:
 - `--json` — output as JSON
 - `--model` — break down by model per day
 
+### `burnwall metrics [--days N] [--json]`
+
+Per-model latency percentiles, error rate, and throughput — computed locally
+from the request log. The local answer to hosted LLM observability. Metadata
+only; never reads prompt content. Default window: 7 days.
+
+```
+$ burnwall metrics
+
+📈 Latency & reliability (last 7 days)
+
+   Provider / Model                  Reqs    Errs       p50       p95     Err%   Req/day
+   ──────────────────────────────────────────────────────────────────────────────────
+   anthropic/claude-sonnet-4-6        428      3     842ms    3180ms     0.7%      61.1
+   openai/gpt-5.4                      96      5     510ms    1920ms     5.2%      13.7
+   google/gemini-2.5-pro              140      0     690ms    2450ms     0.0%      20.0
+```
+
+**Data source:** per-request upstream latency (ms) and HTTP status recorded on
+the response path. `p50`/`p95` are percentiles over latency samples in the
+window; `Err%` is the share of requests with a 4xx/5xx status; `Req/day` is the
+request count divided by the window in days. Empty window prints a hint to route
+a request through the proxy first.
+
+Flags:
+- `--days N` — window in days (default 7, floored at 1)
+- `--json` — emit `{ "days", "models": [ { provider, model, requests, errors,
+  error_rate, p50_ms, p95_ms, throughput_per_day } ] }`
+
+### `burnwall digest [--days N] [--json]`
+
+An Agent Bill of Materials for a window: which models ran and what they cost,
+which MCP servers/tools were touched, how many tool calls were made, which
+security checks fired, and total turns. Assembled entirely from existing
+metadata rows — never reads prompt content. Default window: 7 days.
+
+```
+$ burnwall digest
+
+🧾 Agent Bill of Materials (last 7 days)
+
+   Turns:      664 requests (8 blocked)
+   Total cost: $241.07
+
+   Models:
+     anthropic/claude-sonnet-4-6        428 req   $198.40
+     openai/gpt-5.4                      96 req    $31.22
+     google/gemini-2.5-pro              140 req    $11.45
+
+   MCP tool calls: 52 (4 distinct tools)
+   MCP tools advertised:
+     filesystem/read_file (approved)
+     filesystem/write_file (pending)
+
+   Security checks fired: 8
+     path_blocked: 6
+     secret_detected: 2
+   Distinct targets touched: 5
+```
+
+Flags:
+- `--days N` — window in days (default 7)
+- `--json` — emit the same structure as the table (days, turns, blocked,
+  total_cost_usd, models, mcp_tool_calls, distinct_mcp_tools, mcp_tools,
+  security_by_type, distinct_targets)
+
 ### `burnwall config set <key> <value>`
 
 Set configuration values.
@@ -208,6 +274,7 @@ max_cost_per_window = 2.0
 2. IDENTIFY provider from URL path:
      /anthropic/*  → Anthropic Messages API
      /openai/*     → OpenAI Chat Completions API
+     /google/*     → Google Gemini API (generateContent)
 3. SECURITY CHECK (request body):
    a. Parse JSON body
    b. Scan for tool_use / function_call blocks
@@ -233,11 +300,15 @@ max_cost_per_window = 2.0
       - Print warning: ⚠️ Budget 85% used ($17.02/$20.00)
       - Still forward the request
 5. FORWARD request to real provider:
-   a. Rewrite URL: strip /anthropic or /openai prefix
+   a. Rewrite URL: strip /anthropic, /openai, or /google prefix
    b. Forward all headers unchanged (including auth)
    c. Forward body unchanged
    d. For streaming (SSE) responses: pipe through, parse final usage chunk
    e. For non-streaming: buffer response, parse usage
+   f. [v0.7] If `[resilience]` is enabled and the upstream is unreachable or
+      returns 5xx, retry the SAME request against the next configured endpoint
+      for that provider (skipping endpoints whose circuit breaker is open).
+      The request shape is identical — a transparent reroute, not a translation.
 6. PARSE response usage block:
    a. Extract token counts by type (input, cached, output, cache_write)
    b. Look up model in pricing database
@@ -250,6 +321,9 @@ max_cost_per_window = 2.0
    - timestamp, provider, model, input_tokens, cache_creation_tokens,
      cache_read_tokens, output_tokens, cost_usd, blocked (bool),
      block_reason, session_id (from request header if available)
+   - [v0.7] upstream latency (ms) and HTTP status — metadata only, feeds
+     `burnwall metrics`. If `[observability].otel_spans` is on, also emit one
+     OpenTelemetry GenAI span (`gen_ai.*`) as a line of JSON to `otel_file`.
 9. RETURN response unchanged to AI tool
 ```
 
@@ -270,6 +344,8 @@ For OpenAI streaming, usage is in the final chunk when `stream_options.include_u
 - If response parsing fails → log error, still return response unchanged
 - If SQLite write fails → log error, don't crash, keep proxying
 - If upstream provider is unreachable → return 502 with helpful message
+  (with `[resilience]` enabled, only after every configured endpoint for that
+  provider has failed or has an open circuit)
 - If upstream returns error → forward error unchanged, still log the attempt
 
 ---
@@ -296,6 +372,18 @@ Note: 1-hour cache duration is 2x base input (instead of 1.25x). Detect from cac
 | gpt-5.4-mini | 0.15 | 0.075 (0.50x) | 0.60 |
 
 Note: OpenAI caching is automatic (50% discount on cached tokens). No write premium.
+
+### Google Gemini Models (as of May 2026)
+
+| Model | Input ($/MTok) | Cached Input ($/MTok) | Output ($/MTok) |
+|-------|---------------|-----------------------|-----------------|
+| gemini-2.5-pro | 1.25 | 0.3125 (0.25x) | 10.00 |
+| gemini-2.5-flash | 0.30 | 0.075 (0.25x) | 2.50 |
+| gemini-2.0-flash | 0.10 | 0.025 (0.25x) | 0.40 |
+
+Note: Gemini caching is implicit — there is no cache-write cost on the response
+path. Token accounting comes from `usageMetadata` (the cached-content split is
+read from `cachedContentTokenCount`; thinking tokens fold into output).
 
 ### Pricing Update Strategy
 
@@ -410,6 +498,21 @@ require_approval = false       # enforce: block tools/call to unapproved tools
 [[mcp.servers]]
 name = "filesystem"
 upstream = "http://localhost:8090"
+
+[resilience]
+enabled = false               # off by default: single upstream, verbatim 5xx
+failure_threshold = 3          # consecutive failures before a circuit opens
+cooldown_seconds = 30          # how long an open circuit stays open before a probe
+
+# Per-provider ordered fallback endpoints. The primary upstream is tried first;
+# these are tried after it, in order, on a connection error or 5xx.
+[[resilience.endpoints]]
+provider = "anthropic"         # 'anthropic' | 'openai' | 'google'
+urls = ["https://bedrock.example.com"]
+
+[observability]
+otel_spans = false             # emit one OTel GenAI span per request (file-only)
+otel_file = ""                 # span file; empty → <data dir>/otel-spans.jsonl
 ```
 
 `burnwall mcp` manages the MCP tool-approval workflow and audit log:
