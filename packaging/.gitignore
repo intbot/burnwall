@@ -1,0 +1,11 @@
+# Artifacts produced by the release workflow (and local test runs) — never committed.
+# The native binaries are downloaded from the GitHub Release at publish time.
+nuget/native/
+nuget/bin/
+nuget/obj/
+nuget-out/
+pypi/stage/
+pypi/build/
+pypi/*.egg-info/
+dist_wheels/
+artifacts/

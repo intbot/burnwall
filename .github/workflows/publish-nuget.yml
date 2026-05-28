@@ -1,0 +1,103 @@
+# Custom dist publish leg: NuGet (.NET global tool wrapping the native binary).
+# Called by the dist-generated release workflow via publish-jobs = ["./publish-nuget"].
+# Build-once rule: this job NEVER compiles burnwall. It downloads the binaries dist
+# already built and attached to the GitHub Release, lays one per .NET RID into the
+# tool package, and pushes it. The managed shim (packaging/nuget/Program.cs) picks
+# the right native binary at runtime.
+name: Publish NuGet
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+jobs:
+  nuget:
+    runs-on: ubuntu-latest
+    env:
+      PLAN: ${{ inputs.plan }}
+      GH_TOKEN: ${{ github.token }}
+      NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Resolve tag and version from plan
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG=$(echo "$PLAN" | jq -r '.announcement_tag')
+          [ -n "$TAG" ] && [ "$TAG" != "null" ] || { echo "no announcement_tag in plan"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download release binaries (built once by dist)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          gh release download "${{ steps.meta.outputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir artifacts \
+            --pattern 'burnwall-*.tar.xz' \
+            --pattern 'burnwall-*.zip'
+
+      - name: Stage one native binary per .NET RID
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -A RID=(
+            [x86_64-unknown-linux-gnu]=linux-x64
+            [aarch64-unknown-linux-gnu]=linux-arm64
+            [x86_64-apple-darwin]=osx-x64
+            [aarch64-apple-darwin]=osx-arm64
+            [x86_64-pc-windows-msvc]=win-x64
+          )
+          for target in "${!RID[@]}"; do
+            rid="${RID[$target]}"
+            dest="packaging/nuget/native/$rid"
+            mkdir -p "$dest"
+            rm -rf tmp && mkdir tmp
+            if [[ "$target" == *windows* ]]; then
+              archive="artifacts/burnwall-$target.zip"
+              [ -f "$archive" ] || { echo "missing $archive"; exit 1; }
+              unzip -q -o "$archive" -d tmp
+            else
+              archive="artifacts/burnwall-$target.tar.xz"
+              [ -f "$archive" ] || { echo "missing $archive"; exit 1; }
+              tar -xf "$archive" -C tmp
+            fi
+            bin=$(find tmp -type f \( -name burnwall -o -name burnwall.exe \) | head -n1)
+            [ -n "$bin" ] || { echo "no burnwall binary in $archive"; exit 1; }
+            cp "$bin" "$dest/$(basename "$bin")"
+            chmod +x "$dest/$(basename "$bin")" || true
+          done
+          find packaging/nuget/native -type f -print
+
+      - name: Pack .NET tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet pack packaging/nuget/Burnwall.Tool.csproj \
+            -c Release \
+            -p:Version="${{ steps.meta.outputs.version }}" \
+            -o nuget-out
+
+      - name: Push to NuGet (skips if no key)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${NUGET_API_KEY:-}" ]; then
+            echo "::notice title=NuGet::NUGET_API_KEY not set — built the package but skipping push."
+            exit 0
+          fi
+          dotnet nuget push "nuget-out/*.nupkg" \
+            --api-key "$NUGET_API_KEY" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate

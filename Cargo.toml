@@ -3,11 +3,21 @@ name = "burnwall"
 version = "0.7.0"
 edition = "2021"
 description = "Local proxy for AI coding tools (Claude Code, Codex CLI, Aider): cache-aware cost tracking, path/command security checks, daily budget enforcement. Zero telemetry."
-license = "FSL-1.1-MIT"
+# FSL-1.1-MIT is not an SPDX identifier; crates.io rejects it as `license`,
+# so the license is declared via the file instead.
+license-file = "LICENSE"
 repository = "https://github.com/intbot/burnwall"
+homepage = "https://github.com/intbot/burnwall"
+authors = ["intbot"]
 readme = "README.md"
 keywords = ["ai", "llm", "security", "proxy", "cost-tracking"]
 categories = ["command-line-utilities", "network-programming"]
+
+[package.metadata.wix]
+upgrade-guid = "B31E1E35-DA87-471E-8FC3-B9D26926B9A4"
+path-guid = "1B65F07B-49F5-469A-AF2C-8C091A57035A"
+license = false
+eula = false
 
 [dependencies]
 # Async runtime
@@ -167,3 +177,8 @@ opt-level = "z"                      # Optimize for size
 lto = true                          # Link-time optimization
 codegen-units = 1                    # Single codegen unit for better optimization
 strip = true                         # Strip debug symbols
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
