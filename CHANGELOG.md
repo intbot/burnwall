@@ -2,6 +2,42 @@
 
 All notable changes to Burnwall.
 
+## [0.9.2] — 2026-05-28
+
+### Added
+
+- **"Use Burnwall with anything" cookbook** (`docs/INTEGRATIONS.md`) — one-line
+  base-URL recipes to put Burnwall in front of your coding tools, agent SDKs, and
+  any OpenAI-/Anthropic-compatible gateway (e.g. OpenRouter). Burnwall runs *in
+  front of* your existing setup; nothing else changes.
+- **Independent audit verification.** `burnwall audit export --format json` emits a
+  self-contained, signed receipt bundle, and `tools/verify_receipts.py` re-walks the
+  hash chain and verifies every Ed25519 signature **without trusting the Burnwall
+  binary**. `docs/COMPLIANCE.md` maps the receipts to EU AI Act Art. 12 / ISO 42001
+  A.6.2.8 / SOC 2 / NIST AI RMF (as *evidence*, not certification).
+- **MCP registry manifest** (`packaging/mcp/server.json`) + `docs/MCP_REGISTRY.md`
+  so the local MCP firewall can be listed/discovered.
+- **OpenSSF Scorecard CI** (supply-chain trust signal) and a clearer
+  "100% local, zero telemetry" README headline.
+
+## [0.9.1] — 2026-05-28
+
+### Added
+
+- **`burnwall cost-per-pr [--base main] [--json]`** — approximate cost of the
+  current git branch / PR, by attributing local cross-tool session-log spend to the
+  branch's active window (oldest commit on `base..HEAD`). Local + git metadata only;
+  never reads prompt content. Approximate (time-bucketed) and labelled as such.
+- **MCP permission auto-policy** — `[mcp].auto_approve` and `[mcp].auto_deny` glob
+  lists (matched against `"<server>/<tool>"`). Auto-deny always blocks; auto-approve
+  skips the approval gate in enforce mode — cutting approval fatigue. Both opt-in.
+- **VS Code inline panel** — the status-bar item now opens a panel
+  (`Burnwall: Open Panel`) summarising cost-by-model, security blocks, and MCP tools
+  from the local CLI JSON.
+- **Soft budget alert** — `burnwall status` shows a non-blocking heads-up once
+  today's spend crosses the configured warn threshold but is still under the hard
+  daily limit.
+
 ## [0.9.0] — 2026-05-28
 
 ### Added

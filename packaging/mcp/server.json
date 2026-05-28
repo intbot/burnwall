@@ -1,0 +1,18 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.intbot/burnwall-mcp-firewall",
+  "description": "Local MCP firewall: tool-poisoning + rug-pull detection, an approval workflow, and a path/command/secret denylist on tool-call arguments. Runs in front of your MCP servers; nothing leaves your machine.",
+  "repository": {
+    "url": "https://github.com/intbot/burnwall",
+    "source": "github"
+  },
+  "version": "0.9.2",
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "burnwall",
+      "transport": { "type": "stdio" },
+      "comment": "Install the burnwall CLI (brew/cargo/npm/curl — see the repo). The firewall is a passthrough HTTP proxy started with `burnwall mcp-watch --upstream <your-mcp-server-url>`; point your MCP client at the watcher's local address. See docs/MCP_REGISTRY.md."
+    }
+  ]
+}
