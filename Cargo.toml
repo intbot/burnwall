@@ -1,6 +1,6 @@
 [package]
 name = "burnwall"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 description = "Local proxy for AI coding tools (Claude Code, Codex CLI, Aider): cache-aware cost tracking, path/command security checks, daily budget enforcement. Zero telemetry."
 # FSL-1.1-MIT is not an SPDX identifier; crates.io rejects it as `license`,
@@ -64,6 +64,8 @@ dashmap = "6"                        # Concurrent hashmap for loop detection
 uuid = { version = "1", features = ["v4"] }
 futures-util = "0.3"                 # Stream adapters for SSE response pass-through
 sha2 = "0.10"                        # SHA-256 content pin for third-party rule-pack trust (TOFU)
+ed25519-dalek = { version = "2", features = ["rand_core"] }  # Signed audit receipts (v0.8)
+rand_core = { version = "0.6", features = ["getrandom"] }    # OsRng for audit keypair generation
 
 # Process control for daemon mode + `burnwall stop`
 [target.'cfg(unix)'.dependencies]
@@ -171,6 +173,10 @@ path = "tests/unit/waste_test.rs"
 [[test]]
 name = "observe_test"
 path = "tests/unit/observe_test.rs"
+
+[[test]]
+name = "audit_cli_test"
+path = "tests/integration/audit_cli_test.rs"
 
 [profile.release]
 opt-level = "z"                      # Optimize for size

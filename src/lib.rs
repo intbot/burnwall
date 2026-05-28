@@ -8,6 +8,7 @@
 
 #![allow(unused)]
 
+pub mod audit;
 pub mod budget;
 pub mod cli;
 pub mod config;

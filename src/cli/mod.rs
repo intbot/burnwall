@@ -2,6 +2,7 @@
 
 use clap::{Parser, Subcommand};
 
+pub mod audit;
 pub mod completions;
 pub mod config_cmd;
 pub mod daemon;
@@ -12,6 +13,7 @@ pub mod init;
 pub mod mcp;
 pub mod mcp_watch;
 pub mod metrics;
+pub mod report;
 pub mod rules;
 pub mod security;
 pub mod start;
@@ -58,6 +60,10 @@ pub enum Command {
     Metrics(metrics::MetricsArgs),
     /// Agent Bill of Materials: models, MCP tools, security checks, cost.
     Digest(digest::DigestArgs),
+    /// Cryptographic audit receipts + CycloneDX/SARIF compliance exports.
+    Audit(audit::AuditArgs),
+    /// Shareable weekly/monthly summary (spend, blocks, top models).
+    Report(report::ReportArgs),
 }
 
 impl Cli {
@@ -78,6 +84,8 @@ impl Cli {
             Command::Rules(args) => rules::run_cmd(args),
             Command::Metrics(args) => metrics::run_cmd(args),
             Command::Digest(args) => digest::run_cmd(args),
+            Command::Audit(args) => audit::run_cmd(args),
+            Command::Report(args) => report::run_cmd(args),
         }
     }
 }

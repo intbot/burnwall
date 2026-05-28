@@ -2,6 +2,31 @@
 
 All notable changes to Burnwall.
 
+## [0.8.0] — 2026-05-28
+
+### Added
+
+- **Cryptographic audit receipts** — `burnwall audit seal` walks the request and
+  security-event logs and appends, for each action, a signed link in a hash
+  chain: a SHA-256 of the source row's contents, chained into the previous
+  receipt, then signed with a local Ed25519 key (generated on first use).
+  `burnwall audit verify` re-walks the chain and re-derives every hash from the
+  live rows, so any edit, deletion, or reordering — of a receipt *or* the
+  underlying row — is detected, and the chain can't be forged without the key.
+  Tamper-evident, metadata-only proof of what an agent did and was blocked from.
+- **CycloneDX AI Bill of Materials** — `burnwall audit aibom [--days N]` exports
+  a CycloneDX 1.6 BOM for the window: models as components, MCP servers as
+  services, totals in metadata. Machine-readable, audit-grade session record.
+- **SARIF export** — `burnwall audit sarif [--days N]` emits security blocks as
+  SARIF 2.1.0, ready to upload to GitHub code scanning (the Security tab) with
+  no custom integration.
+- **`burnwall report [--days N] [--format text|json|csv]`** — a shareable
+  weekly/monthly summary (spend, activity, top models, security blocks), and
+  **`burnwall audit export [--format json|csv]`** to dump the receipt log.
+
+All of the above are metadata only — they never read or store prompt content —
+and read-only against the existing logs.
+
 ## [0.7.0] — 2026-05-27
 
 ### Added

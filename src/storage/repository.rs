@@ -12,7 +12,9 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, OptionalExtension};
 
 use super::{
-    models::{DailyTotal, McpEvent, McpToolRow, ModelBreakdown, RequestRecord, SecurityEvent},
+    models::{
+        DailyTotal, McpEvent, McpToolRow, ModelBreakdown, ReceiptRow, RequestRecord, SecurityEvent,
+    },
     Result, Storage,
 };
 
@@ -651,6 +653,127 @@ impl Storage {
         })
     }
 
+    /// Fetch one security event by rowid. Used by `burnwall audit verify` to
+    /// re-derive a receipt's content hash from the live source row.
+    pub fn get_security_event(&self, id: i64) -> Result<Option<SecurityEvent>> {
+        self.with_conn(|conn| {
+            let r = conn
+                .query_row(
+                    "SELECT id, timestamp, event_type, details, provider, model
+                     FROM security_events WHERE id = ?1",
+                    params![id],
+                    row_to_security_event,
+                )
+                .optional()?;
+            Ok(r)
+        })
+    }
+
+    /// Forwarded/blocked request rows not yet sealed into the audit chain,
+    /// oldest first. Drives `burnwall audit seal`.
+    pub fn unsealed_requests(&self) -> Result<Vec<RequestRecord>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, timestamp, provider, model,
+                        input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
+                        cost_usd, blocked, block_reason, session_id, request_hash,
+                        latency_ms, http_status
+                 FROM requests
+                 WHERE id NOT IN (SELECT source_id FROM audit_receipts WHERE source = 'request')
+                 ORDER BY id ASC",
+            )?;
+            let rows: rusqlite::Result<Vec<RequestRecord>> =
+                stmt.query_map([], row_to_request)?.collect();
+            Ok(rows?)
+        })
+    }
+
+    /// Security-event rows not yet sealed, oldest first.
+    pub fn unsealed_security_events(&self) -> Result<Vec<SecurityEvent>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, timestamp, event_type, details, provider, model
+                 FROM security_events
+                 WHERE id NOT IN (SELECT source_id FROM audit_receipts WHERE source = 'security_event')
+                 ORDER BY id ASC",
+            )?;
+            let rows: rusqlite::Result<Vec<SecurityEvent>> =
+                stmt.query_map([], row_to_security_event)?.collect();
+            Ok(rows?)
+        })
+    }
+
+    /// The hash of the most recently sealed receipt (the chain tail), or
+    /// `None` when no receipts have been sealed yet.
+    pub fn last_receipt_hash(&self) -> Result<Option<String>> {
+        self.with_conn(|conn| {
+            let h = conn
+                .query_row(
+                    "SELECT hash FROM audit_receipts ORDER BY seq DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(h)
+        })
+    }
+
+    /// Persist one sealed receipt. The hashes + Ed25519 signature are computed
+    /// by the caller (`crate::audit`); storage only stores them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_receipt(
+        &self,
+        source: &str,
+        source_id: i64,
+        timestamp: &str,
+        action: &str,
+        provider: Option<&str>,
+        model: Option<&str>,
+        detail: Option<&str>,
+        content_hash: &str,
+        prev_hash: &str,
+        hash: &str,
+        signature: &str,
+    ) -> Result<i64> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO audit_receipts
+                    (source, source_id, timestamp, action, provider, model, detail,
+                     content_hash, prev_hash, hash, signature)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                params![
+                    source,
+                    source_id,
+                    timestamp,
+                    action,
+                    provider,
+                    model,
+                    detail,
+                    content_hash,
+                    prev_hash,
+                    hash,
+                    signature
+                ],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+    }
+
+    /// All sealed receipts in chain (seq) order. Drives `burnwall audit verify`
+    /// and `burnwall audit export`.
+    pub fn all_receipts(&self) -> Result<Vec<ReceiptRow>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT seq, sealed_at, source, source_id, timestamp, action, provider, model,
+                        detail, content_hash, prev_hash, hash, signature
+                 FROM audit_receipts ORDER BY seq ASC",
+            )?;
+            let rows: rusqlite::Result<Vec<ReceiptRow>> =
+                stmt.query_map([], row_to_receipt)?.collect();
+            Ok(rows?)
+        })
+    }
+
     /// Security events for a local date — used by `burnwall status`.
     pub fn security_events_for_date(&self, date: &str) -> Result<Vec<SecurityEvent>> {
         self.with_conn(|conn| {
@@ -675,6 +798,35 @@ impl Storage {
             Ok(rows?)
         })
     }
+}
+
+fn row_to_security_event(row: &rusqlite::Row) -> rusqlite::Result<SecurityEvent> {
+    Ok(SecurityEvent {
+        id: Some(row.get(0)?),
+        timestamp: row.get::<_, DateTime<Utc>>(1)?,
+        event_type: row.get(2)?,
+        details: row.get(3)?,
+        provider: row.get(4)?,
+        model: row.get(5)?,
+    })
+}
+
+fn row_to_receipt(row: &rusqlite::Row) -> rusqlite::Result<ReceiptRow> {
+    Ok(ReceiptRow {
+        seq: row.get(0)?,
+        sealed_at: row.get(1)?,
+        source: row.get(2)?,
+        source_id: row.get(3)?,
+        timestamp: row.get(4)?,
+        action: row.get(5)?,
+        provider: row.get(6)?,
+        model: row.get(7)?,
+        detail: row.get(8)?,
+        content_hash: row.get(9)?,
+        prev_hash: row.get(10)?,
+        hash: row.get(11)?,
+        signature: row.get(12)?,
+    })
 }
 
 fn row_to_request(row: &rusqlite::Row) -> rusqlite::Result<RequestRecord> {
