@@ -1,13 +1,11 @@
-"""setuptools shim that wraps a single prebuilt burnwall binary into a wheel.
+"""setuptools shim that wraps one prebuilt burnwall binary into a wheel.
 
-Driven by build_wheels.py, which sets the environment variables below and runs
-this once per platform with an explicit --plat-name. The binary is shipped via
-the wheel's scripts directory, so pip installs it straight onto PATH.
-
-The wheel is platform-specific (it carries a native binary) but NOT tied to a
-Python version or ABI: the binary runs the same under any interpreter. So we
-force a `py3-none-<platform>` tag rather than the `cp3XX-cp3XX-<platform>` tag
-setuptools would otherwise pick for an impure wheel.
+Driven by build_wheels.py: it stages the platform binary into
+``burnwall_launcher/_bin/`` and runs this once per platform with an explicit
+``--plat-name``. The binary ships as package data; the ``burnwall`` console-script
+entry point (``burnwall_launcher.main``) execs it, so pip puts a `burnwall` command
+on PATH. The wheel is platform-specific (it carries a native binary) but
+interpreter/ABI-agnostic, so we force a ``py3-none-<platform>`` tag.
 """
 
 import os
@@ -32,7 +30,6 @@ class BdistWheel(_bdist_wheel):
         return "py3", "none", platform
 
 
-binary = os.environ["BURNWALL_BINARY"]
 version = os.environ["BURNWALL_VERSION"]
 
 readme_path = os.environ.get("BURNWALL_README", "")
@@ -60,7 +57,9 @@ setup(
         "Topic :: Software Development",
     ],
     python_requires=">=3.8",
-    # The prebuilt binary lands in the wheel's scripts dir -> installed onto PATH.
-    scripts=[binary],
+    packages=["burnwall_launcher"],
+    package_data={"burnwall_launcher": ["_bin/*"]},
+    include_package_data=True,
+    entry_points={"console_scripts": ["burnwall = burnwall_launcher:main"]},
     cmdclass={"bdist_wheel": BdistWheel},
 )
