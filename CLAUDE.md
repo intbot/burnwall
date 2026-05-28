@@ -81,15 +81,15 @@ src/
     mod.rs                 — Provider trait and registry
     anthropic.rs           — Anthropic Messages API parser
     openai.rs              — OpenAI Chat Completions API parser
-    google.rs              — Google Gemini API parser [v0.7]
+    google.rs              — Google Gemini API parser
   security/
     mod.rs                 — Security engine orchestrator
     rules.rs               — Rule types and matching logic
     scanner.rs             — Scan request bodies for violations
     secrets.rs             — Detect API keys/credentials in payloads
-    dlp.rs                 — Egress/DLP detection: cards, SSNs [v0.6.5]
-    packs.rs + official/   — Declarative rule-pack format + bundled packs [v0.6]
-    signing.rs             — Ed25519 sign/verify for signed remote packs [v0.9]
+    dlp.rs                 — Egress/DLP detection: cards, SSNs
+    packs.rs + official/   — Declarative rule-pack format + bundled packs
+    signing.rs             — Ed25519 sign/verify for signed remote packs
   budget/
     mod.rs                 — Budget enforcement logic
     limits.rs              — Daily/monthly limit checking
@@ -116,17 +116,17 @@ src/
     mcp.rs / mcp_watch.rs  — `burnwall mcp*` (approvals, audit export, watcher)
     waste.rs / explore.rs / metrics.rs / digest.rs — insight + observability cmds
     rules.rs               — `burnwall rules` (install/add/test/sign/verify/fetch)
-    audit.rs / report.rs   — `burnwall audit` (seal/verify/aibom/sarif) + `report` [v0.8]
-  observe/                 — Local, metadata-only observability [v0.7]
+    audit.rs / report.rs   — `burnwall audit` (seal/verify/aibom/sarif) + `report`
+  observe/                 — Local, metadata-only observability
     metrics.rs / otel.rs / digest.rs — latency p50/p95, OTel span sink, AIBOM digest
-  mcp/                     — MCP firewall + multi-server watcher [v0.5/v0.6.5]
+  mcp/                     — MCP firewall + multi-server watcher
     mod.rs / firewall.rs   — routing, tool-poisoning + rug-pull detection
-  audit/                   — Cryptographic audit + compliance exports [v0.8]
+  audit/                   — Cryptographic audit + compliance exports
     mod.rs                 — Ed25519 hash-chained receipts (seal/verify)
     aibom.rs / sarif.rs    — CycloneDX 1.6 AIBOM + SARIF 2.1.0 exporters
-  logscrape/               — Cross-tool cost from local session logs [v0.2/v0.5]
+  logscrape/               — Cross-tool cost from local session logs
     claude_code.rs / codex.rs / opencode.rs / aider.rs
-  waste/                   — Cost-waste insight rules [v0.4]
+  waste/                   — Cost-waste insight rules
 tests/
   fixtures/                — Real (sanitized) API response JSON files
     anthropic_cached.json
@@ -145,7 +145,7 @@ tests/
     parser_test.rs
     (+ audit, signing, dlp, waste, mcp, config, storage, rulepack, … suites)
 editor/
-  vscode/                  — VS Code status-bar extension (TypeScript) [v0.9]
+  vscode/                  — VS Code status-bar extension (TypeScript)
                              covers Cursor / Windsurf / VSCodium; reads `status --json`
 ```
 
