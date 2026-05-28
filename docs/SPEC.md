@@ -257,6 +257,31 @@ $ burnwall audit verify
    Public key: 85369a5c3c6f586823d45c9d182e1e177598dae37b0c7791f65c1aa7cb68bec7
 ```
 
+### `burnwall rules` — signed remote packs (v0.9)
+
+In addition to bundled official packs and local third-party packs (TOFU), rule
+packs can be fetched from a URL when signed by a trusted publisher:
+
+- `burnwall rules keygen <keyfile>` — generate an Ed25519 publisher keypair
+  (writes the secret seed `0600`; prints the public key to share).
+- `burnwall rules sign <pack.toml> --key <keyfile> [--out <sig>]` — produce a
+  detached hex signature over the pack.
+- `burnwall rules verify <pack.toml> --sig <sig> [--publisher <hex>]` — verify a
+  pack's signature against `[rules].publishers` (and any `--publisher` keys).
+- `burnwall rules fetch <url> [--sig <url>] [--publisher <hex>] [--yes]` —
+  download a pack + its signature, verify against trusted publishers, and
+  install it. **A remote pack is installed only if its signature verifies**, and
+  it is still parsed under the deny-only / append-only invariants — it can only
+  add restrictions, never loosen them. Trusted publisher keys live under
+  `[rules]` as `publishers = [{ name = "...", key = "<hex>" }]`.
+
+### Editor extension (VS Code / Cursor / Windsurf / VSCodium)
+
+`editor/vscode/` is a separate TypeScript extension that shows today's spend,
+cache hit rate, and blocked-request count in the status bar by shelling out to
+`burnwall status --json`. It reads only the local CLI output — no network, no
+direct database access. See `editor/vscode/README.md`.
+
 ### `burnwall config set <key> <value>`
 
 Set configuration values.

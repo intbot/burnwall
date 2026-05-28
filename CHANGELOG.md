@@ -2,6 +2,23 @@
 
 All notable changes to Burnwall.
 
+## [0.9.0] — 2026-05-28
+
+### Added
+
+- **VS Code extension** (`editor/vscode/`) — a status-bar item showing today's
+  spend, cache hit rate, and blocked-request count, read from your local
+  `burnwall status --json`. Click it for the full breakdown; when the CLI isn't
+  installed it links to the install instructions. Works in Cursor, Windsurf, and
+  VSCodium too. No data leaves your machine.
+- **Signed remote rule packs.** `burnwall rules fetch <url>` downloads a rule
+  pack and its detached Ed25519 signature and installs it **only** if the
+  signature verifies against a key you trust in `[rules].publishers`. The
+  publisher side is `burnwall rules keygen` (make a keypair) and
+  `burnwall rules sign` (sign a pack); `burnwall rules verify` checks a local
+  pack + signature. A fetched pack is parsed under the same deny-only /
+  append-only rules as any other pack — it can only ever add restrictions.
+
 ## [0.8.0] — 2026-05-28
 
 ### Added

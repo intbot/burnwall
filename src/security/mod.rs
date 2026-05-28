@@ -22,6 +22,7 @@ pub mod packs;
 pub mod rules;
 pub mod scanner;
 pub mod secrets;
+pub mod signing;
 
 pub use packs::RulePack;
 pub use rules::Ruleset;

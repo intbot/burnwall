@@ -264,6 +264,20 @@ impl Default for WasteConfig {
 pub struct RulesConfig {
     #[serde(default)]
     pub enabled: Vec<String>,
+    /// Trusted publisher keys for signed remote packs (v0.9). `burnwall rules
+    /// fetch <url>` / `verify` only accept a pack whose detached Ed25519
+    /// signature verifies against one of these keys. Empty by default — no
+    /// remote pack is trusted until you add a publisher.
+    #[serde(default)]
+    pub publishers: Vec<RulePublisher>,
+}
+
+/// A trusted rule-pack publisher: a label plus a hex-encoded Ed25519 public key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RulePublisher {
+    pub name: String,
+    /// Hex-encoded 32-byte Ed25519 verifying key.
+    pub key: String,
 }
 
 /// `[mcp]` — `burnwall mcp-watch` runtime depth (v0.6.5). `servers` lets one

@@ -9,8 +9,11 @@
 //!   SHA-256-pinned, so a later edit re-prompts (I6). Trust comes from your
 //!   approval, never the pack's self-declared metadata (I4).
 //! - `revoke <id>` — remove an installed third-party pack.
-//!
-//! Remote `install <url>` + signing are deliberately out of scope for now.
+//! - `keygen` / `sign` — publisher side: make an Ed25519 keypair and sign a pack.
+//! - `verify` / `fetch <url>` — consumer side: verify a pack's detached
+//!   signature against trusted `[rules].publishers`, and fetch+verify+install a
+//!   signed remote pack. A remote pack is only trusted if its signature matches
+//!   a configured publisher key; even then it stays deny-only/append-only.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -19,7 +22,7 @@ use anyhow::Context;
 use clap::{Args, Subcommand};
 
 use crate::config;
-use crate::security::packs;
+use crate::security::{packs, signing};
 use crate::storage::{self, Storage};
 
 #[derive(Args, Debug)]
@@ -62,6 +65,49 @@ pub enum RulesAction {
         /// Pack id to revoke.
         name: String,
     },
+    /// Generate an Ed25519 publisher signing key (writes the secret seed; prints
+    /// the public key to share with consumers' `[rules].publishers`).
+    Keygen {
+        /// Where to write the secret key seed (32 bytes).
+        out: PathBuf,
+    },
+    /// Sign a pack file with a publisher key — prints (or writes) a detached
+    /// hex signature.
+    Sign {
+        /// Pack `.toml` to sign.
+        file: PathBuf,
+        /// Path to the signing-key seed (from `rules keygen`).
+        #[arg(long)]
+        key: PathBuf,
+        /// Write the signature here instead of printing it.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Verify a local pack's detached signature against trusted publishers.
+    Verify {
+        /// Pack `.toml` to verify.
+        file: PathBuf,
+        /// Path to the detached signature (hex).
+        #[arg(long)]
+        sig: PathBuf,
+        /// Extra trusted publisher key(s) (hex), in addition to config.
+        #[arg(long = "publisher")]
+        publishers: Vec<String>,
+    },
+    /// Fetch, verify, and install a signed remote rule pack from a URL.
+    Fetch {
+        /// URL of the pack `.toml`.
+        url: String,
+        /// URL of the detached signature (default: `<url>.sig`).
+        #[arg(long)]
+        sig: Option<String>,
+        /// Extra trusted publisher key(s) (hex), in addition to config.
+        #[arg(long = "publisher")]
+        publishers: Vec<String>,
+        /// Skip the interactive approval prompt (the summary is still shown).
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 pub fn run_cmd(args: RulesArgs) -> anyhow::Result<()> {
@@ -71,6 +117,19 @@ pub fn run_cmd(args: RulesArgs) -> anyhow::Result<()> {
         RulesAction::Test { pack, file } => test(&pack, &file),
         RulesAction::Add { file, yes } => add(&file, yes),
         RulesAction::Revoke { name } => revoke(&name),
+        RulesAction::Keygen { out } => keygen(&out),
+        RulesAction::Sign { file, key, out } => sign(&file, &key, out.as_deref()),
+        RulesAction::Verify {
+            file,
+            sig,
+            publishers,
+        } => verify(&file, &sig, &publishers),
+        RulesAction::Fetch {
+            url,
+            sig,
+            publishers,
+            yes,
+        } => fetch(&url, sig.as_deref(), &publishers, yes),
     }
 }
 
@@ -341,4 +400,166 @@ fn prompt_yes() -> anyhow::Result<bool> {
     std::io::stdin().lock().read_line(&mut line)?;
     let answer = line.trim().to_ascii_lowercase();
     Ok(answer == "y" || answer == "yes")
+}
+
+// ── signed remote packs (v0.9) ───────────────────────────────────────────────
+
+/// Trusted publishers from `[rules].publishers` plus any `--publisher` keys.
+fn gather_publishers(extra: &[String]) -> anyhow::Result<Vec<signing::Publisher>> {
+    let cfg = config::load_or_default(&config::default_path()?).context("loading config")?;
+    let mut out: Vec<signing::Publisher> = cfg
+        .rules
+        .publishers
+        .iter()
+        .map(|p| signing::Publisher {
+            name: p.name.clone(),
+            key_hex: p.key.clone(),
+        })
+        .collect();
+    for (i, key_hex) in extra.iter().enumerate() {
+        out.push(signing::Publisher {
+            name: format!("--publisher[{i}]"),
+            key_hex: key_hex.clone(),
+        });
+    }
+    Ok(out)
+}
+
+fn keygen(out: &Path) -> anyhow::Result<()> {
+    if out.exists() {
+        anyhow::bail!(
+            "{} already exists — refusing to overwrite a key",
+            out.display()
+        );
+    }
+    let key = signing::generate();
+    std::fs::write(out, key.to_bytes()).with_context(|| format!("writing {}", out.display()))?;
+    set_key_perms(out)?;
+    println!(
+        "🔑 Wrote secret signing key (keep it private) to {}",
+        out.display()
+    );
+    println!("   Public key — share it; consumers add it under [rules].publishers:");
+    println!("   {}", signing::public_key_hex(&key));
+    Ok(())
+}
+
+fn sign(file: &Path, key: &Path, out: Option<&Path>) -> anyhow::Result<()> {
+    let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+    let seed = std::fs::read(key).with_context(|| format!("reading key {}", key.display()))?;
+    let signing_key = signing::signing_key_from_seed(&seed)
+        .context("key file is not a 32-byte Ed25519 seed (use `rules keygen`)")?;
+    let signature = signing::sign_hex(&signing_key, &bytes);
+    match out {
+        Some(path) => {
+            std::fs::write(path, &signature)
+                .with_context(|| format!("writing {}", path.display()))?;
+            println!("✍️  Wrote signature to {}", path.display());
+        }
+        None => println!("{signature}"),
+    }
+    Ok(())
+}
+
+fn verify(file: &Path, sig: &Path, extra: &[String]) -> anyhow::Result<()> {
+    let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+    let sig_hex =
+        std::fs::read_to_string(sig).with_context(|| format!("reading {}", sig.display()))?;
+    let publishers = gather_publishers(extra)?;
+    if publishers.is_empty() {
+        anyhow::bail!(
+            "no trusted publishers — add one under [rules].publishers or pass --publisher <hex>"
+        );
+    }
+    match signing::verify_hex(&bytes, &sig_hex, &publishers) {
+        Some(name) => {
+            println!("✅ Signature verifies — signed by trusted publisher '{name}'.");
+            Ok(())
+        }
+        None => anyhow::bail!("signature does NOT verify against any trusted publisher"),
+    }
+}
+
+fn fetch(url: &str, sig_url: Option<&str>, extra: &[String], yes: bool) -> anyhow::Result<()> {
+    let publishers = gather_publishers(extra)?;
+    if publishers.is_empty() {
+        anyhow::bail!(
+            "no trusted publishers — a remote pack can't be verified. Add one under \
+             [rules].publishers or pass --publisher <hex>."
+        );
+    }
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("building HTTP client")?;
+    let pack_bytes = client
+        .get(url)
+        .send()
+        .and_then(|r| r.error_for_status())
+        .with_context(|| format!("fetching pack from {url}"))?
+        .bytes()
+        .context("reading pack body")?
+        .to_vec();
+    let sig_location = sig_url
+        .map(String::from)
+        .unwrap_or_else(|| format!("{url}.sig"));
+    let sig_hex = client
+        .get(&sig_location)
+        .send()
+        .and_then(|r| r.error_for_status())
+        .with_context(|| format!("fetching signature from {sig_location}"))?
+        .text()
+        .context("reading signature")?;
+
+    // Verify BEFORE parsing or trusting anything from the pack.
+    let signer = signing::verify_hex(&pack_bytes, &sig_hex, &publishers).ok_or_else(|| {
+        anyhow::anyhow!(
+            "signature does NOT verify against any trusted publisher — refusing to install"
+        )
+    })?;
+
+    let content = String::from_utf8(pack_bytes).context("pack is not valid UTF-8")?;
+    let pack = packs::RulePack::parse(&content)
+        .context("fetched file did not parse as a valid rule pack")?;
+    let hash = packs::content_hash(content.as_bytes());
+
+    println!(
+        "📥 Fetched '{}' v{} — signature verified (publisher '{}').",
+        pack.id, pack.version, signer
+    );
+    print_add_summary(&pack, None, &hash);
+
+    if !yes && !prompt_yes()? {
+        println!("Aborted — '{}' not installed.", pack.id);
+        return Ok(());
+    }
+
+    let dir = storage::data_dir()
+        .context("locating data dir")?
+        .join("rules");
+    std::fs::create_dir_all(&dir).context("creating rules dir")?;
+    let dest = dir.join(format!("{}.toml", pack.id));
+    std::fs::write(&dest, content.as_bytes()).context("installing pack file")?;
+    let store = Storage::open_default().context("opening storage")?;
+    store.approve_rule_pack(&pack.id, &dest.to_string_lossy(), &hash)?;
+    println!(
+        "✅ Installed '{}' (publisher '{}'). It applies on the next `burnwall start`.",
+        pack.id, signer
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_key_perms(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(path)?.permissions();
+    perms.set_mode(0o600);
+    std::fs::set_permissions(path, perms)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_key_perms(_path: &Path) -> anyhow::Result<()> {
+    Ok(())
 }
