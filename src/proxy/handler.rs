@@ -11,7 +11,7 @@ use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 use tracing::warn;
 
-use crate::budget::{BudgetStatus, LoopVerdict};
+use crate::budget::BudgetStatus;
 use crate::storage::{RequestRecord, SecurityEvent};
 
 use super::{cache_injection, forwarding, streaming, AppState, ProxyBody};
@@ -163,6 +163,25 @@ pub async fn handle(
             StatusCode::TOO_MANY_REQUESTS,
             "loop_detected",
             &verdict.message(),
+        ));
+    }
+
+    // ─── cost-spiral enforcement (opt-in) ───
+    // `record_cost` (response path) feeds the rolling window and warns when it
+    // trips. Blocking the *next* request only happens when the user opted in
+    // via `loop_detection.cost_spiral_enforce`; otherwise this is a no-op.
+    let spiral = state.loop_detector.check_cost_spiral();
+    if spiral.is_blocking() {
+        warn!("💸 COST SPIRAL BLOCKED {}: {}", provider, spiral.message());
+        let mut record = RequestRecord::blocked(provider, &model, &spiral.message(), None);
+        record.request_hash = Some(request_hash_hex.clone());
+        if let Err(e) = state.storage.insert_request(&record) {
+            tracing::error!("blocked-request insert failed: {}", e);
+        }
+        return Ok(error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "cost_spiral",
+            &spiral.message(),
         ));
     }
 

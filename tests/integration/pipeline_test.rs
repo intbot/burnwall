@@ -431,6 +431,7 @@ async fn loop_detection_blocks_after_threshold_identical_requests() {
             max_identical_requests: 3,
             window_seconds: 60,
             max_cost_per_window: 0.0, // disable cost-spiral for this test
+            cost_spiral_enforce: false,
             hash_prefix_bytes: 200,
         },
     ));
@@ -594,6 +595,7 @@ async fn distinct_requests_dont_trip_loop_detector() {
                 max_identical_requests: 3,
                 window_seconds: 60,
                 max_cost_per_window: 0.0,
+                cost_spiral_enforce: false,
                 hash_prefix_bytes: 200,
             },
         )),

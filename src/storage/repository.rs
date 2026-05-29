@@ -365,18 +365,7 @@ impl Storage {
                  ORDER BY cost DESC",
             )?;
             let rows: rusqlite::Result<Vec<ModelBreakdown>> = stmt
-                .query_map(params![date], |row| {
-                    Ok(ModelBreakdown {
-                        provider: row.get(0)?,
-                        model: row.get(1)?,
-                        cost: row.get(2)?,
-                        requests: row.get(3)?,
-                        input_tokens: row.get::<_, i64>(4)? as u64,
-                        cache_creation_tokens: row.get::<_, i64>(5)? as u64,
-                        cache_read_tokens: row.get::<_, i64>(6)? as u64,
-                        output_tokens: row.get::<_, i64>(7)? as u64,
-                    })
-                })?
+                .query_map(params![date], row_to_model_breakdown)?
                 .collect();
             Ok(rows?)
         })
@@ -417,18 +406,7 @@ impl Storage {
                  ORDER BY cost DESC",
             )?;
             let rows: rusqlite::Result<Vec<ModelBreakdown>> = stmt
-                .query_map(params![offset], |row| {
-                    Ok(ModelBreakdown {
-                        provider: row.get(0)?,
-                        model: row.get(1)?,
-                        cost: row.get(2)?,
-                        requests: row.get(3)?,
-                        input_tokens: row.get::<_, i64>(4)? as u64,
-                        cache_creation_tokens: row.get::<_, i64>(5)? as u64,
-                        cache_read_tokens: row.get::<_, i64>(6)? as u64,
-                        output_tokens: row.get::<_, i64>(7)? as u64,
-                    })
-                })?
+                .query_map(params![offset], row_to_model_breakdown)?
                 .collect();
             Ok(rows?)
         })
@@ -438,6 +416,7 @@ impl Storage {
     /// for forwarded (non-blocked) requests that recorded a latency. Drives
     /// `burnwall metrics`. Blocked rows are excluded — they never reached an
     /// upstream, so they carry no latency/status.
+    #[cfg(feature = "observe")]
     pub fn latency_samples_since_days(
         &self,
         days: i64,
@@ -515,16 +494,7 @@ impl Storage {
                  ORDER BY timestamp DESC",
             )?;
             let rows: rusqlite::Result<Vec<SecurityEvent>> = stmt
-                .query_map(params![offset], |row| {
-                    Ok(SecurityEvent {
-                        id: Some(row.get(0)?),
-                        timestamp: row.get::<_, DateTime<Utc>>(1)?,
-                        event_type: row.get(2)?,
-                        details: row.get(3)?,
-                        provider: row.get(4)?,
-                        model: row.get(5)?,
-                    })
-                })?
+                .query_map(params![offset], row_to_security_event)?
                 .collect();
             Ok(rows?)
         })
@@ -595,16 +565,7 @@ impl Storage {
                  ORDER BY timestamp DESC",
             )?;
             let rows: rusqlite::Result<Vec<McpEvent>> = stmt
-                .query_map(params![offset], |row| {
-                    Ok(McpEvent {
-                        id: Some(row.get(0)?),
-                        timestamp: row.get::<_, DateTime<Utc>>(1)?,
-                        tool_name: row.get(2)?,
-                        rpc_id: row.get(3)?,
-                        upstream_status: row.get(4)?,
-                        upstream_uri: row.get(5)?,
-                    })
-                })?
+                .query_map(params![offset], row_to_mcp_event)?
                 .collect();
             Ok(rows?)
         })
@@ -620,16 +581,7 @@ impl Storage {
                  ORDER BY timestamp DESC",
             )?;
             let rows: rusqlite::Result<Vec<McpEvent>> = stmt
-                .query_map(params![date], |row| {
-                    Ok(McpEvent {
-                        id: Some(row.get(0)?),
-                        timestamp: row.get::<_, DateTime<Utc>>(1)?,
-                        tool_name: row.get(2)?,
-                        rpc_id: row.get(3)?,
-                        upstream_status: row.get(4)?,
-                        upstream_uri: row.get(5)?,
-                    })
-                })?
+                .query_map(params![date], row_to_mcp_event)?
                 .collect();
             Ok(rows?)
         })
@@ -784,23 +736,14 @@ impl Storage {
                  ORDER BY timestamp ASC",
             )?;
             let rows: rusqlite::Result<Vec<SecurityEvent>> = stmt
-                .query_map(params![date], |row| {
-                    Ok(SecurityEvent {
-                        id: Some(row.get(0)?),
-                        timestamp: row.get::<_, DateTime<Utc>>(1)?,
-                        event_type: row.get(2)?,
-                        details: row.get(3)?,
-                        provider: row.get(4)?,
-                        model: row.get(5)?,
-                    })
-                })?
+                .query_map(params![date], row_to_security_event)?
                 .collect();
             Ok(rows?)
         })
     }
 }
 
-fn row_to_security_event(row: &rusqlite::Row) -> rusqlite::Result<SecurityEvent> {
+fn row_to_security_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<SecurityEvent> {
     Ok(SecurityEvent {
         id: Some(row.get(0)?),
         timestamp: row.get::<_, DateTime<Utc>>(1)?,
@@ -811,7 +754,7 @@ fn row_to_security_event(row: &rusqlite::Row) -> rusqlite::Result<SecurityEvent>
     })
 }
 
-fn row_to_receipt(row: &rusqlite::Row) -> rusqlite::Result<ReceiptRow> {
+fn row_to_receipt(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReceiptRow> {
     Ok(ReceiptRow {
         seq: row.get(0)?,
         sealed_at: row.get(1)?,
@@ -829,7 +772,7 @@ fn row_to_receipt(row: &rusqlite::Row) -> rusqlite::Result<ReceiptRow> {
     })
 }
 
-fn row_to_request(row: &rusqlite::Row) -> rusqlite::Result<RequestRecord> {
+fn row_to_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<RequestRecord> {
     Ok(RequestRecord {
         id: Some(row.get(0)?),
         timestamp: row.get::<_, DateTime<Utc>>(1)?,
@@ -846,5 +789,32 @@ fn row_to_request(row: &rusqlite::Row) -> rusqlite::Result<RequestRecord> {
         request_hash: row.get(12)?,
         latency_ms: row.get(13)?,
         http_status: row.get(14)?,
+    })
+}
+
+/// Column order: `id, timestamp, tool_name, rpc_id, upstream_status, upstream_uri`.
+fn row_to_mcp_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<McpEvent> {
+    Ok(McpEvent {
+        id: Some(row.get(0)?),
+        timestamp: row.get::<_, DateTime<Utc>>(1)?,
+        tool_name: row.get(2)?,
+        rpc_id: row.get(3)?,
+        upstream_status: row.get(4)?,
+        upstream_uri: row.get(5)?,
+    })
+}
+
+/// Column order: `provider, model, cost, requests, input_tokens,
+/// cache_creation_tokens, cache_read_tokens, output_tokens`.
+fn row_to_model_breakdown(row: &rusqlite::Row<'_>) -> rusqlite::Result<ModelBreakdown> {
+    Ok(ModelBreakdown {
+        provider: row.get(0)?,
+        model: row.get(1)?,
+        cost: row.get(2)?,
+        requests: row.get(3)?,
+        input_tokens: row.get::<_, i64>(4)? as u64,
+        cache_creation_tokens: row.get::<_, i64>(5)? as u64,
+        cache_read_tokens: row.get::<_, i64>(6)? as u64,
+        output_tokens: row.get::<_, i64>(7)? as u64,
     })
 }

@@ -53,12 +53,14 @@ struct EnvGuard {
 }
 impl Drop for EnvGuard {
     fn drop(&mut self) {
-        std::env::remove_var(self.key);
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var(self.key) };
     }
 }
 fn set_log_dir(key: &'static str, dir: &Path) -> EnvGuard {
     let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    std::env::set_var(key, dir);
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var(key, dir) };
     EnvGuard { key, _lock: lock }
 }
 

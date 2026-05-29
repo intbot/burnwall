@@ -77,6 +77,8 @@ src/
     handler.rs             — Request/response handler pipeline
     forwarding.rs          — Forward requests to upstream providers
     streaming.rs           — SSE/streaming response handling
+    cache_injection.rs     — Optional Anthropic cache_control rewrite + savings projection
+    resilience.rs          — Same-model endpoint failover + circuit breaking
   providers/
     mod.rs                 — Provider trait and registry
     anthropic.rs           — Anthropic Messages API parser
@@ -105,6 +107,7 @@ src/
   config/
     mod.rs                 — TOML config loading and defaults
     types.rs               — Config struct definitions
+    project.rs             — Per-project .burnwall.yaml profile discovery + merge
   cli/
     mod.rs                 — CLI command definitions
     start.rs               — `burnwall start` command
@@ -113,12 +116,17 @@ src/
     history.rs             — `burnwall history` command
     config_cmd.rs          — `burnwall config` command (incl. `config doctor`)
     init.rs                — `burnwall init` (auto-detect + setup)
+    daemon.rs              — Background spawn + liveness/PID-file (used by `start --daemon`/`stop`)
+    security.rs            — `burnwall security` (rule inspection / scan testing)
+    completions.rs         — `burnwall completions` (shell completion scripts)
     mcp.rs / mcp_watch.rs  — `burnwall mcp*` (approvals, audit export, watcher)
     waste.rs / explore.rs / metrics.rs / digest.rs — insight + observability cmds
+    cost_per_pr.rs         — `burnwall cost-per-pr` (git-attributed spend)
     rules.rs               — `burnwall rules` (install/add/test/sign/verify/fetch)
     audit.rs / report.rs   — `burnwall audit` (seal/verify/aibom/sarif) + `report`
   observe/                 — Local, metadata-only observability
     metrics.rs / otel.rs / digest.rs — latency p50/p95, OTel span sink, AIBOM digest
+    attribution.rs         — git branch/commit cost attribution
   mcp/                     — MCP firewall + multi-server watcher
     mod.rs / firewall.rs   — routing, tool-poisoning + rug-pull detection
   audit/                   — Cryptographic audit + compliance exports

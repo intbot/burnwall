@@ -79,7 +79,9 @@ where
                 client_alive = false;
             }
         }
-        on_complete(collected);
+        // Run the usage parse + storage writes on the blocking pool so the
+        // synchronous SQLite I/O never stalls an async worker thread.
+        let _ = tokio::task::spawn_blocking(move || on_complete(collected)).await;
     });
     ChannelStream(rx)
 }

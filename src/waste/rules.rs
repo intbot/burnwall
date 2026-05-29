@@ -83,7 +83,7 @@ impl WasteRule for CacheHitStarvation {
         "cache-hit-starvation"
     }
 
-    fn evaluate(&self, ctx: &WasteContext) -> Option<Finding> {
+    fn evaluate(&self, ctx: &WasteContext<'_>) -> Option<Finding> {
         let mut count = 0usize;
         let mut total_prompt = 0u64;
         let mut total_cache_read = 0u64;
@@ -160,7 +160,7 @@ impl WasteRule for ModelOverreliance {
         "model-overreliance"
     }
 
-    fn evaluate(&self, ctx: &WasteContext) -> Option<Finding> {
+    fn evaluate(&self, ctx: &WasteContext<'_>) -> Option<Finding> {
         let mut count = 0usize;
         let mut waste_usd = 0.0f64;
 
@@ -236,7 +236,7 @@ impl WasteRule for ReasoningEffortOveruse {
         "reasoning-effort-overuse"
     }
 
-    fn evaluate(&self, ctx: &WasteContext) -> Option<Finding> {
+    fn evaluate(&self, ctx: &WasteContext<'_>) -> Option<Finding> {
         let mut count = 0usize;
         let mut waste_usd = 0.0f64;
 
@@ -304,7 +304,7 @@ impl WasteRule for ContextWindowSaturation {
         "context-window-saturation"
     }
 
-    fn evaluate(&self, ctx: &WasteContext) -> Option<Finding> {
+    fn evaluate(&self, ctx: &WasteContext<'_>) -> Option<Finding> {
         let mut count = 0usize;
         let mut waste_usd = 0.0f64;
 
@@ -370,7 +370,7 @@ impl WasteRule for RunawayContextGrowth {
         "runaway-context-growth"
     }
 
-    fn evaluate(&self, ctx: &WasteContext) -> Option<Finding> {
+    fn evaluate(&self, ctx: &WasteContext<'_>) -> Option<Finding> {
         let mut flagged = 0usize;
         let mut waste_usd = 0.0f64;
 
@@ -444,7 +444,7 @@ impl WasteRule for MegaSessions {
         "mega-sessions"
     }
 
-    fn evaluate(&self, ctx: &WasteContext) -> Option<Finding> {
+    fn evaluate(&self, ctx: &WasteContext<'_>) -> Option<Finding> {
         let count = sessions(ctx)
             .into_iter()
             .filter(|s| {

@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
-use http_body_util::BodyExt as _;
 use hyper::http::{HeaderMap, HeaderName, HeaderValue, Method};
 use hyper::Response;
 use tracing::{debug, error, warn};
@@ -143,6 +142,7 @@ pub async fn forward(
     let storage = state.storage.clone();
     let budget = state.budget.clone();
     let loop_detector = state.loop_detector.clone();
+    #[cfg(feature = "observe")]
     let otel = state.otel.clone();
     let provider_str = provider.to_string();
     let hash_hex = request_hash_hex;
@@ -165,7 +165,15 @@ pub async fn forward(
                     error!("requests insert failed: {}", e);
                 }
                 budget.record(cost);
-                let _ = loop_detector.record_cost(cost);
+                // Feed the cost-spiral window. The verdict is observable (not
+                // silently dropped): a tripped spiral is logged so it surfaces
+                // in the proxy log. (Turning this into active request-blocking
+                // is a deliberate product decision — see review notes.)
+                let spiral = loop_detector.record_cost(cost);
+                if spiral.is_blocking() {
+                    warn!("💸 {}", spiral.message());
+                }
+                #[cfg(feature = "observe")]
                 if let Some(w) = &otel {
                     w.record(
                         &provider_str,

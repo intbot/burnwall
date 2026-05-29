@@ -162,6 +162,11 @@ fn child_args(args: &StartArgs) -> Vec<String> {
     out.push(args.upstream_anthropic.clone());
     out.push("--upstream-openai".to_string());
     out.push(args.upstream_openai.clone());
+    out.push("--upstream-google".to_string());
+    out.push(args.upstream_google.clone());
+    if args.rewrite_anthropic_cache {
+        out.push("--rewrite-anthropic-cache".to_string());
+    }
     out
 }
 

@@ -54,6 +54,7 @@ pub struct AppState {
     pub resilience: Arc<Resilience>,
     /// OTel GenAI span sink (v0.7). `None` when `[observability].otel_spans`
     /// is off (the default).
+    #[cfg(feature = "observe")]
     pub otel: Option<Arc<crate::observe::otel::SpanWriter>>,
 }
 
@@ -74,6 +75,7 @@ impl AppState {
             storage: Arc::new(Storage::open_in_memory().expect("in-memory storage cannot fail")),
             cache_injection: false,
             resilience: Arc::new(Resilience::default()),
+            #[cfg(feature = "observe")]
             otel: None,
         }
     }

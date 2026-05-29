@@ -33,6 +33,11 @@ pub struct LoopConfig {
     pub window_seconds: u32,
     /// USD cap per rolling window. `0.0` disables cost-spiral detection.
     pub max_cost_per_window: f64,
+    /// When `true`, a tripped cost-spiral window blocks the next request
+    /// (HTTP 429). When `false` (default) the spiral is still detected and
+    /// logged by `record_cost`, but not enforced — blocking is opt-in so a
+    /// normal burst of spend does not start 429-ing a working session.
+    pub cost_spiral_enforce: bool,
     /// Bytes of request body to hash for the dedup signature.
     pub hash_prefix_bytes: usize,
 }
@@ -44,6 +49,7 @@ impl Default for LoopConfig {
             max_identical_requests: 5,
             window_seconds: 300,
             max_cost_per_window: 2.0,
+            cost_spiral_enforce: false,
             hash_prefix_bytes: 200,
         }
     }
@@ -200,6 +206,29 @@ impl LoopDetector {
         LoopVerdict::Ok
     }
 
+    /// Pre-forward, read-only cost-spiral check. Returns `CostSpiral` only when
+    /// enforcement is enabled *and* the rolling window already exceeds the cap,
+    /// so a burst of expensive responses blocks the *next* request. Off by
+    /// default (`cost_spiral_enforce = false`): the window is still tracked and
+    /// `record_cost` warns, but nothing is blocked.
+    pub fn check_cost_spiral(&self) -> LoopVerdict {
+        if !self.config.enabled
+            || !self.config.cost_spiral_enforce
+            || self.config.max_cost_per_window <= 0.0
+        {
+            return LoopVerdict::Ok;
+        }
+        let total = self.current_window_cost();
+        if total > self.config.max_cost_per_window {
+            return LoopVerdict::CostSpiral {
+                spent_usd: total,
+                cap_usd: self.config.max_cost_per_window,
+                window_seconds: self.config.window_seconds,
+            };
+        }
+        LoopVerdict::Ok
+    }
+
     /// Returns the current rolling cost in the window — used by `status`
     /// to surface "approaching cost-spiral cap" warnings.
     pub fn current_window_cost(&self) -> f64 {
@@ -215,5 +244,44 @@ impl LoopDetector {
             .filter(|(t, _)| *t >= cutoff)
             .map(|(_, c)| c)
             .sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(enforce: bool, cap: f64) -> LoopConfig {
+        LoopConfig {
+            enabled: true,
+            max_identical_requests: 5,
+            window_seconds: 300,
+            max_cost_per_window: cap,
+            cost_spiral_enforce: enforce,
+            hash_prefix_bytes: 200,
+        }
+    }
+
+    #[test]
+    fn cost_spiral_not_enforced_by_default() {
+        let det = LoopDetector::new(cfg(false, 2.0));
+        det.record_cost(5.0); // well over the cap
+        assert_eq!(det.check_cost_spiral(), LoopVerdict::Ok);
+    }
+
+    #[test]
+    fn cost_spiral_blocks_next_request_when_enforced() {
+        let det = LoopDetector::new(cfg(true, 2.0));
+        det.record_cost(1.5);
+        assert_eq!(det.check_cost_spiral(), LoopVerdict::Ok); // under cap
+        det.record_cost(1.0); // now $2.50 > $2.00
+        assert!(det.check_cost_spiral().is_blocking());
+    }
+
+    #[test]
+    fn cost_spiral_ok_when_under_cap_even_if_enforced() {
+        let det = LoopDetector::new(cfg(true, 100.0));
+        det.record_cost(3.0);
+        assert_eq!(det.check_cost_spiral(), LoopVerdict::Ok);
     }
 }

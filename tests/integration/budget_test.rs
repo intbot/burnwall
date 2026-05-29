@@ -251,6 +251,7 @@ fn loop_cfg(max_identical: u32, window: u32, max_cost: f64) -> LoopConfig {
         max_identical_requests: max_identical,
         window_seconds: window,
         max_cost_per_window: max_cost,
+        cost_spiral_enforce: false,
         hash_prefix_bytes: 200,
     }
 }

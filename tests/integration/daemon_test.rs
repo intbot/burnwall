@@ -23,9 +23,11 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 fn with_data_dir<T>(f: impl FnOnce(&Path) -> T) -> T {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
-    std::env::set_var("BURNWALL_DATA_DIR", dir.path());
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("BURNWALL_DATA_DIR", dir.path()) };
     let result = f(dir.path());
-    std::env::remove_var("BURNWALL_DATA_DIR");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("BURNWALL_DATA_DIR") };
     result
 }
 

@@ -129,6 +129,7 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
     // OTel GenAI spans: opt-in, file-only (no network). Default path lives
     // under the data dir. A failure to open the file is non-fatal — we warn
     // and run without span emission rather than refusing to start.
+    #[cfg(feature = "observe")]
     let otel = if user_config.observability.otel_spans {
         let path = if user_config.observability.otel_file.trim().is_empty() {
             crate::storage::data_dir()
@@ -159,6 +160,7 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
         &user_config.rules.enabled,
         cache_injection,
         &resilience,
+        #[cfg(feature = "observe")]
         otel.as_deref(),
     );
 
@@ -173,6 +175,7 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
         storage,
         cache_injection,
         resilience,
+        #[cfg(feature = "observe")]
         otel,
     };
 
@@ -255,7 +258,7 @@ fn print_banner(
     rule_packs: &[String],
     cache_injection: bool,
     resilience: &Arc<crate::proxy::resilience::Resilience>,
-    otel: Option<&crate::observe::otel::SpanWriter>,
+    #[cfg(feature = "observe")] otel: Option<&crate::observe::otel::SpanWriter>,
 ) {
     let _ = storage;
     println!("🛡️  Burnwall v{}", env!("CARGO_PKG_VERSION"));
@@ -308,6 +311,7 @@ fn print_banner(
     if resilience.enabled {
         println!("   Resilience: endpoint failover ON (circuit breaker active)");
     }
+    #[cfg(feature = "observe")]
     if let Some(w) = otel {
         println!("   OTel:     GenAI spans → {}", w.path().display());
     }

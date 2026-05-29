@@ -190,6 +190,7 @@ impl Storage {
     /// Open a database at the given path, running migrations.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let conn = Connection::open(path)?;
+        configure(&conn)?;
         migrate(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -199,6 +200,7 @@ impl Storage {
     /// Open a fresh in-memory database — used by tests.
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
+        configure(&conn)?;
         migrate(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -207,10 +209,27 @@ impl Storage {
 
     /// Run a closure with a locked connection. Crate-internal helper for
     /// [`repository`].
+    ///
+    /// Recovers a poisoned lock instead of cascading the panic: a closure that
+    /// panicked may have aborted mid-statement, but SQLite rolls back an
+    /// incomplete statement/transaction when it drops, so the connection stays
+    /// usable for the next caller — one bad query must not wedge all storage.
     pub(crate) fn with_conn<R>(&self, f: impl FnOnce(&Connection) -> Result<R>) -> Result<R> {
-        let conn = self.conn.lock().expect("storage mutex poisoned");
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         f(&conn)
     }
+}
+
+/// Connection-level pragmas applied on every open. WAL lets readers run
+/// concurrently with the single writer; `busy_timeout` makes a contended
+/// write wait-and-retry instead of failing immediately with `SQLITE_BUSY`.
+/// Both are harmless on an in-memory database (journal mode stays `memory`).
+fn configure(conn: &Connection) -> Result<()> {
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
+    Ok(())
 }
 
 fn migrate(conn: &Connection) -> Result<()> {

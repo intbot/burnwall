@@ -32,7 +32,7 @@
 
 use std::path::PathBuf;
 
-use chrono::{DateTime, Utc};
+use chrono::DateTime;
 use serde_json::Value;
 
 use super::UsageEntry;

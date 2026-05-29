@@ -88,35 +88,98 @@ pub const NETWORK_MOUNT_NEEDLES: &[&str] = &[
 
 /// Does `value` reference a denied path?
 ///
-/// For rules starting with `~/`, we strip the `~` and match the form
-/// `/<rest>` (Unix-style) or `\<rest-with-backslashes>` (Windows). This
-/// catches both literal (`~/.ssh/id_rsa`) and expanded
-/// (`/Users/anyone/.ssh/id_rsa`, `C:\Users\anyone\.ssh\config`) forms.
+/// Matching is case-insensitive and separator-agnostic: Windows and the
+/// default macOS filesystem are case-insensitive, and Windows tools emit
+/// mixed `\`/`/` separators, so `~/.SSH/id_rsa` and `C:\Users\me/.aws\creds`
+/// must still trip the `~/.ssh` / `~/.aws` rules. We fold the value to
+/// lowercase and unify separators to `/` before matching.
 ///
-/// For absolute rules (`/etc/passwd`), plain substring match.
+/// For rules starting with `~/`, we match the normalized form `/<rest>` or
+/// `~/<rest>`, catching both literal (`~/.ssh/id_rsa`) and expanded
+/// (`/Users/anyone/.ssh/id_rsa`, `C:\Users\anyone\.ssh\config`) forms. For
+/// absolute rules (`/etc/passwd`), plain substring match on the normalized
+/// value.
 pub fn path_matches(value: &str, rule: &str) -> bool {
+    let hay = normalize_path(value);
     if let Some(rest) = rule.strip_prefix("~/") {
-        let unix_needle = format!("/{}", rest);
-        let tilde_needle = format!("~/{}", rest);
-        if value.contains(&unix_needle) || value.contains(&tilde_needle) {
-            return true;
-        }
-        let win_needle = format!("\\{}", rest.replace('/', "\\"));
-        if value.contains(&win_needle) {
-            return true;
-        }
-        false
+        let rest = normalize_path(rest);
+        hay.contains(&format!("/{rest}")) || hay.contains(&format!("~/{rest}"))
     } else {
-        value.contains(rule)
+        hay.contains(&normalize_path(rule))
     }
 }
 
 pub fn command_matches(value: &str, rule: &str) -> bool {
-    value.contains(rule)
+    // Case-insensitive: a dangerous command literal must not be evadable by
+    // varying case (e.g. `CHMOD 777`). These rules are specific enough that
+    // case-folding does not add meaningful false positives.
+    value.to_ascii_lowercase().contains(&rule.to_ascii_lowercase())
 }
 
 pub fn mount_matches(value: &str) -> bool {
+    // Case-fold only — do NOT unify separators here, or the UNC `\\` needle
+    // would collide with `//` in ordinary URLs (e.g. `https://...`).
+    let hay = value.to_ascii_lowercase();
     NETWORK_MOUNT_NEEDLES
         .iter()
-        .any(|needle| value.contains(needle))
+        .any(|needle| hay.contains(&needle.to_ascii_lowercase()))
+}
+
+/// Lowercase and unify path separators (`\` → `/`) for case- and
+/// separator-insensitive path matching. ASCII case-folding is sufficient for
+/// the filesystem paths we match and avoids Unicode-casing surprises.
+fn normalize_path(s: &str) -> String {
+    s.replace('\\', "/").to_ascii_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_matches_is_case_insensitive() {
+        // Headline bypass: case variation on a case-insensitive filesystem.
+        assert!(path_matches("/Users/dev/.SSH/id_rsa", "~/.ssh"));
+        assert!(path_matches("/home/dev/.Ssh/config", "~/.ssh"));
+        assert!(path_matches("C:\\Users\\Dev\\.AWS\\credentials", "~/.aws"));
+        assert!(path_matches("/ETC/PASSWD", "/etc/passwd"));
+    }
+
+    #[test]
+    fn path_matches_handles_mixed_separators() {
+        // Windows tools (Git Bash / WSL / agents) emit mixed separators.
+        assert!(path_matches("C:\\Users\\me/.aws/credentials", "~/.aws"));
+        assert!(path_matches("C:\\Users\\me\\.config/gcloud\\creds", "~/.config/gcloud"));
+        assert!(path_matches("\\\\.ssh\\id_rsa", "~/.ssh"));
+    }
+
+    #[test]
+    fn path_matches_still_matches_canonical_forms() {
+        assert!(path_matches("~/.ssh/id_rsa", "~/.ssh"));
+        assert!(path_matches("/Users/anyone/.ssh/id_rsa", "~/.ssh"));
+        assert!(path_matches("C:\\Users\\anyone\\.ssh\\config", "~/.ssh"));
+    }
+
+    #[test]
+    fn path_matches_rejects_unrelated() {
+        assert!(!path_matches("/Users/dev/projects/notes.txt", "~/.ssh"));
+        assert!(!path_matches("/var/log/system.log", "/etc/passwd"));
+    }
+
+    #[test]
+    fn command_matches_is_case_insensitive() {
+        assert!(command_matches("CHMOD 777 /tmp/x", "chmod 777"));
+        assert!(command_matches("sudo RM -RF /", "rm -rf /"));
+        assert!(command_matches("rm -rf /", "rm -rf /"));
+        assert!(!command_matches("rm -rf /tmp/safe", "rm -rf ~"));
+    }
+
+    #[test]
+    fn mount_matches_case_insensitive_without_url_false_positive() {
+        assert!(mount_matches("/VOLUMES/backup/secrets"));
+        assert!(mount_matches("\\\\server\\share"));
+        assert!(mount_matches("SMB://host/share"));
+        // A plain https URL must not be flagged as a UNC mount.
+        assert!(!mount_matches("https://api.anthropic.com/v1/messages"));
+    }
 }

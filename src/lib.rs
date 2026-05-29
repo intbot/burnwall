@@ -6,18 +6,21 @@
 //!
 //! See `CLAUDE.md` and `docs/` for the full project specification.
 
-#![allow(unused)]
-
+#[cfg(feature = "audit")]
 pub mod audit;
 pub mod budget;
 pub mod cli;
 pub mod config;
+#[cfg(feature = "logscrape")]
 pub mod logscrape;
+#[cfg(feature = "mcp")]
 pub mod mcp;
+#[cfg(feature = "observe")]
 pub mod observe;
 pub mod pricing;
 pub mod providers;
 pub mod proxy;
 pub mod security;
 pub mod storage;
+#[cfg(feature = "waste")]
 pub mod waste;

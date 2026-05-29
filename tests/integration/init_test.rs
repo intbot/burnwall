@@ -187,9 +187,11 @@ fn start_command_picks_up_budget_from_config_file() {
 
     // Direct check via the config module that the runtime conversion picks
     // up the new value (this is what start.rs does internally).
-    std::env::set_var("BURNWALL_DATA_DIR", &path);
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("BURNWALL_DATA_DIR", &path) };
     let cfg = burnwall::config::load_or_default(burnwall::config::default_path().unwrap()).unwrap();
     let runtime: burnwall::budget::BudgetConfig = (&cfg.budget).into();
     assert!((runtime.daily_usd - 7.5).abs() < 1e-9);
-    std::env::remove_var("BURNWALL_DATA_DIR");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("BURNWALL_DATA_DIR") };
 }

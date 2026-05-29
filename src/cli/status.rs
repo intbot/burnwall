@@ -10,11 +10,11 @@ use clap::Args;
 
 use crate::budget::BudgetTracker;
 use crate::config;
+#[cfg(feature = "logscrape")]
 use crate::logscrape::{self, ScrapeBreakdown};
 use crate::pricing;
 use crate::providers::TokenUsage;
 use crate::storage::{ModelBreakdown, Storage};
-use crate::waste;
 
 #[derive(Args, Debug)]
 pub struct StatusArgs {
@@ -46,29 +46,14 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
     let cost_without_cache_total: f64 = breakdown.iter().map(model_cost_without_cache).sum();
 
     // Tier-2: scrape local tool session logs for cross-tool spend that did
-    // not go through the proxy. `None` when disabled; `Some([])` when
-    // enabled but no Claude Code / Codex activity today. We collect once and
-    // reuse the entries for both today's aggregate and the waste teaser.
-    let (log_scrape, waste_per_day) = if config.any_scrape_enabled() {
-        let all = logscrape::collect_selected(config.scrape_tools());
-        let today_rows = logscrape::aggregate(all.clone(), &today);
-        // Advisory teaser: average avoidable spend/day over the last 7 days.
-        // Suppressed when the waste engine is disabled.
-        let per_day = if config.waste.enabled {
-            let cutoff = (now_local - chrono::Duration::days(6)).date_naive();
-            let recent: Vec<_> = all
-                .into_iter()
-                .filter(|e| e.timestamp.with_timezone(&chrono::Local).date_naive() >= cutoff)
-                .collect();
-            let findings = waste::analyze(&recent);
-            waste::capped_waste_usd(&findings, &recent) / 7.0
-        } else {
-            0.0
-        };
-        (Some(today_rows), per_day)
-    } else {
-        (None, 0.0)
-    };
+    // not go through the proxy (optional `logscrape` feature). `None` when
+    // disabled; `Some([])` when enabled but no activity today. The 7-day
+    // avoidable-spend teaser is additionally gated behind the `waste` feature.
+    // When both are compiled out, `status` shows only proxied numbers.
+    #[cfg(feature = "logscrape")]
+    let (log_scrape, waste_per_day) = collect_logscrape_and_waste(&config, now_local, &today);
+    #[cfg(not(feature = "logscrape"))]
+    let waste_per_day: f64 = 0.0;
 
     let budget = BudgetTracker::new((&config.budget).into());
     budget.hydrate_for_date(&storage, &today)?;
@@ -87,6 +72,7 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
             cache_savings_total,
             cost_without_cache_total,
             pricing_age,
+            #[cfg(feature = "logscrape")]
             log_scrape.as_deref(),
             projected_savings,
             mcp_events_today,
@@ -105,6 +91,7 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
             cache_savings_total,
             cost_without_cache_total,
             pricing_age,
+            #[cfg(feature = "logscrape")]
             log_scrape.as_deref(),
             projected_savings,
             mcp_events_today,
@@ -127,7 +114,7 @@ fn write_table(
     cache_savings: f64,
     cost_without_cache: f64,
     pricing_age_days: Option<i64>,
-    log_scrape: Option<&[ScrapeBreakdown]>,
+    #[cfg(feature = "logscrape")] log_scrape: Option<&[ScrapeBreakdown]>,
     projected_savings: f64,
     mcp_events: i64,
     waste_per_day: f64,
@@ -165,6 +152,7 @@ fn write_table(
     }
     writeln!(w)?;
 
+    #[cfg(feature = "logscrape")]
     if let Some(rows) = log_scrape {
         writeln!(w, "   Tracked via log files (not proxied)")?;
         if rows.is_empty() {
@@ -298,14 +286,40 @@ fn write_json(
     cache_savings: f64,
     cost_without_cache: f64,
     pricing_age_days: Option<i64>,
-    log_scrape: Option<&[ScrapeBreakdown]>,
+    #[cfg(feature = "logscrape")] log_scrape: Option<&[ScrapeBreakdown]>,
     projected_savings: f64,
     mcp_events: i64,
     waste_per_day: f64,
 ) -> std::io::Result<()> {
     use serde_json::json;
     let bcfg = budget.config();
-    let log_subtotal = log_scrape.map(logscrape::subtotal).unwrap_or(0.0);
+
+    // `log_scrape` JSON + subtotal — `null` / 0.0 when the feature is off or
+    // scraping is disabled; otherwise the per-tool/model rows plus subtotal.
+    #[cfg(feature = "logscrape")]
+    let (log_scrape_json, log_subtotal) = {
+        let subtotal = log_scrape.map(logscrape::subtotal).unwrap_or(0.0);
+        let rows_json = log_scrape.map(|rows| {
+            json!({
+                "rows": rows.iter().map(|r| json!({
+                    "tool": r.tool,
+                    "model": r.model,
+                    "cost_usd": r.cost,
+                    "turns": r.turns,
+                    "input_tokens": r.usage.input_tokens,
+                    "cache_creation_tokens": r.usage.cache_creation_tokens,
+                    "cache_read_tokens": r.usage.cache_read_tokens,
+                    "output_tokens": r.usage.output_tokens,
+                    "cache_hit_rate": r.cache_hit_rate(),
+                })).collect::<Vec<_>>(),
+                "subtotal_usd": logscrape::subtotal(rows),
+            })
+        });
+        (rows_json, subtotal)
+    };
+    #[cfg(not(feature = "logscrape"))]
+    let (log_scrape_json, log_subtotal) = (Option::<serde_json::Value>::None, 0.0_f64);
+
     let value = json!({
         "date": date,
         "total_cost_usd": today_cost,
@@ -334,22 +348,9 @@ fn write_json(
             "output_tokens": r.output_tokens,
             "cache_hit_rate": r.cache_hit_rate(),
         })).collect::<Vec<_>>(),
-        // `null` when log scraping is disabled; otherwise the per-tool/model
-        // rows plus their subtotal. Read-only — not part of the proxy DB.
-        "log_scrape": log_scrape.map(|rows| json!({
-            "rows": rows.iter().map(|r| json!({
-                "tool": r.tool,
-                "model": r.model,
-                "cost_usd": r.cost,
-                "turns": r.turns,
-                "input_tokens": r.usage.input_tokens,
-                "cache_creation_tokens": r.usage.cache_creation_tokens,
-                "cache_read_tokens": r.usage.cache_read_tokens,
-                "output_tokens": r.usage.output_tokens,
-                "cache_hit_rate": r.cache_hit_rate(),
-            })).collect::<Vec<_>>(),
-            "subtotal_usd": logscrape::subtotal(rows),
-        })),
+        // `null` when log scraping is disabled or compiled out; otherwise the
+        // per-tool/model rows plus their subtotal. Read-only — not the proxy DB.
+        "log_scrape": log_scrape_json,
         "combined_total_usd": today_cost + log_subtotal,
     });
     writeln!(w, "{}", serde_json::to_string_pretty(&value).unwrap())?;
@@ -387,4 +388,40 @@ fn truncate(s: &str, n: usize) -> String {
         out.push('…');
         out
     }
+}
+
+/// Collect today's cross-tool log-scrape rows plus the 7-day avoidable-spend
+/// teaser. Returns `(None, 0.0)` when scraping is disabled; the waste teaser is
+/// additionally gated behind the `waste` feature (returns 0.0 when compiled out).
+#[cfg(feature = "logscrape")]
+fn collect_logscrape_and_waste(
+    config: &config::Config,
+    now_local: chrono::DateTime<chrono::Local>,
+    today: &str,
+) -> (Option<Vec<ScrapeBreakdown>>, f64) {
+    if !config.any_scrape_enabled() {
+        return (None, 0.0);
+    }
+    let all = logscrape::collect_selected(config.scrape_tools());
+    let today_rows = logscrape::aggregate(all.clone(), today);
+
+    #[cfg(feature = "waste")]
+    let per_day = if config.waste.enabled {
+        let cutoff = (now_local - chrono::Duration::days(6)).date_naive();
+        let recent: Vec<_> = all
+            .into_iter()
+            .filter(|e| e.timestamp.with_timezone(&chrono::Local).date_naive() >= cutoff)
+            .collect();
+        let findings = crate::waste::analyze(&recent);
+        crate::waste::capped_waste_usd(&findings, &recent) / 7.0
+    } else {
+        0.0
+    };
+    #[cfg(not(feature = "waste"))]
+    let per_day = {
+        let _ = now_local; // only used by the waste teaser
+        0.0
+    };
+
+    (Some(today_rows), per_day)
 }

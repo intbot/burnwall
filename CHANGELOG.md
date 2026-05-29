@@ -2,6 +2,32 @@
 
 All notable changes to Burnwall.
 
+## [0.9.3] — 2026-05-29
+
+### Fixed
+
+- **Path/command security rules are now case- and separator-insensitive**, so an
+  access to `~/.SSH/id_rsa` — or a mixed `\`/`/` Windows path — can no longer slip
+  past a `~/.ssh` deny rule on case-insensitive filesystems (Windows, default macOS).
+- **`start --daemon`** now forwards the `--upstream-google` and
+  `--rewrite-anthropic-cache` flags to the background process instead of dropping them.
+
+### Added
+
+- **Opt-in cost-spiral enforcement** — set `[loop_detection].cost_spiral_enforce = true`
+  to block the next request once rolling spend exceeds `max_cost_per_window`. Off by
+  default; detection still logs a warning regardless.
+- **Optional build features** (`audit`, `mcp`, `observe`, `logscrape`, `waste`), all on
+  by default so the shipped binary is unchanged. `cargo build --no-default-features`
+  now produces a lean core-proxy build (cost + security + budget + storage).
+
+### Changed
+
+- **Migrated to the Rust 2024 edition** with a declared minimum supported Rust version,
+  and moved lint policy into `Cargo.toml`.
+- **SQLite hardening** — WAL journal mode and a busy-timeout, plus response-path writes
+  now run off the async runtime so the proxy never stalls on disk I/O.
+
 ## [0.9.2] — 2026-05-28
 
 ### Added

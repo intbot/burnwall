@@ -71,6 +71,7 @@ impl Config {
     }
 
     /// The per-tool selection in the shape `logscrape` consumes.
+    #[cfg(feature = "logscrape")]
     pub fn scrape_tools(&self) -> crate::logscrape::Tools {
         crate::logscrape::Tools {
             claude_code: self.scrape_claude_code(),
@@ -169,6 +170,11 @@ pub struct LoopDetectionConfig {
     pub max_identical_requests: u32,
     pub window_seconds: u32,
     pub max_cost_per_window: f64,
+    /// Actively block the next request once rolling spend exceeds
+    /// `max_cost_per_window`. Off by default — detection always logs a warning,
+    /// but enforcement is opt-in so a normal spend spike does not 429 the user.
+    #[serde(default)]
+    pub cost_spiral_enforce: bool,
 }
 
 impl Default for LoopDetectionConfig {
@@ -178,6 +184,7 @@ impl Default for LoopDetectionConfig {
             max_identical_requests: 5,
             window_seconds: 300,
             max_cost_per_window: 2.0,
+            cost_spiral_enforce: false,
         }
     }
 }
@@ -429,6 +436,7 @@ impl From<&LoopDetectionConfig> for crate::budget::LoopConfig {
             max_identical_requests: c.max_identical_requests,
             window_seconds: c.window_seconds,
             max_cost_per_window: c.max_cost_per_window,
+            cost_spiral_enforce: c.cost_spiral_enforce,
             hash_prefix_bytes: defaults.hash_prefix_bytes,
         }
     }
