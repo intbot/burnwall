@@ -37,6 +37,23 @@ fn save_then_load_roundtrips() {
 }
 
 #[test]
+fn pricing_publishers_parse_and_default_empty() {
+    // Empty by default — no remote pricing card is trusted out of the box.
+    assert!(Config::default().pricing.publishers.is_empty());
+
+    // A `[pricing]` section with publishers round-trips through TOML.
+    let toml = r#"
+[[pricing.publishers]]
+name = "burnwall"
+key = "aabbccdd"
+"#;
+    let cfg: Config = toml::from_str(toml).expect("parse pricing publishers");
+    assert_eq!(cfg.pricing.publishers.len(), 1);
+    assert_eq!(cfg.pricing.publishers[0].name, "burnwall");
+    assert_eq!(cfg.pricing.publishers[0].key, "aabbccdd");
+}
+
+#[test]
 fn save_creates_missing_directory() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nested").join("dir").join("config.toml");

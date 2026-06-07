@@ -12,8 +12,8 @@ pub mod types;
 
 pub use types::{
     BudgetConfig, Config, FailoverEndpoints, LogScrapeConfig, LoggingConfig, LoopDetectionConfig,
-    McpConfig, McpServerConfig, ObservabilityConfig, ProxyConfig, ResilienceConfig, RulesConfig,
-    SecurityConfig, ToolsConfig, WasteConfig,
+    McpConfig, McpServerConfig, ObservabilityConfig, PricingConfig, ProxyConfig, ResilienceConfig,
+    RulePublisher, RulesConfig, SecurityConfig, ToolsConfig, WasteConfig,
 };
 
 #[derive(Debug, thiserror::Error)]

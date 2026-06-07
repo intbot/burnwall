@@ -7,11 +7,14 @@
 //! body is tee'd into a background parser so cost tracking works for both
 //! streaming and non-streaming responses.
 
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
+use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder;
 use tokio::net::TcpListener;
@@ -90,6 +93,39 @@ impl AppState {
     }
 }
 
+/// Spawn the real handler as a task and convert a panic into a 502 instead
+/// of dropping the connection.
+///
+/// `tokio::spawn` catches panics in the spawned future and reports them via
+/// `JoinError::is_panic()` — but the future must be `Send + 'static`, which
+/// `handler::handle` already is. The wrapper returns `Result<…, Infallible>`
+/// to match the original signature so the caller is unchanged.
+async fn handle_with_panic_catch(
+    req: Request<Incoming>,
+    state: Arc<AppState>,
+) -> Result<Response<ProxyBody>, Infallible> {
+    let join = tokio::spawn(async move { handler::handle(req, state).await });
+    match join.await {
+        Ok(Ok(resp)) => Ok(resp),
+        Ok(Err(infallible)) => match infallible {},
+        Err(join_err) => {
+            error!("handler panicked: {}", join_err);
+            Ok(panic_response())
+        }
+    }
+}
+
+/// 502 with a clear, opinionated error body the user can act on. Tells them
+/// the kill-switch exists so a runaway crash isn't a dead end.
+fn panic_response() -> Response<ProxyBody> {
+    let body = r#"{"error":{"type":"proxy_error","message":"Burnwall encountered an internal error. Set BURNWALL_BYPASS=1 to relay traffic directly while you investigate."}}"#;
+    Response::builder()
+        .status(StatusCode::BAD_GATEWAY)
+        .header("content-type", "application/json")
+        .body(streaming::full(Bytes::from(body)))
+        .expect("panic_response: builder")
+}
+
 /// Bind `addr` and run the accept loop until cancelled.
 pub async fn run(addr: SocketAddr, state: AppState) -> std::io::Result<()> {
     run_with_shutdown(addr, state, std::future::pending::<()>()).await
@@ -137,7 +173,16 @@ pub async fn serve_with_shutdown(
                 tokio::spawn(async move {
                     let service = service_fn(move |req: hyper::Request<Incoming>| {
                         let state = state.clone();
-                        async move { handler::handle(req, state).await }
+                        // L1 — panic-catching wrapper. If anything in the
+                        // request pipeline panics, return a 502 instead of
+                        // dropping the connection (which would surface as a
+                        // confusing low-level error inside the user's AI
+                        // tool). The panic is logged so we can diagnose it.
+                        // Catching panics across an async boundary requires
+                        // spawning the work as a task and observing the join
+                        // outcome — `AssertUnwindSafe(catch_unwind)` does
+                        // not work because the future is not UnwindSafe.
+                        async move { handle_with_panic_catch(req, state).await }
                     });
 
                     if let Err(e) = Builder::new(TokioExecutor::new())

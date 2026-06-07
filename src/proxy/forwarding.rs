@@ -236,3 +236,51 @@ fn parse_for_provider(provider: &str, body: &[u8]) -> Option<ParsedResponse> {
         _ => None,
     }
 }
+
+/// Pure pass-through: forward `method/headers/body` to `upstream_base + path_and_query`,
+/// stream the response back. No security scan, no parsing, no storage write,
+/// no failover, no breaker. Used by the BURNWALL_BYPASS kill-switch (L2).
+pub async fn passthrough(
+    method: Method,
+    upstream_base: &str,
+    path_and_query: &str,
+    req_headers: HeaderMap,
+    body: Bytes,
+    state: &Arc<AppState>,
+) -> Result<Response<ProxyBody>, BoxError> {
+    let mut outbound_headers = HeaderMap::new();
+    for (name, value) in req_headers.iter() {
+        if !is_hop_by_hop(name.as_str()) {
+            outbound_headers.append(name.clone(), value.clone());
+        }
+    }
+    let uri = format!("{}{}", upstream_base, path_and_query);
+    let mut builder = state
+        .http_client
+        .request(method, &uri)
+        .headers(outbound_headers);
+    if !body.is_empty() {
+        builder = builder.body(body);
+    }
+    let upstream_resp = builder.send().await?;
+    let status = upstream_resp.status();
+    let resp_headers = upstream_resp.headers().clone();
+    let body = streaming::from_stream(upstream_resp.bytes_stream());
+
+    let mut response = Response::builder().status(status.as_u16());
+    let headers_mut = response
+        .headers_mut()
+        .expect("Response::builder is valid prior to .body()");
+    for (name, value) in resp_headers.iter() {
+        if is_hop_by_hop(name.as_str()) {
+            continue;
+        }
+        if let (Ok(hn), Ok(hv)) = (
+            HeaderName::from_bytes(name.as_str().as_bytes()),
+            HeaderValue::from_bytes(value.as_bytes()),
+        ) {
+            headers_mut.append(hn, hv);
+        }
+    }
+    Ok(response.body(body).expect("passthrough: response build failed"))
+}

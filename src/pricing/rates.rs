@@ -140,12 +140,44 @@ pub const KNOWN_MODELS: &[(&str, ModelPricing)] = &[
 /// date-stamped IDs from provider responses resolve to their canonical entry.
 /// Returns `None` for unknown models — callers must handle this (the proxy
 /// logs and stores cost = unknown rather than crashing; see fail-open policy).
+///
+/// User-supplied overrides from `~/.burnwall/pricing.toml` (see
+/// [`super::overrides`]) are consulted **first**, so an override wins over the
+/// built-in card for the same model and a brand-new model can be priced without
+/// a release. The override table lives in a process-global `OnceLock`, so the
+/// returned reference is still `'static`.
 pub fn get_pricing(model: &str) -> Option<&'static ModelPricing> {
-    for (key, pricing) in KNOWN_MODELS {
-        if model == *key {
+    get_pricing_with(model, super::overrides::table())
+}
+
+/// Like [`get_pricing`], but searches `overrides` ahead of the built-in card.
+/// Split out so the precedence + longest-prefix logic is unit-testable without
+/// touching the process-global override table. Built-in entries are `'static`
+/// and coerce to the override lifetime `'a`.
+pub fn get_pricing_with<'a>(
+    model: &str,
+    overrides: &'a [(String, ModelPricing)],
+) -> Option<&'a ModelPricing> {
+    if let Some(p) = match_prefix(model, overrides) {
+        return Some(p);
+    }
+    match_prefix(model, KNOWN_MODELS)
+}
+
+/// Find the entry whose key equals `model` or is a prefix of it followed by
+/// `-` (date-suffix tolerance). Generic over `&str`/`String` keys so the same
+/// logic serves both the `const` card and a loaded override table. Callers must
+/// order the table longest-key-first for correct disambiguation.
+fn match_prefix<'a, K: AsRef<str>>(
+    model: &str,
+    table: &'a [(K, ModelPricing)],
+) -> Option<&'a ModelPricing> {
+    for (key, pricing) in table {
+        let key = key.as_ref();
+        if model == key {
             return Some(pricing);
         }
-        if let Some(rest) = model.strip_prefix(*key) {
+        if let Some(rest) = model.strip_prefix(key) {
             if rest.starts_with('-') {
                 return Some(pricing);
             }

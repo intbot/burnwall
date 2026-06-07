@@ -22,6 +22,23 @@ pub async fn handle(
 ) -> Result<Response<ProxyBody>, Infallible> {
     let path = req.uri().path().to_string();
 
+    // ─── healthz ───
+    // Cheap local probe used by `burnwall enable-routing` preflight, by the
+    // login-service crash-loop circuit breaker, and by any external monitor.
+    // Returns 200 with a tiny JSON body. Never touches upstreams.
+    if path == "/healthz" {
+        return Ok(healthz_response());
+    }
+
+    // ─── bypass kill-switch (L2) ───
+    // BURNWALL_BYPASS=1 turns the proxy into a pure relay: no security scan,
+    // no budget check, no loop detection, no storage write. The user's last-
+    // resort escape hatch when a bad release misbehaves. Set the env var,
+    // restart the AI tool, traffic flows through unmodified.
+    if bypass_active() {
+        return Ok(passthrough(req, &state).await);
+    }
+
     // ─── route ───
     let routed: Option<(&'static str, String, String)> =
         if path == "/anthropic" || path.starts_with("/anthropic/") {
@@ -267,4 +284,80 @@ fn extract_model(body: &[u8]) -> Option<String> {
     let body = body.strip_prefix(b"\xef\xbb\xbf").unwrap_or(body);
     let val: serde_json::Value = serde_json::from_slice(body).ok()?;
     val.get("model").and_then(|m| m.as_str()).map(String::from)
+}
+
+/// Cheap 200 OK response for `/healthz` probes.
+fn healthz_response() -> Response<ProxyBody> {
+    let body = r#"{"status":"ok","service":"burnwall"}"#;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(streaming::full(Bytes::from(body)))
+        .expect("healthz_response: builder")
+}
+
+/// Read BURNWALL_BYPASS each call (no caching) so a user can flip it without
+/// restarting the proxy. Truthy values: `1`, `true`, `yes`, `on` (case-
+/// insensitive).
+fn bypass_active() -> bool {
+    match std::env::var("BURNWALL_BYPASS") {
+        Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Err(_) => false,
+    }
+}
+
+/// Pure-relay path used only when [`bypass_active`] is true. Routes by URL
+/// prefix, forwards the request as-is to the upstream, streams the response
+/// back. No security scan, no storage, no parsing.
+async fn passthrough(
+    req: Request<Incoming>,
+    state: &Arc<AppState>,
+) -> Response<ProxyBody> {
+    let path = req.uri().path().to_string();
+    let routed: Option<(String, String)> = if path == "/anthropic" || path.starts_with("/anthropic/") {
+        Some((state.upstream_anthropic.clone(), path["/anthropic".len()..].to_string()))
+    } else if path == "/openai" || path.starts_with("/openai/") {
+        Some((state.upstream_openai.clone(), path["/openai".len()..].to_string()))
+    } else if path == "/google" || path.starts_with("/google/") {
+        Some((state.upstream_google.clone(), path["/google".len()..].to_string()))
+    } else {
+        None
+    };
+    let (upstream_base, rest) = match routed {
+        Some(r) => r,
+        None => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "proxy_error",
+                "Unknown route. Use /anthropic/*, /openai/*, or /google/* prefix.",
+            );
+        }
+    };
+    let mut path_and_query = rest;
+    if let Some(q) = req.uri().query() {
+        path_and_query.push('?');
+        path_and_query.push_str(q);
+    }
+    let (parts, body) = req.into_parts();
+    let body_bytes = match body.collect().await {
+        Ok(b) => b.to_bytes(),
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "proxy_error",
+                "Failed to read request body.",
+            );
+        }
+    };
+    match forwarding::passthrough(parts.method, &upstream_base, &path_and_query, parts.headers, body_bytes, state).await {
+        Ok(resp) => resp,
+        Err(e) => {
+            warn!("bypass upstream error for {}{}: {}", upstream_base, path_and_query, e);
+            error_response(
+                StatusCode::BAD_GATEWAY,
+                "proxy_error",
+                &format!("Upstream unreachable: {}", e),
+            )
+        }
+    }
 }

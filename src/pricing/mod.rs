@@ -6,10 +6,19 @@
 //! - [`calculate_cost`]: convenience that combines lookup + calculation
 
 pub mod cache_calc;
+pub mod overrides;
 pub mod rates;
 
 pub use cache_calc::{cache_savings, cost, cost_without_cache};
-pub use rates::{get_pricing, ModelPricing, KNOWN_MODELS, PRICING_LAST_UPDATED};
+pub use rates::{get_pricing, get_pricing_with, ModelPricing, KNOWN_MODELS, PRICING_LAST_UPDATED};
+
+/// Load user pricing overrides from `~/.burnwall/pricing.toml` into the
+/// process-global table. Call once at startup, before any cost is computed.
+/// Returns the number of overrides loaded; a malformed file is an error the
+/// caller should surface but not treat as fatal (fail-open).
+pub fn init_overrides() -> Result<usize, overrides::OverrideError> {
+    overrides::init()
+}
 
 use crate::providers::TokenUsage;
 

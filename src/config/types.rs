@@ -28,6 +28,8 @@ pub struct Config {
     pub resilience: ResilienceConfig,
     #[serde(default)]
     pub observability: ObservabilityConfig,
+    #[serde(default)]
+    pub pricing: PricingConfig,
     /// Deprecated: superseded by `[tools]`. Kept for one release as a global
     /// kill switch (`enabled = false` disables all log scraping). Prefer the
     /// per-tool `[tools]` switches. Only written back when set to a
@@ -285,6 +287,18 @@ pub struct RulePublisher {
     pub name: String,
     /// Hex-encoded 32-byte Ed25519 verifying key.
     pub key: String,
+}
+
+/// `[pricing]` — trust config for signed remote pricing cards. `burnwall
+/// pricing update` only installs a fetched `pricing.toml` whose detached
+/// Ed25519 signature verifies against one of `publishers`. Empty by default —
+/// no remote card is trusted until you add a publisher key. A signed card is a
+/// data-only delivery channel for the rate table the binary already understands;
+/// it never grants new capabilities, only updates prices.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PricingConfig {
+    #[serde(default)]
+    pub publishers: Vec<RulePublisher>,
 }
 
 /// `[mcp]` — `burnwall mcp-watch` runtime depth (v0.6.5). `servers` lets one

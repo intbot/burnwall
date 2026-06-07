@@ -79,6 +79,75 @@ async fn forwards_anthropic_post_with_body_and_auth_header() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn healthz_returns_ok_without_touching_upstream() {
+    // No upstream mock — the test asserts /healthz never reaches a backend.
+    // We point both upstreams at an unreachable 127.0.0.1:1 to prove that
+    // a successful response only comes from the proxy itself.
+    let state = AppState::new(
+        "http://127.0.0.1:1".to_string(),
+        "http://127.0.0.1:1".to_string(),
+    );
+    let proxy = spawn_proxy(state).await;
+
+    let resp = client()
+        .get(format!("http://{}/healthz", proxy))
+        .send()
+        .await
+        .expect("proxy GET /healthz");
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.expect("parse json");
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["service"], "burnwall");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bypass_skips_security_scan() {
+    // With BURNWALL_BYPASS=1 the proxy is a pure relay. A request body that
+    // would normally trip the security scan must still reach upstream and
+    // get the upstream's response back. We verify by setting up an upstream
+    // that returns 200 OK for the request that should have been blocked,
+    // then setting the env var and asserting the request lands.
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .expect(1)
+        .mount(&mock)
+        .await;
+
+    let state = AppState::new(mock.uri(), "http://127.0.0.1:1".to_string());
+    let proxy = spawn_proxy(state).await;
+
+    // Race risk: BURNWALL_BYPASS is global to the process. Other tests may
+    // run concurrently in the same binary. Set + unset around the single
+    // request keeps the window small. The fail-open semantics of `handle`
+    // read the var on each call so unsetting after is sufficient.
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("BURNWALL_BYPASS", "1") };
+    let resp = client()
+        .post(format!("http://{}/anthropic/v1/messages", proxy))
+        .json(&json!({
+            "model": "claude-sonnet-4-6",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "tool_use",
+                    "input": {"path": "~/.ssh/id_rsa"}
+                }]
+            }]
+        }))
+        .send()
+        .await
+        .expect("proxy POST");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("BURNWALL_BYPASS") };
+
+    // Without bypass this would be 403 from the security scan. With bypass
+    // the upstream's 200 reaches us.
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forwards_openai_post_with_bearer_auth() {
     let mock = MockServer::start().await;
 

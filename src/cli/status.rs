@@ -253,10 +253,19 @@ fn write_table(
             writeln!(w)?;
             writeln!(
                 w,
-                "   ⚠️  Pricing data is {} days old (>30). Update Burnwall or override via ~/.burnwall/pricing.toml.",
+                "   ⚠️  Pricing data is {} days old (>30). Update Burnwall, or override prices locally with `burnwall pricing path --init`.",
                 age
             )?;
         }
+    }
+    let override_count = crate::pricing::overrides::count();
+    if override_count > 0 {
+        writeln!(w)?;
+        writeln!(
+            w,
+            "   💲 {} local price override(s) active (burnwall pricing list).",
+            override_count
+        )?;
     }
     writeln!(w)?;
     writeln!(
@@ -333,6 +342,7 @@ fn write_json(
         "mcp_events_today": mcp_events,
         "pricing_age_days": pricing_age_days,
         "pricing_stale": pricing_age_days.map(|d| d > 30).unwrap_or(false),
+        "pricing_override_count": crate::pricing::overrides::count(),
         "budget": {
             "daily_limit_usd": bcfg.daily_usd,
             "spent_today_usd": today_cost,

@@ -2,6 +2,72 @@
 
 All notable changes to Burnwall.
 
+## Unreleased
+
+### Added
+
+- **Five-layer graceful-degradation model**, so a bad release can't break your AI
+  tools:
+  - `BURNWALL_BYPASS=1` — instant kill-switch. Proxy becomes a pure relay; no
+    security scan, no budget check, no storage write. Forward bytes to the
+    upstream and stream the response back unchanged.
+  - **Panic-catching wrapper** — if anything in the request pipeline panics, the
+    proxy returns a clear 502 (pointing the user at `BURNWALL_BYPASS=1`) instead
+    of dropping the connection.
+  - **Crash-loop circuit breakers** baked into each platform's service unit
+    (launchd `ThrottleInterval=60`, systemd `StartLimitBurst=5`, Task Scheduler
+    `RestartOnFailure` capped at 5 attempts).
+  - **`burnwall self-rollback <version>`** — fetches the version-pinned dist
+    installer for any prior release and reinstalls. Windows refuses to roll back
+    while the proxy is running so it can replace the binary safely.
+  - **Sourced env-file activation model** — one burnwall-owned file
+    (`~/.config/burnwall/env.sh` / `%APPDATA%\burnwall\env.ps1`) holds the
+    routing exports; the user's rc gets one idempotent source line. Disable by
+    truncating the env file — one place to revert.
+- **`burnwall enable-routing` / `disable-routing`** — write/clear the env file,
+  install the rc-hook, and emit eval-able exports for immediate-effect
+  activation in the current shell (`eval "$(burnwall enable-routing)"` on POSIX,
+  `burnwall enable-routing --eval | Out-String | Invoke-Expression` on
+  PowerShell). `enable-routing` runs a `/healthz` preflight against the proxy
+  before activating.
+- **`burnwall install-service` / `uninstall-service`** — registers burnwall as a
+  login-time service so the proxy auto-starts. User-scoped (no admin needed) on
+  all three platforms: launchd LaunchAgent on macOS, systemd user unit on Linux,
+  Windows Scheduled Task at logon.
+- **`/healthz`** local probe — returns 200 without touching upstreams. Used by
+  the activation preflight, the supervisor circuit breaker, and any external
+  monitor.
+- **Extended `burnwall init`** — two-step interactive flow that now also offers
+  login-service install and routing activation in the same run. `--apply` to
+  execute, `--yes` for unattended scripted use, `--install-service` to opt in to
+  the supervisor.
+- **Local pricing overrides** — drop a `~/.burnwall/pricing.toml` to override or
+  add model rates without waiting for a release. Entries take precedence over the
+  built-in rate card and handle date-suffixed model IDs automatically, so a
+  brand-new model can be priced immediately and a mid-cycle price change is a
+  two-line edit. This is the escape hatch the staleness warning always
+  advertised — now actually wired up.
+- **`burnwall pricing` command** — `list` shows the effective rate card (built-in
+  plus overrides, with the source of each), `path [--init]` prints/scaffolds the
+  override file.
+- **Signed remote pricing cards** — `burnwall pricing update` fetches a
+  `pricing.toml` from a URL (default: the latest GitHub release asset) and
+  installs it **only** if its detached Ed25519 signature verifies against a
+  trusted `[pricing].publishers` key — verify-before-parse, no fail-open.
+  `pricing sign` / `pricing verify` cover the publisher and offline-check sides,
+  reusing the same key format as `burnwall rules keygen`. Lets prices ship
+  between binary releases without giving up zero-trust.
+
+### Changed
+
+- **`burnwall init` output reworked** — dry-run output now lists the two actions
+  (routing + service) with the exact file paths and exports that would be
+  written. The legacy `append_to_rc` helper is kept (still used by tests) but
+  routing activation now goes through the new sourced env-file path.
+- **`burnwall status`** — the stale-pricing warning now points at
+  `burnwall pricing path --init`, and an active-override count is shown (plus a
+  `pricing_override_count` field in `status --json`).
+
 ## [0.9.3] — 2026-05-29
 
 ### Fixed

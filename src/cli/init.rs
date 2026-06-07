@@ -32,6 +32,15 @@ pub struct InitArgs {
     /// Override the proxy host:port written into the env vars.
     #[arg(long, default_value = "http://localhost:4100")]
     pub proxy_url: String,
+    /// Also register burnwall as a login-time service (launchd / systemd /
+    /// Windows Scheduled Task). Implied by `--apply` in interactive mode if
+    /// you confirm the prompt.
+    #[arg(long)]
+    pub install_service: bool,
+    /// Skip all interactive prompts. Combine with `--apply` for unattended
+    /// install in scripts.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,66 +214,132 @@ pub fn run_cmd(args: InitArgs) -> anyhow::Result<()> {
     }
     writeln!(out)?;
 
-    // Detect shell + emit env-var instructions
     let shell = Shell::detect();
-    let lines = shell
-        .map(|s| s.export_lines(&args.proxy_url))
-        .unwrap_or_else(|| {
-            vec![
-                format!("ANTHROPIC_BASE_URL={}/anthropic", args.proxy_url),
-                format!("OPENAI_BASE_URL={}/openai", args.proxy_url),
-            ]
-        });
-
     writeln!(
         out,
         "🔧 Shell detected: {}",
         shell.map(|s| s.label()).unwrap_or("unknown")
     )?;
+    writeln!(out)?;
 
-    let rc_path = shell.and_then(|s| s.rc_path());
-    if args.apply {
-        match (shell, rc_path.as_ref()) {
-            (Some(_), Some(path)) => {
-                let modified = append_to_rc(path, &lines)
-                    .with_context(|| format!("writing to {}", path.display()))?;
-                if modified {
-                    writeln!(out, "  → Appended to {}", path.display())?;
-                } else {
-                    writeln!(
-                        out,
-                        "  (already configured — marker found in {})",
-                        path.display()
-                    )?;
+    // Three things init can do — show what each is, then either dry-run or
+    // execute based on --apply. Service install is opt-in via flag or prompt.
+    if !args.apply {
+        writeln!(out, "▶ This run is a DRY RUN. Re-run with --apply to perform the actions below.")?;
+        writeln!(out)?;
+    }
+
+    // 1. Routing activation (env file + rc hook).
+    writeln!(out, "1. Routing activation")?;
+    writeln!(out, "   ─────────────────────")?;
+    let action_label = if args.apply { "Action" } else { "Would do" };
+    if let Some(s) = shell {
+        let env_file = super::routing::env_file_path(s)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<config>".to_string());
+        writeln!(out, "   {action_label}: write env file ({env_file})")?;
+        writeln!(out, "             contents:")?;
+        for line in super::routing::export_lines(s, &args.proxy_url) {
+            writeln!(out, "               {}", line)?;
+        }
+        if let Some(rc) = s.rc_path() {
+            writeln!(out, "             append source line to {}", rc.display())?;
+        } else {
+            writeln!(out, "             (no rc file for {} — manual step needed)", s.label())?;
+        }
+        if args.apply {
+            let env_path = super::routing::write_env_file(s, &args.proxy_url)?;
+            let hook_added = match super::routing::install_rc_hook(s, &env_path) {
+                Ok(b) => b,
+                Err(e) => {
+                    writeln!(out, "   ⚠  rc hook skipped: {}", e)?;
+                    false
                 }
-                writeln!(out, "  Run `source {}` to activate.", path.display())?;
-            }
-            _ => {
-                writeln!(
-                    out,
-                    "  (no rc file to write on this shell — set these env vars manually:)"
-                )?;
-                for line in &lines {
-                    writeln!(out, "    {}", line)?;
+            };
+            writeln!(out, "   ✓ env file written: {}", env_path.display())?;
+            if hook_added {
+                if let Some(rc) = s.rc_path() {
+                    writeln!(out, "   ✓ rc hook added to {}", rc.display())?;
                 }
+            } else if let Some(rc) = s.rc_path() {
+                writeln!(out, "   • rc hook already present in {}", rc.display())?;
             }
         }
     } else {
-        writeln!(
-            out,
-            "  → Would add the following to {}:",
-            rc_path
-                .as_deref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "your shell config".into())
-        )?;
-        for line in &lines {
-            writeln!(out, "    {}", line)?;
-        }
-        writeln!(out)?;
-        writeln!(out, "  Re-run with --apply to write the changes.")?;
+        writeln!(out, "   (shell not detected — set ANTHROPIC_BASE_URL / OPENAI_BASE_URL manually)")?;
     }
     writeln!(out)?;
-    writeln!(out, "▶  Then start the proxy:  burnwall start")?;
+
+    // 2. Login service (always opt-in: --install-service flag or interactive
+    // prompt). Default for unattended (--yes without --install-service) is NO.
+    writeln!(out, "2. Login-time auto-start")?;
+    writeln!(out, "   ──────────────────────")?;
+    let want_service = if args.install_service {
+        true
+    } else if args.yes {
+        false
+    } else if args.apply {
+        prompt_yes_no(&mut out, "   Register burnwall as a login service?")?
+    } else {
+        writeln!(out, "   (use --install-service to register the proxy as a login-time service)")?;
+        false
+    };
+    if want_service {
+        if args.apply {
+            let exe = std::env::current_exe().context("locating burnwall executable")?;
+            // Call platform install path directly — same code the
+            // install-service command runs.
+            super::service::install_cmd(super::service::InstallServiceArgs { no_start: false })
+                .with_context(|| format!("installing service for {}", exe.display()))?;
+        } else {
+            writeln!(out, "   {action_label}: register login-time service")?;
+        }
+    } else if args.apply {
+        writeln!(out, "   • skipped (re-run with --install-service to add it later)")?;
+    }
+    writeln!(out)?;
+
+    // 3. Next steps.
+    writeln!(out, "▶ Next steps")?;
+    if args.apply {
+        writeln!(out, "   • New shells will source the env file automatically.")?;
+        writeln!(out, "   • Apply to *this* shell now without restarting:")?;
+        match shell {
+            Some(Shell::Powershell) => {
+                writeln!(out, "       burnwall enable-routing --eval | Out-String | Invoke-Expression")?;
+            }
+            _ => {
+                writeln!(out, "       eval \"$(burnwall enable-routing)\"")?;
+            }
+        }
+        if !want_service {
+            writeln!(out, "   • Start the proxy:  burnwall start --daemon")?;
+        }
+        writeln!(out, "   • Kill switch (instant bypass):  export BURNWALL_BYPASS=1")?;
+    } else {
+        writeln!(out, "   • Re-run with --apply to execute.")?;
+        writeln!(out, "   • Or run the commands directly:")?;
+        writeln!(out, "       burnwall enable-routing")?;
+        writeln!(out, "       burnwall install-service")?;
+    }
     Ok(())
+}
+
+/// Y/n prompt with a default of yes. Returns false on EOF or non-interactive
+/// stdin (treat as "no" — safer when stdin is piped).
+fn prompt_yes_no<W: Write>(out: &mut W, question: &str) -> anyhow::Result<bool> {
+    use std::io::{BufRead, IsTerminal};
+    if !std::io::stdin().is_terminal() {
+        writeln!(out, "{} (non-interactive — defaulting to no)", question)?;
+        return Ok(false);
+    }
+    write!(out, "{} [Y/n]: ", question)?;
+    out.flush()?;
+    let mut line = String::new();
+    let n = std::io::stdin().lock().read_line(&mut line)?;
+    if n == 0 {
+        return Ok(false);
+    }
+    let answer = line.trim().to_ascii_lowercase();
+    Ok(answer.is_empty() || answer == "y" || answer == "yes")
 }

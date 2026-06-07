@@ -11,6 +11,8 @@ pub mod cost_per_pr;
 pub mod daemon;
 #[cfg(feature = "observe")]
 pub mod digest;
+pub mod disable_routing;
+pub mod enable_routing;
 #[cfg(feature = "logscrape")]
 pub mod explore;
 pub mod history;
@@ -21,10 +23,14 @@ pub mod mcp;
 pub mod mcp_watch;
 #[cfg(feature = "observe")]
 pub mod metrics;
+pub mod pricing;
 #[cfg(feature = "observe")]
 pub mod report;
+pub mod routing;
 pub mod rules;
 pub mod security;
+pub mod self_rollback;
+pub mod service;
 pub mod start;
 pub mod status;
 pub mod stop;
@@ -85,6 +91,18 @@ pub enum Command {
     /// Approximate cost of the current git branch / PR (local logs + git).
     #[cfg(feature = "observe")]
     CostPerPr(cost_per_pr::CostPerPrArgs),
+    /// Enable AI-tool routing through the proxy (writes env file + rc hook).
+    EnableRouting(enable_routing::EnableRoutingArgs),
+    /// Disable AI-tool routing (empties env file; pair with `eval` to drop from current shell).
+    DisableRouting(disable_routing::DisableRoutingArgs),
+    /// Register burnwall as a login-time service (launchd / systemd / Scheduled Task).
+    InstallService(service::InstallServiceArgs),
+    /// Remove the burnwall login-time service.
+    UninstallService(service::UninstallServiceArgs),
+    /// Roll back to a prior burnwall release via the dist installer.
+    SelfRollback(self_rollback::SelfRollbackArgs),
+    /// Inspect and manage the pricing rate card (local + signed remote cards).
+    Pricing(pricing::PricingArgs),
 }
 
 impl Cli {
@@ -117,6 +135,12 @@ impl Cli {
             Command::Report(args) => report::run_cmd(args),
             #[cfg(feature = "observe")]
             Command::CostPerPr(args) => cost_per_pr::run_cmd(args),
+            Command::EnableRouting(args) => enable_routing::run_cmd(args).await,
+            Command::DisableRouting(args) => disable_routing::run_cmd(args),
+            Command::InstallService(args) => service::install_cmd(args),
+            Command::UninstallService(args) => service::uninstall_cmd(args),
+            Command::SelfRollback(args) => self_rollback::run_cmd(args),
+            Command::Pricing(args) => pricing::run_cmd(args),
         }
     }
 }

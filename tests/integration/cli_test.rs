@@ -531,3 +531,136 @@ fn digest_json_is_valid() {
     assert_eq!(v["models"][0]["provider"], "anthropic");
     assert_eq!(v["security_by_type"][0]["event_type"], "path_blocked");
 }
+
+// ─────────────────────────────── pricing ───────────────────────────────
+
+#[test]
+fn pricing_list_shows_builtin_and_local_override() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    // A local override for an unknown model + a shadow of a built-in.
+    fs::write(
+        path.join("pricing.toml"),
+        "[[model]]\nname = \"claude-opus-4-9\"\ninput_per_mtok = 5.0\noutput_per_mtok = 25.0\n",
+    )
+    .unwrap();
+
+    burnwall(&path)
+        .args(["pricing", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude-opus-4-9"))
+        .stdout(predicate::str::contains("override (new)"))
+        .stdout(predicate::str::contains("claude-sonnet-4-6")) // built-in still listed
+        .stdout(predicate::str::contains("1 override(s) active"));
+}
+
+#[test]
+fn pricing_path_init_writes_starter_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+
+    burnwall(&path)
+        .args(["pricing", "path", "--init"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("starter file"));
+    assert!(path.join("pricing.toml").exists());
+}
+
+/// Pull the hex public key out of `rules keygen` stdout (last non-empty line).
+fn keygen_public_key(dir: &PathBuf, seed_path: &std::path::Path) -> String {
+    let output = burnwall(dir)
+        .args(["rules", "keygen"])
+        .arg(seed_path)
+        .output()
+        .expect("keygen");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    stdout
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())
+        .expect("a public key line")
+        .to_string()
+}
+
+#[test]
+fn pricing_sign_then_verify_roundtrips_and_rejects_tamper() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+
+    let seed = path.join("key.seed");
+    let pubkey = keygen_public_key(&path, &seed);
+
+    let card = path.join("card.toml");
+    fs::write(
+        &card,
+        "[[model]]\nname = \"gpt-6\"\ninput_per_mtok = 2.5\noutput_per_mtok = 12.0\n",
+    )
+    .unwrap();
+    let sig = path.join("card.sig");
+
+    // Sign with the secret seed.
+    burnwall(&path)
+        .args(["pricing", "sign"])
+        .arg(&card)
+        .arg("--key")
+        .arg(&seed)
+        .arg("--out")
+        .arg(&sig)
+        .assert()
+        .success();
+
+    // Verify against the matching public key → trusted.
+    burnwall(&path)
+        .args(["pricing", "verify"])
+        .arg(&card)
+        .arg("--sig")
+        .arg(&sig)
+        .arg("--publisher")
+        .arg(&pubkey)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Signature verifies"));
+
+    // Tamper with the card → verification must fail (non-zero exit).
+    fs::write(
+        &card,
+        "[[model]]\nname = \"gpt-6\"\ninput_per_mtok = 0.01\noutput_per_mtok = 0.01\n",
+    )
+    .unwrap();
+    burnwall(&path)
+        .args(["pricing", "verify"])
+        .arg(&card)
+        .arg("--sig")
+        .arg(&sig)
+        .arg("--publisher")
+        .arg(&pubkey)
+        .assert()
+        .failure();
+}
+
+#[test]
+fn pricing_verify_without_publishers_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    let card = path.join("card.toml");
+    fs::write(&card, "[[model]]\nname = \"x\"\ninput_per_mtok = 1.0\noutput_per_mtok = 1.0\n").unwrap();
+    let sig = path.join("card.sig");
+    fs::write(&sig, "deadbeef").unwrap();
+
+    // No [pricing].publishers and no --publisher → refuse, don't fail-open.
+    burnwall(&path)
+        .args(["pricing", "verify"])
+        .arg(&card)
+        .arg("--sig")
+        .arg(&sig)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no trusted publishers"));
+}

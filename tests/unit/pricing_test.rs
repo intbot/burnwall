@@ -4,7 +4,10 @@
 //! Floats are compared with a small absolute epsilon — the calc uses straight
 //! `f64` multiplication, no exotic rounding.
 
-use burnwall::pricing::{cache_savings, calculate_cost, cost, cost_without_cache, get_pricing};
+use burnwall::pricing::{
+    cache_savings, calculate_cost, cost, cost_without_cache, get_pricing, get_pricing_with,
+    overrides, ModelPricing,
+};
 use burnwall::providers::TokenUsage;
 
 const EPSILON: f64 = 1e-9;
@@ -220,6 +223,82 @@ fn calculate_cost_returns_some_for_known_model() {
 fn calculate_cost_returns_none_for_unknown_model() {
     let usage = TokenUsage::default();
     assert!(calculate_cost("never-heard-of-this", &usage).is_none());
+}
+
+// ─────────────────────── Local pricing overrides (B) ───────────────────────
+// `get_pricing_with` takes the override table explicitly, so precedence and
+// longest-prefix behavior are tested without touching the process-global table.
+
+#[test]
+fn override_wins_over_builtin_for_same_model() {
+    let table = overrides::parse(
+        r#"
+[[model]]
+name = "claude-sonnet-4-6"
+input_per_mtok = 99.0
+output_per_mtok = 199.0
+"#,
+    )
+    .expect("parse");
+    let p = get_pricing_with("claude-sonnet-4-6", &table).expect("override hit");
+    assert!((p.input_per_mtok - 99.0).abs() < EPSILON);
+    assert!((p.output_per_mtok - 199.0).abs() < EPSILON);
+    // The built-in card is unchanged when no override is supplied.
+    let builtin = get_pricing_with("claude-sonnet-4-6", &[]).expect("builtin");
+    assert!((builtin.input_per_mtok - 3.0).abs() < EPSILON);
+}
+
+#[test]
+fn override_adds_a_brand_new_model() {
+    // A model the binary never shipped with is unknown by default...
+    assert!(get_pricing("claude-opus-4-9").is_none());
+    // ...but a local override prices it.
+    let table = overrides::parse(
+        r#"
+[[model]]
+name = "claude-opus-4-9"
+input_per_mtok = 5.0
+cache_write_per_mtok = 6.25
+cache_read_per_mtok = 0.5
+output_per_mtok = 25.0
+"#,
+    )
+    .expect("parse");
+    let p = get_pricing_with("claude-opus-4-9", &table).expect("new model");
+    assert!((p.output_per_mtok - 25.0).abs() < EPSILON);
+}
+
+#[test]
+fn override_honors_date_suffix_and_longest_prefix() {
+    let table = overrides::parse(
+        r#"
+[[model]]
+name = "gpt-6"
+input_per_mtok = 2.0
+output_per_mtok = 12.0
+
+[[model]]
+name = "gpt-6-mini"
+input_per_mtok = 0.2
+output_per_mtok = 1.2
+"#,
+    )
+    .expect("parse");
+    // Date-stamped base variant resolves to the base entry.
+    let base = get_pricing_with("gpt-6-2026-09-01", &table).expect("base dated");
+    assert!((base.input_per_mtok - 2.0).abs() < EPSILON);
+    // The mini variant must hit the mini entry, not the shorter base prefix.
+    let mini = get_pricing_with("gpt-6-mini-2026-09-01", &table).expect("mini dated");
+    assert!((mini.input_per_mtok - 0.2).abs() < EPSILON);
+}
+
+#[test]
+fn empty_overrides_match_builtin_lookup() {
+    // get_pricing_with with an empty table is exactly the built-in card.
+    let empty: Vec<(String, ModelPricing)> = Vec::new();
+    let a = get_pricing_with("gpt-5.4", &empty).expect("builtin via with");
+    let b = get_pricing("gpt-5.4").expect("builtin via global");
+    assert_eq!(a, b);
 }
 
 #[test]
