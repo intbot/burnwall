@@ -2,6 +2,17 @@
 
 All notable changes to Burnwall.
 
+## [0.9.9] — 2026-06-08
+
+### Added
+
+- **`burnwall upgrade`** (alias `self-upgrade`) — one command to move to the
+  latest release. It stops the running proxy first (a live `burnwall.exe` can't
+  be overwritten on Windows), runs the installer, and restarts the proxy. On
+  Windows it renames its own running binary aside so the installer can write the
+  new one, restoring it if the install fails. `--dry-run` to preview,
+  `--no-restart` to skip the restart. The mirror of `self-rollback`.
+
 ## [0.9.8] — 2026-06-07
 
 ### Added

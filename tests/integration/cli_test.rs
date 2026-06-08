@@ -818,3 +818,31 @@ fn share_no_sign_emits_unsigned_card() {
         .success()
         .stdout(predicate::str::contains("unsigned"));
 }
+
+// ─────────────────────────────── upgrade ───────────────────────────────
+
+#[test]
+fn upgrade_dry_run_prints_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    burnwall(&path)
+        .args(["upgrade", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("latest release"))
+        .stdout(predicate::str::contains("releases/latest/download"))
+        .stdout(predicate::str::contains("stop the proxy"));
+}
+
+#[test]
+fn self_upgrade_alias_works() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    burnwall(&path)
+        .args(["self-upgrade", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Upgrading Burnwall"));
+}

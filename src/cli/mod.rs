@@ -38,6 +38,7 @@ pub mod service;
 pub mod start;
 pub mod status;
 pub mod statusline;
+pub mod upgrade;
 pub mod stop;
 pub mod watch;
 #[cfg(feature = "waste")]
@@ -107,6 +108,9 @@ pub enum Command {
     UninstallService(service::UninstallServiceArgs),
     /// Roll back to a prior burnwall release via the dist installer.
     SelfRollback(self_rollback::SelfRollbackArgs),
+    /// Upgrade to the latest release (stops the proxy, installs, restarts).
+    #[command(visible_alias = "self-upgrade")]
+    Upgrade(upgrade::UpgradeArgs),
     /// Inspect and manage the pricing rate card (local + signed remote cards).
     Pricing(pricing::PricingArgs),
     /// Render the Burnwall ribbon for Claude Code's status line (reads stdin JSON).
@@ -157,6 +161,7 @@ impl Cli {
             Command::InstallService(args) => service::install_cmd(args),
             Command::UninstallService(args) => service::uninstall_cmd(args),
             Command::SelfRollback(args) => self_rollback::run_cmd(args),
+            Command::Upgrade(args) => upgrade::run_cmd(args),
             Command::Pricing(args) => pricing::run_cmd(args),
             Command::Statusline(args) => statusline::run_cmd(args),
             Command::Watch(args) => watch::run_cmd(args),
