@@ -2,6 +2,39 @@
 
 All notable changes to Burnwall.
 
+## [0.9.5] — 2026-06-07
+
+### Added
+
+- **`burnwall statusline`** — renders the Burnwall ribbon for Claude Code's
+  customizable status line. Reads Claude Code's per-turn JSON on stdin and prints
+  one line: `🔥 sonnet-4.6 · ↑13k ↓615 · $0.05 msg $0.16 sess · $2.40 today · ctx
+  [▓▓░░░░░░] 22%`. Per-message cost is derived from the cumulative session total;
+  today's spend and security-block count are enriched from the proxy database, so
+  the line reflects spend **across all your tools**, not just the current one.
+  Wire it up with one line in `~/.claude/settings.json`:
+  `{ "statusLine": { "type": "command", "command": "burnwall statusline" } }`.
+  Fail-open: malformed input or an unreadable database still yields a best-effort
+  line rather than breaking the editor.
+- **Context gauge is honest by construction** — the ribbon shows a context-window
+  percentage only when it's *exact* (reported by the tool, e.g. Claude Code).
+  Where a value is estimated it's flagged with `~`; where the window can't be
+  trusted it renders `—`; where the tool already shows its own gauge it's omitted
+  rather than duplicated.
+- **Activity marker** — the proxy touches `<data dir>/watch.signal` after each
+  recorded turn (off the response path, so no added latency), laying the
+  groundwork for event-driven refresh of upcoming status surfaces.
+
+### Fixed
+
+- **`burnwall install-service` on Windows no longer needs admin.** It previously
+  created a Scheduled Task at the Task Scheduler library root, which requires
+  elevation and failed with "Access is denied" for a normal shell. The default is
+  now a per-user `HKCU\…\Run` registry entry that launches `burnwall start
+  --daemon` at logon — no UAC. `--task` opts back into the Scheduled-Task variant
+  (which adds crash-restart) for users who run an elevated terminal.
+  `uninstall-service` removes whichever was installed.
+
 ## [0.9.4] — 2026-06-07
 
 ### Added

@@ -289,8 +289,11 @@ pub fn run_cmd(args: InitArgs) -> anyhow::Result<()> {
             let exe = std::env::current_exe().context("locating burnwall executable")?;
             // Call platform install path directly — same code the
             // install-service command runs.
-            super::service::install_cmd(super::service::InstallServiceArgs { no_start: false })
-                .with_context(|| format!("installing service for {}", exe.display()))?;
+            super::service::install_cmd(super::service::InstallServiceArgs {
+                no_start: false,
+                task: false,
+            })
+            .with_context(|| format!("installing service for {}", exe.display()))?;
         } else {
             writeln!(out, "   {action_label}: register login-time service")?;
         }

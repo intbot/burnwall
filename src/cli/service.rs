@@ -11,15 +11,20 @@
 //!   `~/.config/systemd/user/burnwall.service`. `Restart=on-failure` with
 //!   `StartLimitBurst=5` + `StartLimitIntervalSec=60` is the same crash-loop
 //!   circuit breaker shape.
-//! - **Windows** — a per-user Scheduled Task triggered at logon, registered
-//!   via `schtasks.exe`. Task Scheduler restarts on failure (5 attempts at
-//!   1-min intervals) — same shape, different incantation.
+//! - **Windows** — by default, a per-user `HKCU\…\CurrentVersion\Run` registry
+//!   entry that launches `burnwall start --daemon` at logon. This needs **no
+//!   admin / UAC** (the earlier Scheduled-Task default failed with "Access is
+//!   denied" because creating a task at the library root requires elevation).
+//!   `--task` opts into the Scheduled-Task variant instead — it adds
+//!   crash-restart (5 attempts at 1-min intervals) but must be run from an
+//!   elevated terminal.
 //!
-//! ## No admin required
+//! ## No admin required (by default)
 //!
-//! All three install user-scoped services that need no admin / sudo / UAC.
-//! Per-user is the right scope because the proxy serves one user's traffic
-//! through env vars in their shell.
+//! Every default path installs a user-scoped service that needs no admin /
+//! sudo / UAC. Per-user is the right scope because the proxy serves one user's
+//! traffic through env vars in their shell. (Windows `--task` is the one opt-in
+//! that needs elevation, in exchange for crash-restart.)
 
 use std::path::PathBuf;
 
@@ -36,6 +41,11 @@ pub struct InstallServiceArgs {
     /// Skip the start step (just register the service, don't launch it).
     #[arg(long)]
     pub no_start: bool,
+    /// Windows only: register a Scheduled Task (adds crash-restart) instead of
+    /// the default per-user Run-key entry. Must be run from an elevated
+    /// terminal. Ignored on macOS/Linux.
+    #[arg(long)]
+    pub task: bool,
 }
 
 #[derive(Args, Debug)]
@@ -43,7 +53,7 @@ pub struct UninstallServiceArgs {}
 
 pub fn install_cmd(args: InstallServiceArgs) -> Result<()> {
     let exe = std::env::current_exe().context("locating burnwall executable")?;
-    install(&exe, !args.no_start)
+    install(&exe, !args.no_start, args.task)
 }
 
 pub fn uninstall_cmd(_args: UninstallServiceArgs) -> Result<()> {
@@ -93,7 +103,7 @@ fn plist_contents(exe: &std::path::Path) -> String {
 }
 
 #[cfg(target_os = "macos")]
-fn install(exe: &std::path::Path, start: bool) -> Result<()> {
+fn install(exe: &std::path::Path, start: bool, _task: bool) -> Result<()> {
     let path = plist_path()?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -170,7 +180,7 @@ WantedBy=default.target
 }
 
 #[cfg(target_os = "linux")]
-fn install(exe: &std::path::Path, start: bool) -> Result<()> {
+fn install(exe: &std::path::Path, start: bool, _task: bool) -> Result<()> {
     let path = unit_path()?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -292,8 +302,56 @@ fn task_xml(exe: &std::path::Path) -> String {
     )
 }
 
+/// HKCU autostart key — writable by a standard user, no admin needed.
 #[cfg(target_os = "windows")]
-fn install(exe: &std::path::Path, start: bool) -> Result<()> {
+const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+
+#[cfg(target_os = "windows")]
+fn install(exe: &std::path::Path, start: bool, use_task: bool) -> Result<()> {
+    if use_task {
+        install_scheduled_task(exe, start)
+    } else {
+        install_run_key(exe, start)
+    }
+}
+
+/// Default Windows autostart: a per-user `HKCU\…\Run` value that launches
+/// `burnwall start --daemon` at logon. No admin required. Written via `reg.exe`
+/// so we don't pull in a registry crate.
+#[cfg(target_os = "windows")]
+fn install_run_key(exe: &std::path::Path, start: bool) -> Result<()> {
+    // The exe path is quoted so a profile path with spaces still parses at logon.
+    let command = format!("\"{}\" start --daemon", exe.display());
+    let status = std::process::Command::new("reg")
+        .args([
+            "add", RUN_KEY, "/v", TASK_NAME, "/t", "REG_SZ", "/d", &command, "/f",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("running reg add")?;
+    if !status.success() {
+        anyhow::bail!(
+            "reg add failed (status {status}). You can still run `burnwall start --daemon` \
+             manually, or try `burnwall install-service --task` from an elevated terminal."
+        );
+    }
+    println!("🛡  Registered login auto-start (HKCU Run): {TASK_NAME}");
+    println!("   Launches `burnwall start --daemon` at logon — no admin required.");
+    if start {
+        start_daemon_now(exe);
+    } else {
+        println!("   (not started — will start at next logon)");
+    }
+    println!("   Tip: `--task` installs a Scheduled Task with crash-restart (needs an elevated terminal).");
+    Ok(())
+}
+
+/// Opt-in Windows autostart: a per-user Scheduled Task at logon. Adds
+/// crash-restart, but creating the task at the library root requires
+/// elevation — so this must be run from an Administrator terminal.
+#[cfg(target_os = "windows")]
+fn install_scheduled_task(exe: &std::path::Path, start: bool) -> Result<()> {
     let xml_path = task_xml_path()?;
     if let Some(parent) = xml_path.parent() {
         std::fs::create_dir_all(parent)
@@ -320,15 +378,23 @@ fn install(exe: &std::path::Path, start: bool) -> Result<()> {
             "/XML",
             xml_path.to_str().unwrap_or(""),
         ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .context("running schtasks /Create")?;
     if !status.success() {
-        anyhow::bail!("schtasks /Create failed (status {})", status);
+        anyhow::bail!(
+            "schtasks /Create failed (status {status}) — this usually means it wasn't run \
+             elevated. Run from an Administrator terminal, or drop `--task` to use the \
+             no-admin Run-key install instead."
+        );
     }
     println!("🛡  Installed Scheduled Task: \\{TASK_NAME}");
     if start {
         let s = std::process::Command::new("schtasks.exe")
             .args(["/Run", "/TN", TASK_NAME])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .context("running schtasks /Run")?;
         if !s.success() {
@@ -344,17 +410,48 @@ fn install(exe: &std::path::Path, start: bool) -> Result<()> {
 }
 
 #[cfg(target_os = "windows")]
-fn uninstall() -> Result<()> {
-    let status = std::process::Command::new("schtasks.exe")
-        .args(["/Delete", "/F", "/TN", TASK_NAME])
+fn start_daemon_now(exe: &std::path::Path) {
+    match std::process::Command::new(exe)
+        .args(["start", "--daemon"])
         .status()
-        .context("running schtasks /Delete")?;
-    if status.success() {
-        println!("🛡  Removed Scheduled Task: \\{TASK_NAME}");
-    } else {
-        println!("🛡  No Scheduled Task to remove (or removal failed).");
+    {
+        Ok(s) if s.success() => println!("   Started."),
+        _ => println!("   (could not start now — will start at next logon)"),
     }
-    // Best-effort cleanup of the staged XML.
+}
+
+#[cfg(target_os = "windows")]
+fn uninstall() -> Result<()> {
+    let mut removed = false;
+    // Default install: the HKCU Run-key value. Probes are best-effort — silence
+    // child stdout/stderr so a missing entry doesn't print a scary "ERROR".
+    if matches!(
+        std::process::Command::new("reg")
+            .args(["delete", RUN_KEY, "/v", TASK_NAME, "/f"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status(),
+        Ok(s) if s.success()
+    ) {
+        println!("🛡  Removed login auto-start (HKCU Run): {TASK_NAME}");
+        removed = true;
+    }
+    // Opt-in install: the Scheduled Task.
+    if matches!(
+        std::process::Command::new("schtasks.exe")
+            .args(["/Delete", "/F", "/TN", TASK_NAME])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status(),
+        Ok(s) if s.success()
+    ) {
+        println!("🛡  Removed Scheduled Task: \\{TASK_NAME}");
+        removed = true;
+    }
+    if !removed {
+        println!("🛡  No Burnwall login service found to remove.");
+    }
+    // Best-effort cleanup of any staged task XML.
     if let Ok(xml_path) = task_xml_path() {
         let _ = std::fs::remove_file(&xml_path);
     }
@@ -364,7 +461,7 @@ fn uninstall() -> Result<()> {
 // ─────────────────────────── unsupported ───────────────────────────
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-fn install(_exe: &std::path::Path, _start: bool) -> Result<()> {
+fn install(_exe: &std::path::Path, _start: bool, _task: bool) -> Result<()> {
     anyhow::bail!("install-service is not supported on this OS");
 }
 

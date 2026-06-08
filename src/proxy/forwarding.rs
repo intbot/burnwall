@@ -164,6 +164,10 @@ pub async fn forward(
                 if let Err(e) = storage.insert_request(&record) {
                     error!("requests insert failed: {}", e);
                 }
+                // Nudge status-ribbon surfaces (editor bar, `burnwall watch`) to
+                // refresh. Off the response path — the client already has its
+                // bytes — so this tiny write adds nothing to request latency.
+                crate::storage::touch_watch_signal(hash_hex.as_str());
                 budget.record(cost);
                 // Feed the cost-spiral window. The verdict is observable (not
                 // silently dropped): a tripped spiral is logged so it surfaces

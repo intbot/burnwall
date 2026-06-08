@@ -20,6 +20,7 @@ pub mod observe;
 pub mod pricing;
 pub mod providers;
 pub mod proxy;
+pub mod ribbon;
 pub mod security;
 pub mod storage;
 #[cfg(feature = "waste")]

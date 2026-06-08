@@ -282,6 +282,23 @@ pub fn data_dir() -> Result<PathBuf> {
     Ok(home.join(".burnwall"))
 }
 
+/// Path to the "activity" marker the proxy touches after recording a turn.
+/// Status-ribbon surfaces (the editor status bar, `burnwall watch`) watch this
+/// file's modification time to refresh event-driven instead of polling.
+pub fn watch_signal_path() -> Result<PathBuf> {
+    Ok(data_dir()?.join("watch.signal"))
+}
+
+/// Best-effort bump of the [`watch_signal_path`] marker. Called off the proxy's
+/// response path (after the client already has its bytes), so the tiny write
+/// never adds to request latency. Errors are intentionally swallowed — a failed
+/// refresh nudge must never affect request handling.
+pub fn touch_watch_signal(turn_marker: &str) {
+    if let Ok(path) = watch_signal_path() {
+        let _ = std::fs::write(path, turn_marker.as_bytes());
+    }
+}
+
 #[cfg(unix)]
 fn set_secure_dir_perms(dir: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;

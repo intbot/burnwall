@@ -664,3 +664,40 @@ fn pricing_verify_without_publishers_errors() {
         .failure()
         .stderr(predicate::str::contains("no trusted publishers"));
 }
+
+// ─────────────────────────────── statusline ───────────────────────────────
+
+#[test]
+fn statusline_renders_ribbon_from_claude_code_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+
+    let json = r#"{"session_id":"s1","model":{"id":"claude-sonnet-4-6"},"cost":{"total_cost_usd":0.16},"context_window":{"used_percentage":22,"current_usage":{"input_tokens":5000,"output_tokens":615,"cache_creation_input_tokens":3000,"cache_read_input_tokens":5000}}}"#;
+
+    burnwall(&path)
+        .args(["statusline", "--no-color"])
+        .write_stdin(json)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("🔥 sonnet-4.6"))
+        .stdout(predicate::str::contains("↑13k ↓615"))   // input buckets summed
+        .stdout(predicate::str::contains("$0.16 sess"))
+        .stdout(predicate::str::contains("ctx [▓▓"))
+        .stdout(predicate::str::contains("22%"));
+}
+
+#[test]
+fn statusline_is_fail_open_on_garbage_stdin() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+
+    // Non-JSON stdin must still produce a line (zeroed), never an error.
+    burnwall(&path)
+        .args(["statusline", "--no-color"])
+        .write_stdin("not json at all")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("🔥"));
+}

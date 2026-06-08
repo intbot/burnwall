@@ -33,6 +33,7 @@ pub mod self_rollback;
 pub mod service;
 pub mod start;
 pub mod status;
+pub mod statusline;
 pub mod stop;
 #[cfg(feature = "waste")]
 pub mod waste;
@@ -103,6 +104,8 @@ pub enum Command {
     SelfRollback(self_rollback::SelfRollbackArgs),
     /// Inspect and manage the pricing rate card (local + signed remote cards).
     Pricing(pricing::PricingArgs),
+    /// Render the Burnwall ribbon for Claude Code's status line (reads stdin JSON).
+    Statusline(statusline::StatuslineArgs),
 }
 
 impl Cli {
@@ -141,6 +144,7 @@ impl Cli {
             Command::UninstallService(args) => service::uninstall_cmd(args),
             Command::SelfRollback(args) => self_rollback::run_cmd(args),
             Command::Pricing(args) => pricing::run_cmd(args),
+            Command::Statusline(args) => statusline::run_cmd(args),
         }
     }
 }
