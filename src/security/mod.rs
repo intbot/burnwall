@@ -18,6 +18,7 @@
 //! typically non-chat endpoints (e.g. health checks).
 
 pub mod dlp;
+pub mod exfil;
 pub mod packs;
 pub mod rules;
 pub mod scanner;
@@ -37,6 +38,8 @@ pub enum ViolationKind {
     Secret,
     /// Egress / DLP — exfiltration-prone data (card numbers, SSNs). v0.6.5.
     Dlp,
+    /// Command-shaped data exfiltration (DNS exfil, secret piped to network).
+    Exfil,
 }
 
 impl ViolationKind {
@@ -48,6 +51,7 @@ impl ViolationKind {
             ViolationKind::Mount => "mount_blocked",
             ViolationKind::Secret => "secret_detected",
             ViolationKind::Dlp => "dlp_blocked",
+            ViolationKind::Exfil => "exfil_blocked",
         }
     }
 }
@@ -83,6 +87,9 @@ impl Violation {
                     "payload contains possible data exfiltration: {}",
                     self.matched
                 )
+            }
+            ViolationKind::Exfil => {
+                format!("tool call looks like data exfiltration: {}", self.matched)
             }
         }
     }

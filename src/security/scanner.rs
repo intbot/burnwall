@@ -95,10 +95,19 @@ fn check_string(s: &str, rules: &Ruleset) -> Option<Violation> {
             }
         }
     }
-    // Egress / DLP last (opt-in, v0.6.5): exfiltration-prone structured data
-    // the credential denylist misses. Bounded like the pack-secret scan.
+    // Egress detection last (opt-in, v0.6.5+): exfiltration the credential and
+    // path denylists miss. Bounded like the pack-secret scan.
     if rules.detect_egress {
         let hay = capped(s, MAX_PACK_SCAN_INPUT);
+        // Technique-shaped exfil (DNS exfil, secret→network) first — highest
+        // signal and names the technique, not the data.
+        if let Some(name) = super::exfil::first_match(hay) {
+            return Some(Violation {
+                kind: ViolationKind::Exfil,
+                matched: name.to_string(),
+            });
+        }
+        // Then structured exfiltration-prone data (cards, SSNs).
         if let Some(name) = super::dlp::first_match(hay) {
             return Some(Violation {
                 kind: ViolationKind::Dlp,

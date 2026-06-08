@@ -5,8 +5,11 @@
 //! - `export` — dump the receipts (json | csv).
 //! - `aibom`  — CycloneDX AI Bill of Materials for the window.
 //! - `sarif`  — security blocks as SARIF 2.1.0 (GitHub code scanning).
+//! - `pack`   — one-command compliance evidence pack (receipts + AIBOM + SARIF
+//!   + a framework-mapping manifest) you can hand to a security/audit team.
 
 use std::io::Write;
+use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::{Args, Subcommand};
@@ -33,6 +36,19 @@ pub enum AuditCommand {
     Aibom(WindowArgs),
     /// Export security blocks as SARIF 2.1.0 (for GitHub code scanning).
     Sarif(WindowArgs),
+    /// Bundle a compliance evidence pack: signed receipts + CycloneDX AIBOM +
+    /// SARIF + a framework-mapping manifest, into one directory.
+    Pack(PackArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct PackArgs {
+    /// How many days back to include (default 7).
+    #[arg(long, default_value_t = 7)]
+    pub days: i64,
+    /// Output directory (default: ./burnwall-evidence-<date>).
+    #[arg(long)]
+    pub out: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -109,8 +125,115 @@ pub fn run_cmd(args: AuditArgs) -> anyhow::Result<()> {
             let log = sarif::build(&events);
             writeln!(out, "{}", serde_json::to_string_pretty(&log).unwrap())?;
         }
+        AuditCommand::Pack(a) => {
+            write_evidence_pack(&mut out, &storage, a.days, a.out)?;
+        }
     }
     Ok(())
+}
+
+/// Build a self-contained compliance evidence pack: the existing artifacts
+/// (signed receipts, CycloneDX 1.6 AIBOM, SARIF 2.1.0) plus a manifest that maps
+/// each to the controls auditors ask for (ISO 42001, EU AI Act, FINRA). The
+/// artifacts already exist — the value here is one command + the mapping.
+fn write_evidence_pack(
+    out: &mut impl Write,
+    storage: &Storage,
+    days: i64,
+    out_dir: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    let now = chrono::Local::now();
+    let date = now.format("%Y-%m-%d").to_string();
+    let dir = out_dir.unwrap_or_else(|| PathBuf::from(format!("burnwall-evidence-{date}")));
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+
+    // Seal first so the pack reflects the latest actions (best-effort — a
+    // missing key or zero new actions must not fail the export).
+    let chain = AuditChain::open_default().ok();
+    if let Some(c) = &chain {
+        let _ = c.seal(storage);
+    }
+    let public_key = chain.as_ref().map(|c| c.public_key_hex());
+
+    // 1) Signed receipts.
+    let receipts = storage.all_receipts()?;
+    let mut buf = Vec::new();
+    write_receipts_json(&mut buf, &receipts, public_key.as_deref())?;
+    std::fs::write(dir.join("receipts.json"), &buf).context("writing receipts.json")?;
+
+    // 2) CycloneDX 1.6 AIBOM.
+    let digest = Digest::build(storage, days)?;
+    let serial = format!("urn:uuid:{}", uuid::Uuid::new_v4());
+    let bom = aibom::build(&digest, &now.to_rfc3339(), &serial);
+    std::fs::write(
+        dir.join("aibom.cdx.json"),
+        serde_json::to_string_pretty(&bom).unwrap(),
+    )
+    .context("writing aibom.cdx.json")?;
+
+    // 3) SARIF 2.1.0 security findings.
+    let events = storage.security_events_since_days(days)?;
+    let sarif_log = sarif::build(&events);
+    std::fs::write(
+        dir.join("security.sarif.json"),
+        serde_json::to_string_pretty(&sarif_log).unwrap(),
+    )
+    .context("writing security.sarif.json")?;
+
+    // 4) Framework-mapping manifest.
+    let manifest = evidence_manifest(
+        &date,
+        days,
+        receipts.len(),
+        events.len(),
+        digest.models.len(),
+        public_key.as_deref(),
+    );
+    std::fs::write(dir.join("MANIFEST.md"), manifest).context("writing MANIFEST.md")?;
+
+    writeln!(out, "🧾 Evidence pack written to {}", dir.display())?;
+    writeln!(out, "   receipts.json        — {} signed hash-chained receipt(s)", receipts.len())?;
+    writeln!(out, "   aibom.cdx.json       — CycloneDX 1.6 AI Bill of Materials")?;
+    writeln!(out, "   security.sarif.json  — SARIF 2.1.0 ({} security event(s))", events.len())?;
+    writeln!(out, "   MANIFEST.md          — control mapping (ISO 42001 / EU AI Act / FINRA)")?;
+    if public_key.is_none() {
+        writeln!(out, "   ⚠  no audit key found — receipts are unsigned; run `burnwall audit seal` first")?;
+    }
+    Ok(())
+}
+
+fn evidence_manifest(
+    date: &str,
+    days: i64,
+    receipts: usize,
+    events: usize,
+    models: usize,
+    public_key: Option<&str>,
+) -> String {
+    let key = public_key.unwrap_or("(no audit key — receipts unsigned)");
+    format!(
+        "# Burnwall compliance evidence pack\n\
+         \n\
+         - Generated: {date}\n\
+         - Window: last {days} day(s)\n\
+         - Receipts: {receipts} · Security events: {events} · Models: {models}\n\
+         - Audit public key (Ed25519): `{key}`\n\
+         \n\
+         All artifacts are metadata only — no prompt content, no API keys.\n\
+         Verify the receipt chain at any time with `burnwall audit verify`.\n\
+         \n\
+         ## Artifacts → controls\n\
+         \n\
+         | File | What it is | Maps to |\n\
+         |------|-----------|---------|\n\
+         | `receipts.json` | Ed25519 hash-chained, tamper-evident log of every forwarded/blocked AI action (model, timestamp, action, cost). | EU AI Act Art. 12 (record-keeping) & Art. 26 (deployer logs); FINRA prompt/output-log & model-version expectations; ISO/IEC 42001 operational logging. |\n\
+         | `aibom.cdx.json` | CycloneDX 1.6 AI Bill of Materials — models used (as ML-model components), MCP tools/services, and window totals. | ISO/IEC 42001 AI-system inventory & model lineage; AIBOM / SBOM-for-AI procurement requirements; EU AI Act technical documentation. |\n\
+         | `security.sarif.json` | SARIF 2.1.0 record of blocked attempts (denied paths/commands, secrets, exfiltration). | Evidence of active guardrails / data-egress control; ingestible by GitHub code scanning and SIEMs. |\n\
+         \n\
+         > Mapping is provided to help a reviewer locate evidence; it is not a\n\
+         > certification or legal attestation. Confirm scope against your own\n\
+         > obligations.\n"
+    )
 }
 
 fn plural(n: u64) -> &'static str {

@@ -123,11 +123,21 @@ Every API call flows through Burnwall:
 
 Responses are **never modified** — Burnwall reads them, logs the cost, and passes them through unchanged.
 
+### Defense-in-depth, not a silver bullet
+
+Security rules are evaluated **before the request leaves your machine** — a
+blocked request never reaches the provider. That's the point: it's another layer
+that holds even when a tool's own approval prompt, allowlist, or sandbox is
+bypassed (and those have been, repeatedly). Burnwall doesn't claim you're under
+attack; it claims that *if* a prompt-injected agent tries to read `~/.ssh` or
+pipe a secret to the network, the rule fires locally first. Pair it with your
+tool's native controls — it's designed to complement them, not replace them.
+
 ## Scope: What Burnwall Guards
 
 Burnwall sits on the **LLM API path** — the HTTP traffic between your AI tool and Anthropic/OpenAI. Security scanning, budget enforcement, and cost tracking all operate on that traffic.
 
-It does **not** intercept **MCP** (Model Context Protocol) traffic. When your agent calls an MCP server's tools, that traffic flows through your AI tool directly — Burnwall never sees it, so it can't scan or block it. MCP-layer protection is a separate concern; dedicated MCP-firewall tools exist and run cleanly alongside Burnwall.
+The LLM-path proxy does **not** automatically see **MCP** (Model Context Protocol) traffic — that flows from your AI tool to MCP servers directly. For that layer, Burnwall ships a dedicated **MCP firewall** you put in front of your MCP servers (`burnwall mcp-watch`): it detects tool-poisoning and "rug-pull" (silent post-approval redefinition) attacks and enforces an approval workflow. Run it alongside the main proxy for end-to-end coverage.
 
 ## Supported Tools
 
@@ -182,13 +192,22 @@ $ burnwall status
    Cache savings today: $47.82
 ```
 
-## Privacy
+## Trust & privacy
 
-- **100% local.** No data ever leaves your machine (except API forwarding).
+Burnwall sits in your API traffic path, so it earns that position by being
+verifiable, not by asking for trust:
+
+- **100% local.** No data ever leaves your machine except the API forwarding you
+  asked for. Works offline (apart from the forwarding itself).
 - **Zero telemetry.** No analytics, no phone-home, no tracking. Ever.
 - **No prompt logging.** Only metadata is stored (model, tokens, cost, timestamp).
 - **No API key storage.** Keys pass through in headers and are never written to disk.
-- **Open source.** Audit the code yourself.
+- **Read-only on responses.** Burnwall inspects responses to compute cost and
+  **never modifies them** — your tool gets the provider's bytes unchanged.
+- **Single binary, signed releases.** Install from a checksummed, signed release
+  (or `cargo install` from source). No background services you didn't ask for.
+- **Open source.** The "no network calls except forwarding" claim is auditable —
+  read the proxy code yourself.
 
 ## Terms of service
 
