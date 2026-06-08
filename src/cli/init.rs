@@ -302,6 +302,39 @@ pub fn run_cmd(args: InitArgs) -> anyhow::Result<()> {
     }
     writeln!(out)?;
 
+    // 3. Claude Code status line — wire the Burnwall ribbon into
+    //    ~/.claude/settings.json. Only offered when Claude Code is detected;
+    //    the rest of init is shell-routing, this is the one editor integration.
+    let claude_found = detections.iter().any(|d| d.binary == "claude" && d.found);
+    if claude_found {
+        writeln!(out, "3. Claude Code status line")?;
+        writeln!(out, "   ───────────────────────")?;
+        if let Some(path) = super::claude_settings::settings_path() {
+            if args.apply {
+                match super::claude_settings::install(&path) {
+                    Ok(super::claude_settings::InstallOutcome::Wrote) => {
+                        writeln!(out, "   ✓ added `statusLine` to {}", path.display())?;
+                        writeln!(out, "     restart Claude Code to see: 🔥 model · ↑/↓ tokens · $ spend")?;
+                    }
+                    Ok(super::claude_settings::InstallOutcome::AlreadyOurs) => {
+                        writeln!(out, "   • already wired up in {}", path.display())?;
+                    }
+                    Ok(super::claude_settings::InstallOutcome::ForeignPresent(cmd)) => {
+                        writeln!(out, "   • left your existing status line untouched (command: {cmd})")?;
+                        writeln!(out, "     to use Burnwall's, set statusLine.command to `burnwall statusline`")?;
+                    }
+                    Err(e) => writeln!(out, "   ⚠  skipped: {}", e)?,
+                }
+            } else {
+                writeln!(out, "   {action_label}: merge `statusLine` → {}", path.display())?;
+                writeln!(out, "             command: burnwall statusline")?;
+            }
+        } else {
+            writeln!(out, "   (could not locate ~/.claude/settings.json)")?;
+        }
+        writeln!(out)?;
+    }
+
     // 3. Next steps.
     writeln!(out, "▶ Next steps")?;
     if args.apply {

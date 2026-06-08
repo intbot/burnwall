@@ -4,6 +4,24 @@ All notable changes to Burnwall.
 
 ## Unreleased
 
+## [0.9.10] — 2026-06-08
+
+### Added
+
+- **`burnwall init` now wires up the Claude Code status line.** When Claude Code
+  is detected, `init --apply` merges a `statusLine` block into
+  `~/.claude/settings.json` so the Burnwall ribbon (model · ↑/↓ tokens · spend)
+  appears automatically — no hand-editing JSON. The merge is idempotent,
+  preserves your other settings, writes the PATH-resolved `burnwall statusline`
+  command, and never overwrites a status line you already configured.
+- **`burnwall uninstall`** — one command to undo everything `install` + `init`
+  set up: stops the proxy, removes the login service, removes the Claude Code
+  status line (a foreign one is left untouched), empties the routing env file and
+  removes the rc-source hook, and removes the binary. Your cost-history database
+  is kept by default; `--purge` deletes the whole `~/.burnwall` data directory.
+  Confirms before acting (skip with `--yes`); refuses to run non-interactively
+  without `--yes`.
+
 ### Changed
 
 - `burnwall upgrade` now sweeps the leftover `burnwall.exe.old` from a previous

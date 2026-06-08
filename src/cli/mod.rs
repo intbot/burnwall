@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 
 #[cfg(feature = "audit")]
 pub mod audit;
+pub mod claude_settings;
 pub mod completions;
 pub mod config_cmd;
 #[cfg(feature = "observe")]
@@ -40,6 +41,7 @@ pub mod status;
 pub mod statusline;
 pub mod upgrade;
 pub mod stop;
+pub mod uninstall;
 pub mod watch;
 #[cfg(feature = "waste")]
 pub mod waste;
@@ -106,6 +108,8 @@ pub enum Command {
     InstallService(service::InstallServiceArgs),
     /// Remove the burnwall login-time service.
     UninstallService(service::UninstallServiceArgs),
+    /// Uninstall Burnwall: stop the proxy, remove the service, status line, routing, and binary.
+    Uninstall(uninstall::UninstallArgs),
     /// Roll back to a prior burnwall release via the dist installer.
     SelfRollback(self_rollback::SelfRollbackArgs),
     /// Upgrade to the latest release (stops the proxy, installs, restarts).
@@ -160,6 +164,7 @@ impl Cli {
             Command::DisableRouting(args) => disable_routing::run_cmd(args),
             Command::InstallService(args) => service::install_cmd(args),
             Command::UninstallService(args) => service::uninstall_cmd(args),
+            Command::Uninstall(args) => uninstall::run_cmd(args),
             Command::SelfRollback(args) => self_rollback::run_cmd(args),
             Command::Upgrade(args) => upgrade::run_cmd(args),
             Command::Pricing(args) => pricing::run_cmd(args),

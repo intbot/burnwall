@@ -200,6 +200,32 @@ pub fn install_rc_hook(shell: Shell, env_path: &Path) -> Result<bool> {
     Ok(true)
 }
 
+/// Remove the rc-source line (the one carrying [`RC_MARKER`]) from the user's
+/// shell rc. Used by `uninstall`. Returns `true` if a line was removed. Missing
+/// rc file or no marker line → `false` (nothing to do).
+pub fn remove_rc_hook(shell: Shell) -> Result<bool> {
+    let Some(rc) = shell.rc_path() else {
+        return Ok(false);
+    };
+    let existing = match std::fs::read_to_string(&rc) {
+        Ok(s) => s,
+        Err(_) => return Ok(false),
+    };
+    if !existing.contains(RC_MARKER) {
+        return Ok(false);
+    }
+    let kept: Vec<&str> = existing
+        .lines()
+        .filter(|l| !l.contains(RC_MARKER))
+        .collect();
+    let mut out = kept.join("\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    std::fs::write(&rc, out).with_context(|| format!("writing {}", rc.display()))?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
