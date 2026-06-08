@@ -2,6 +2,44 @@
 
 All notable changes to Burnwall.
 
+## [0.9.8] — 2026-06-07
+
+### Added
+
+- **`burnwall savings`** — your own *measured* cache-savings report: dollars
+  recovered through caching over a window (from real token buckets at published
+  cache-read vs base-input rates), plus models that are underusing caching. No
+  marketing percentages — your numbers.
+- **`burnwall watch` / `status` self-test heartbeat** — `status` now states
+  plainly whether protection is live ("proxy running (pid …); every request is
+  scanned"), so a passive proxy never leaves you wondering if it's working.
+- **`burnwall share`** — an opt-in, screenshot-friendly, **signed** value card
+  (spend / cache savings / blocks), verifiable against the local audit key so the
+  numbers can't be faked. Nothing leaves your machine.
+- **`burnwall sidecar`** — run the proxy as a co-located egress point for an
+  agent that executes off your laptop (self-hosted sandbox / container / CI
+  runner), with the in-sandbox env-var recipe. Same scanning + budgets; not a
+  TLS-terminating proxy (no CA injection — see `SECURITY.md`).
+- **Catastrophic-command detection by shape** — recursive-force deletes, disk
+  destruction (`dd of=/dev/…`, `mkfs`), and destructive SQL (`DROP`/`TRUNCATE`)
+  are blocked regardless of flag order, spacing, or target expansion — the forms
+  that slipped past literal/approval checks in real incidents.
+- **Data-exfiltration technique detection** (opt-in under `security.dlp`): DNS
+  exfiltration, secret-file-piped-to-network, command-substituted uploads.
+- **Per-session / swarm budget ceiling** (`budget.per_session`, opt-in via an
+  `x-burnwall-session` request header) — agents in a fan-out that share a session
+  id share one blast-radius cap; `status` shows a per-session breakdown.
+- **Build provenance** — releases now carry GitHub Artifact Attestations (SLSA
+  Build L2); verify with `gh attestation verify … --repo intbot/burnwall`. New
+  `SECURITY.md` documents integrity + TLS handling (rustls, no CA injection, no
+  plaintext at rest), backed by a guard test.
+
+### Changed
+
+- `command_matches` is whitespace-normalized, so padding (`rm   -rf   /`) can't
+  evade a literal deny rule.
+- README: "Verify your download" + the trust/defense-in-depth sections.
+
 ## [0.9.7] — 2026-06-07
 
 ### Added

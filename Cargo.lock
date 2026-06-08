@@ -171,7 +171,7 @@ checksum = "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb"
 
 [[package]]
 name = "burnwall"
-version = "0.9.7"
+version = "0.9.8"
 dependencies = [
  "anyhow",
  "assert_cmd",

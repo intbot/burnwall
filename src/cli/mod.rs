@@ -29,6 +29,9 @@ pub mod report;
 pub mod routing;
 pub mod rules;
 pub mod savings;
+#[cfg(feature = "audit")]
+pub mod share;
+pub mod sidecar;
 pub mod security;
 pub mod self_rollback;
 pub mod service;
@@ -112,6 +115,11 @@ pub enum Command {
     Watch(watch::WatchArgs),
     /// Your own measured cache savings + where caching is underused.
     Savings(savings::SavingsArgs),
+    /// Run the proxy as a co-located egress sidecar (for off-laptop sandboxes/CI).
+    Sidecar(sidecar::SidecarArgs),
+    /// Emit an opt-in, signed, screenshot-friendly value card.
+    #[cfg(feature = "audit")]
+    Share(share::ShareArgs),
 }
 
 impl Cli {
@@ -153,6 +161,9 @@ impl Cli {
             Command::Statusline(args) => statusline::run_cmd(args),
             Command::Watch(args) => watch::run_cmd(args),
             Command::Savings(args) => savings::run_cmd(args),
+            Command::Sidecar(args) => sidecar::run_cmd(args).await,
+            #[cfg(feature = "audit")]
+            Command::Share(args) => share::run_cmd(args),
         }
     }
 }

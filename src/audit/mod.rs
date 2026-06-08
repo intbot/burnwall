@@ -86,6 +86,13 @@ impl AuditChain {
         hex(self.key.verifying_key().as_bytes())
     }
 
+    /// Sign arbitrary bytes with the local audit key, returning a hex
+    /// signature. Lets `burnwall share` emit a *verifiable* value card whose
+    /// numbers can't be faked (verify against [`AuditChain::public_key_hex`]).
+    pub fn sign_hex(&self, bytes: &[u8]) -> String {
+        hex(&self.key.sign(bytes).to_bytes())
+    }
+
     /// Seal every not-yet-sealed request + security event into the chain, in
     /// chronological order. Idempotent: rows already sealed are skipped (the
     /// `audit_receipts.UNIQUE(source, source_id)` constraint backs this).

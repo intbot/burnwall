@@ -790,3 +790,31 @@ fn status_shows_by_session_when_sessions_present() {
         .stdout(predicate::str::contains("By session"))
         .stdout(predicate::str::contains("swarm-7"));
 }
+
+// ─────────────────────────────── share ───────────────────────────────
+
+#[test]
+fn share_emits_signed_value_card() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    burnwall(&path)
+        .args(["share", "--days", "30"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Burnwall · last 30 days"))
+        .stdout(predicate::str::contains("signed"))
+        .stdout(predicate::str::contains("verify: payload"));
+}
+
+#[test]
+fn share_no_sign_emits_unsigned_card() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    burnwall(&path)
+        .args(["share", "--no-sign"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("unsigned"));
+}

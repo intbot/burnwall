@@ -125,6 +125,7 @@ fn friendly_type(event_type: &str) -> &str {
         "secret_detected" => "secret/credential in payload",
         "dlp_blocked" => "PII/data exfiltration",
         "exfil_blocked" => "data-exfiltration technique",
+        "destructive_blocked" => "catastrophic command",
         other => other,
     }
 }
@@ -154,6 +155,7 @@ fn print_summary<W: Write>(
         *counts.entry(e.event_type.as_str()).or_default() += 1;
     }
     let order = [
+        "destructive_blocked",
         "exfil_blocked",
         "secret_detected",
         "dlp_blocked",
