@@ -77,6 +77,19 @@ pub fn run_cmd(args: UpgradeArgs) -> Result<()> {
     Ok(())
 }
 
+/// Best-effort removal of the `burnwall.exe.old` left behind by a previous
+/// Windows self-upgrade. The running binary can't delete itself, so the renamed
+/// copy lingers until something else runs — this sweeps it on the next launch.
+/// Silent and cheap (the file is normally absent). No-op off Windows, where no
+/// rename-aside happens.
+pub fn sweep_stale_artifact() {
+    #[cfg(windows)]
+    if let Ok(exe) = std::env::current_exe() {
+        let old = exe.with_extension("exe.old");
+        let _ = std::fs::remove_file(old);
+    }
+}
+
 fn installer_url() -> String {
     // `releases/latest/download/…` always resolves to the newest release asset.
     let filename = if cfg!(windows) {

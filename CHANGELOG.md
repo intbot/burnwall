@@ -2,6 +2,14 @@
 
 All notable changes to Burnwall.
 
+## Unreleased
+
+### Changed
+
+- `burnwall upgrade` now sweeps the leftover `burnwall.exe.old` from a previous
+  Windows self-upgrade on the next launch, so the transient renamed binary never
+  lingers (best-effort, silent; the running binary can't delete itself).
+
 ## [0.9.9] — 2026-06-08
 
 ### Added
