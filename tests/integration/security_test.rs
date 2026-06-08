@@ -428,3 +428,49 @@ fn benign_network_command_passes_with_egress_on() {
     let body = br#"{"input":{"command":"curl https://api.example.com/v1/items"}}"#;
     assert!(egress_engine().scan(body).is_none());
 }
+
+// ── Catastrophic-command detection + evasion hardening (v0.9.8) ──────────────
+
+#[test]
+fn destructive_recursive_force_rm_is_blocked_by_shape() {
+    // Reordered/spaced/expanded forms the literal deny-list would miss.
+    // Shape-only forms that do NOT match a literal deny rule.
+    for cmd in [
+        "rm -fr ~",
+        "rm --recursive --force ~/",
+        "sudo rm -rf --no-preserve-root /",
+        "rm -rf $(cat targets)",
+    ] {
+        let body = format!(r#"{{"input":{{"command":"{cmd}"}}}}"#);
+        let v = engine()
+            .scan(body.as_bytes())
+            .unwrap_or_else(|| panic!("expected a block for: {cmd}"));
+        assert_eq!(v.kind, ViolationKind::Destructive, "cmd: {cmd}");
+    }
+}
+
+#[test]
+fn destructive_disk_and_sql_blocked() {
+    let dd = br#"{"input":{"command":"dd if=/dev/zero of=/dev/sda bs=1M"}}"#;
+    assert_eq!(engine().scan(dd).unwrap().kind, ViolationKind::Destructive);
+    let sql = br#"{"input":{"command":"DROP TABLE users"}}"#;
+    assert_eq!(engine().scan(sql).unwrap().kind, ViolationKind::Destructive);
+}
+
+#[test]
+fn scoped_destructive_lookalikes_pass() {
+    // Legitimate scoped operations must not trip the catastrophic detector.
+    for cmd in ["rm -rf ./build", "rm -rf node_modules", "DELETE FROM tmp WHERE id=1", "git rm --cached f"] {
+        let body = format!(r#"{{"input":{{"command":"{cmd}"}}}}"#);
+        assert!(engine().scan(body.as_bytes()).is_none(), "should pass: {cmd}");
+    }
+}
+
+#[test]
+fn whitespace_padding_does_not_evade_literal_deny() {
+    // `command_matches` is whitespace-normalized, so padding can't slip a
+    // literal deny rule (chmod 777) past the scanner.
+    let body = br#"{"input":{"command":"chmod    777    /etc"}}"#;
+    let v = engine().scan(body).expect("violation");
+    assert_eq!(v.kind, ViolationKind::Command);
+}

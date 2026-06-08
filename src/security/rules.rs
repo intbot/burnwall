@@ -110,10 +110,17 @@ pub fn path_matches(value: &str, rule: &str) -> bool {
 }
 
 pub fn command_matches(value: &str, rule: &str) -> bool {
-    // Case-insensitive: a dangerous command literal must not be evadable by
-    // varying case (e.g. `CHMOD 777`). These rules are specific enough that
-    // case-folding does not add meaningful false positives.
-    value.to_ascii_lowercase().contains(&rule.to_ascii_lowercase())
+    // Case-insensitive AND whitespace-normalized: a dangerous command literal
+    // must not be evadable by varying case (`CHMOD 777`) or by padding it with
+    // extra spaces/tabs/newlines (`rm   -rf   /`). We collapse internal runs of
+    // whitespace on both sides before the substring check. These rules are
+    // specific enough that this does not add meaningful false positives.
+    collapse_ws(&value.to_ascii_lowercase()).contains(&collapse_ws(&rule.to_ascii_lowercase()))
+}
+
+/// Collapse all runs of whitespace to a single space (and trim ends).
+fn collapse_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 pub fn mount_matches(value: &str) -> bool {

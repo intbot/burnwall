@@ -767,3 +767,26 @@ fn status_shows_protection_heartbeat() {
         .success()
         .stdout(predicate::str::contains("Proxy not running"));
 }
+
+// ───────────────────── per-session attribution (v0.9.9) ─────────────────────
+
+#[test]
+fn status_shows_by_session_when_sessions_present() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    // Seed two requests carrying an x-burnwall-session id.
+    let db = Storage::open(path.join("burnwall.db")).unwrap();
+    let usage = TokenUsage { input_tokens: 1000, output_tokens: 200, cache_creation_tokens: 0, cache_read_tokens: 0 };
+    for cost in [0.02_f64, 0.03] {
+        let mut r = RequestRecord::successful("anthropic", "claude-sonnet-4-6", &usage, cost, Some("swarm-7".into()));
+        r.timestamp = Utc::now();
+        db.insert_request(&r).unwrap();
+    }
+    burnwall(&path)
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("By session"))
+        .stdout(predicate::str::contains("swarm-7"));
+}

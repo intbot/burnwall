@@ -20,6 +20,16 @@ fn cfg(daily: f64, warn: u8) -> BudgetConfig {
         daily_usd: daily,
         monthly_usd: 0.0,
         warn_percent: warn,
+        per_session_usd: 0.0,
+    }
+}
+
+fn cfg_session(per_session: f64) -> BudgetConfig {
+    BudgetConfig {
+        daily_usd: 0.0,
+        monthly_usd: 0.0,
+        warn_percent: 80,
+        per_session_usd: per_session,
     }
 }
 
@@ -390,4 +400,37 @@ fn loop_detector_safe_under_concurrent_writers() {
     };
     let expected = (threads * per_thread + 1) as u32;
     assert_eq!(final_count, expected, "lost increments under contention");
+}
+
+// ─────────────── Per-session / swarm budget ceiling (v0.9.9) ───────────────
+
+#[test]
+fn per_session_off_by_default_is_unlimited() {
+    let t = BudgetTracker::new(cfg(50.0, 80)); // per_session_usd = 0
+    t.record_session("swarm-1", 100.0); // no-op when capping off
+    assert!(matches!(t.check_session("swarm-1"), BudgetStatus::Ok));
+    assert!((t.session_spent("swarm-1")).abs() < EPS); // not even recorded
+}
+
+#[test]
+fn per_session_accumulates_and_blocks_at_cap() {
+    let t = BudgetTracker::new(cfg_session(2.0));
+    t.record_session("swarm-1", 0.80);
+    t.record_session("swarm-1", 0.80);
+    assert!(matches!(t.check_session("swarm-1"), BudgetStatus::Ok));
+    assert!((t.session_spent("swarm-1") - 1.60).abs() < 1e-6);
+    t.record_session("swarm-1", 0.50); // → 2.10 ≥ 2.0
+    assert!(matches!(
+        t.check_session("swarm-1"),
+        BudgetStatus::Exceeded { .. }
+    ));
+}
+
+#[test]
+fn per_session_is_isolated_per_session_id() {
+    let t = BudgetTracker::new(cfg_session(1.0));
+    t.record_session("a", 1.5);
+    assert!(matches!(t.check_session("a"), BudgetStatus::Exceeded { .. }));
+    // A different session/swarm is unaffected by sibling spend.
+    assert!(matches!(t.check_session("b"), BudgetStatus::Ok));
 }

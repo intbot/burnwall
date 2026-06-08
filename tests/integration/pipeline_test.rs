@@ -249,6 +249,7 @@ async fn budget_exceeded_returns_429_without_forwarding() {
         daily_usd: 1.0,
         monthly_usd: 0.0,
         warn_percent: 80,
+        per_session_usd: 0.0,
     }));
     budget.record(2.50); // already past the $1 cap
 
@@ -383,6 +384,7 @@ async fn budget_warning_does_not_block() {
         daily_usd: 10.0,
         monthly_usd: 0.0,
         warn_percent: 80,
+        per_session_usd: 0.0,
     }));
     budget.record(9.50);
 

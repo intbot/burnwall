@@ -66,6 +66,15 @@ fn check_string(s: &str, rules: &Ruleset) -> Option<Violation> {
             });
         }
     }
+    // Catastrophic-command detection by *shape* (flag-order / spacing / target
+    // expansion independent) — always on when security is enabled, since these
+    // are data-loss-grade and narrow enough to avoid false positives.
+    if let Some(label) = super::destructive::first_match(s) {
+        return Some(Violation {
+            kind: ViolationKind::Destructive,
+            matched: label.to_string(),
+        });
+    }
     if rules.block_network_mounts && rules::mount_matches(s) {
         return Some(Violation {
             kind: ViolationKind::Mount,

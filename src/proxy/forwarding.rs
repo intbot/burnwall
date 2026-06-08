@@ -59,6 +59,9 @@ pub async fn forward(
     provider: &'static str,
     request_hash_hex: String,
 ) -> Result<Response<ProxyBody>, BoxError> {
+    // Opt-in session/swarm id for per-session attribution + budget recording.
+    let session_id = super::handler::session_from_headers(&req_headers);
+
     let mut outbound_headers = HeaderMap::new();
     for (name, value) in req_headers.iter() {
         if !is_hop_by_hop(name.as_str()) {
@@ -146,6 +149,7 @@ pub async fn forward(
     let otel = state.otel.clone();
     let provider_str = provider.to_string();
     let hash_hex = request_hash_hex;
+    let session_for_tee = session_id.clone();
 
     let teed = streaming::tee_stream(upstream_resp.bytes_stream(), move |chunks| {
         let mut total = Vec::with_capacity(chunks.iter().map(|b| b.len()).sum());
@@ -156,13 +160,23 @@ pub async fn forward(
         match parse_for_provider(&provider_str, &total) {
             Some(p) => {
                 let cost = pricing::calculate_cost(&p.model, &p.usage).unwrap_or(0.0);
-                let mut record =
-                    RequestRecord::successful(&provider_str, &p.model, &p.usage, cost, None);
+                let mut record = RequestRecord::successful(
+                    &provider_str,
+                    &p.model,
+                    &p.usage,
+                    cost,
+                    session_for_tee.clone(),
+                );
                 record.request_hash = Some(hash_hex.clone());
                 record.latency_ms = Some(latency_ms);
                 record.http_status = Some(status_code);
                 if let Err(e) = storage.insert_request(&record) {
                     error!("requests insert failed: {}", e);
+                }
+                // Per-session/swarm budget accounting (no-op unless a session id
+                // is present and a per-session cap is configured).
+                if let Some(sid) = &session_for_tee {
+                    budget.record_session(sid, cost);
                 }
                 // Nudge status-ribbon surfaces (editor bar, `burnwall watch`) to
                 // refresh. Off the response path — the client already has its

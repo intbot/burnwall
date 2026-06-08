@@ -191,3 +191,22 @@ fn explicitly_disabled_log_scrape_is_preserved() {
     let read = config::load_or_default(&path).unwrap();
     assert!(!read.log_scrape.enabled);
 }
+
+#[test]
+fn per_session_budget_key_and_runtime_mapping() {
+    let mut cfg = Config::default();
+    assert_eq!(cfg.budget.per_session, 0.0); // off by default
+    config::set_dotted_key(&mut cfg, "budget.per_session", "5.0").unwrap();
+    assert!((cfg.budget.per_session - 5.0).abs() < 1e-9);
+
+    // Survives a save/load round-trip.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    config::save(&path, &cfg).unwrap();
+    let read = config::load_or_default(&path).unwrap();
+    assert!((read.budget.per_session - 5.0).abs() < 1e-9);
+
+    // Maps into the runtime budget config.
+    let runtime: burnwall::budget::BudgetConfig = (&cfg.budget).into();
+    assert!((runtime.per_session_usd - 5.0).abs() < 1e-9);
+}

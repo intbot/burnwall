@@ -305,6 +305,29 @@ impl Storage {
         })
     }
 
+    /// Per-session spend for a local date (sessions only — rows with a non-empty
+    /// `session_id`), newest-spend first. Powers the "by session / swarm" view
+    /// for users who set the opt-in `x-burnwall-session` header. Returns
+    /// `(session_id, cost_usd, requests)`.
+    pub fn session_costs_for_date(&self, date: &str) -> Result<Vec<(String, f64, i64)>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT session_id, COALESCE(SUM(cost_usd), 0.0) AS cost, COUNT(*) AS n
+                 FROM requests
+                 WHERE DATE(timestamp, 'localtime') = ?1
+                   AND session_id IS NOT NULL AND session_id <> ''
+                 GROUP BY session_id
+                 ORDER BY cost DESC",
+            )?;
+            let rows: rusqlite::Result<Vec<(String, f64, i64)>> = stmt
+                .query_map(params![date], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?
+                .collect();
+            Ok(rows?)
+        })
+    }
+
     /// All requests within the given local date, oldest first.
     pub fn requests_for_date(&self, date: &str) -> Result<Vec<RequestRecord>> {
         self.with_conn(|conn| {

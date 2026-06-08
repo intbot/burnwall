@@ -114,6 +114,11 @@ pub struct BudgetConfig {
     pub monthly: f64,
     /// Warn (don't block) at this percent of the daily limit.
     pub warn_percent: u8,
+    /// Hard cap per session/swarm (USD), keyed on an opt-in `x-burnwall-session`
+    /// request header. `0.0` = unlimited (off). Agents in a fan-out that set the
+    /// same session id share one blast-radius ceiling.
+    #[serde(default)]
+    pub per_session: f64,
 }
 
 impl Default for BudgetConfig {
@@ -122,6 +127,7 @@ impl Default for BudgetConfig {
             daily: 50.0,
             monthly: 0.0,
             warn_percent: 80,
+            per_session: 0.0,
         }
     }
 }
@@ -391,6 +397,7 @@ impl From<&BudgetConfig> for crate::budget::BudgetConfig {
             daily_usd: c.daily,
             monthly_usd: c.monthly,
             warn_percent: c.warn_percent,
+            per_session_usd: c.per_session,
         }
     }
 }

@@ -97,6 +97,19 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
             mcp_events_today,
             waste_per_day,
         )?;
+        // Per-session / swarm breakdown — only shown when the opt-in
+        // `x-burnwall-session` header is in use, so it never clutters the
+        // common case.
+        if let Ok(sessions) = storage.session_costs_for_date(&today) {
+            if !sessions.is_empty() {
+                writeln!(out)?;
+                writeln!(out, "   By session (x-burnwall-session):")?;
+                for (sid, cost, n) in sessions.iter().take(8) {
+                    writeln!(out, "     {:<28} ${:.2}  ({} req)", truncate(sid, 28), cost, n)?;
+                }
+            }
+        }
+
         // Self-test heartbeat: make it unmistakable whether protection is live,
         // so a passive proxy never leaves the user wondering "is it even doing
         // anything?" (a common reason such tools get distrusted / disabled).

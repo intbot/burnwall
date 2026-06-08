@@ -101,6 +101,7 @@ pub fn set_dotted_key(config: &mut Config, key: &str, value: &str) -> Result<()>
         "budget.daily" => config.budget.daily = parse(key, value)?,
         "budget.monthly" => config.budget.monthly = parse(key, value)?,
         "budget.warn_percent" => config.budget.warn_percent = parse(key, value)?,
+        "budget.per_session" => config.budget.per_session = parse(key, value)?,
         "security.enabled" => config.security.enabled = parse(key, value)?,
         "security.deny_paths" => config.security.deny_paths = split_csv(value),
         "security.deny_commands" => config.security.deny_commands = split_csv(value),

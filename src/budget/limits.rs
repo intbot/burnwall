@@ -11,6 +11,10 @@ pub struct BudgetConfig {
     pub monthly_usd: f64,
     /// Print ⚠️ once spend reaches this percent of the daily limit (0–100).
     pub warn_percent: u8,
+    /// Hard cap on spend for a single session/swarm (USD), keyed on an opt-in
+    /// `x-burnwall-session` request header. `0.0` = unlimited (off). Lets agents
+    /// in a fan-out that share a session id share one blast-radius ceiling.
+    pub per_session_usd: f64,
 }
 
 impl Default for BudgetConfig {
@@ -19,6 +23,7 @@ impl Default for BudgetConfig {
             daily_usd: 50.0,
             monthly_usd: 0.0, // unlimited per SPEC default
             warn_percent: 80,
+            per_session_usd: 0.0, // off by default
         }
     }
 }
@@ -63,6 +68,22 @@ pub fn check_daily(spent_usd: f64, config: &BudgetConfig) -> BudgetStatus {
             spent: spent_usd,
             limit: config.daily_usd,
             percent: pct,
+        };
+    }
+    BudgetStatus::Ok
+}
+
+/// Pure: classify a session's `spent_usd` against the per-session cap. Returns
+/// `Exceeded` once spend reaches the cap; no warn tier (a swarm ceiling is a
+/// hard stop). `0.0` cap = unlimited.
+pub fn check_session(spent_usd: f64, config: &BudgetConfig) -> BudgetStatus {
+    if config.per_session_usd <= 0.0 {
+        return BudgetStatus::Ok;
+    }
+    if spent_usd >= config.per_session_usd {
+        return BudgetStatus::Exceeded {
+            spent: spent_usd,
+            limit: config.per_session_usd,
         };
     }
     BudgetStatus::Ok

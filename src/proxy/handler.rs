@@ -100,6 +100,11 @@ pub async fn handle(
 
     let model = extract_model(&body_bytes).unwrap_or_else(|| "unknown".to_string());
 
+    // Opt-in session/swarm id (for per-session budget ceilings + attribution).
+    // Agents in a fan-out that set the same `x-burnwall-session` header share
+    // one budget + show up grouped; absent header = feature dormant.
+    let session_id = session_from_headers(&parts.headers);
+
     // ─── security check ───
     if let Some(violation) = state.security.scan(&body_bytes) {
         warn!("🛡️ BLOCKED {}: {}", provider, violation.message());
@@ -163,6 +168,27 @@ pub async fn handle(
             warn!("⚠️ Budget {}% used (${:.2}/${:.2})", percent, spent, limit);
         }
         BudgetStatus::Ok => {}
+    }
+
+    // ─── per-session / swarm budget ceiling (opt-in via x-burnwall-session) ───
+    if let Some(sid) = &session_id {
+        if let BudgetStatus::Exceeded { spent, limit } = state.budget.check_session(sid) {
+            warn!("💰 SESSION BUDGET EXCEEDED: ${:.2}/${:.2}", spent, limit);
+            let record =
+                RequestRecord::blocked(provider, &model, "session_budget_exceeded", Some(sid.clone()));
+            if let Err(e) = state.storage.insert_request(&record) {
+                tracing::error!("blocked-request insert failed: {}", e);
+            }
+            let msg = format!(
+                "Session budget of ${:.2} exceeded (${:.2} spent) — swarm/session cap hit",
+                limit, spent
+            );
+            return Ok(error_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                "session_budget_exceeded",
+                &msg,
+            ));
+        }
     }
 
     // ─── loop detection ───
@@ -299,6 +325,17 @@ fn healthz_response() -> Response<ProxyBody> {
 /// Read BURNWALL_BYPASS each call (no caching) so a user can flip it without
 /// restarting the proxy. Truthy values: `1`, `true`, `yes`, `on` (case-
 /// insensitive).
+/// Extract a non-empty `x-burnwall-session` header value, if present. Shared
+/// shape with the forwarder so enforcement (here) and recording (there) key on
+/// the same id.
+pub fn session_from_headers(headers: &hyper::HeaderMap) -> Option<String> {
+    headers
+        .get("x-burnwall-session")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 fn bypass_active() -> bool {
     match std::env::var("BURNWALL_BYPASS") {
         Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),

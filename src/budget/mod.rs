@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub mod limits;
 pub mod loop_detector;
 
-pub use limits::{check_daily, BudgetConfig, BudgetStatus};
+pub use limits::{check_daily, check_session, BudgetConfig, BudgetStatus};
 pub use loop_detector::{LoopConfig, LoopDetector, LoopVerdict};
 
 use crate::storage::Storage;
@@ -35,6 +35,9 @@ const MICROCENTS_PER_USD: f64 = 100_000_000.0;
 
 pub struct BudgetTracker {
     today_microcents: AtomicU64,
+    /// Per-session/swarm spend (microcents), keyed on the opt-in
+    /// `x-burnwall-session` header. Only populated when a session id is present.
+    session_microcents: dashmap::DashMap<String, u64>,
     config: BudgetConfig,
 }
 
@@ -42,6 +45,7 @@ impl BudgetTracker {
     pub fn new(config: BudgetConfig) -> Self {
         Self {
             today_microcents: AtomicU64::new(0),
+            session_microcents: dashmap::DashMap::new(),
             config,
         }
     }
@@ -72,6 +76,30 @@ impl BudgetTracker {
     /// Classify the current state against the configured daily limit.
     pub fn check(&self) -> BudgetStatus {
         check_daily(self.today_spent(), &self.config)
+    }
+
+    /// Add a request's cost to a session/swarm counter (keyed on the opt-in
+    /// `x-burnwall-session` header). No-op when per-session capping is off.
+    pub fn record_session(&self, session: &str, cost_usd: f64) {
+        if self.config.per_session_usd <= 0.0 || !cost_usd.is_finite() || cost_usd <= 0.0 {
+            return;
+        }
+        let units = (cost_usd * MICROCENTS_PER_USD).round() as u64;
+        *self.session_microcents.entry(session.to_string()).or_insert(0) += units;
+    }
+
+    /// Spend so far for a session (USD).
+    pub fn session_spent(&self, session: &str) -> f64 {
+        self.session_microcents
+            .get(session)
+            .map(|v| (*v as f64) / MICROCENTS_PER_USD)
+            .unwrap_or(0.0)
+    }
+
+    /// Classify a session against the per-session/swarm cap. `Ok` when capping
+    /// is off or no session id is supplied.
+    pub fn check_session(&self, session: &str) -> BudgetStatus {
+        check_session(self.session_spent(session), &self.config)
     }
 
     /// Zero the counter — call at midnight (caller decides UTC vs local).

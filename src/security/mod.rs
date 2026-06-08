@@ -17,6 +17,7 @@
 //! user's workflow is worse than missing one scan, and non-JSON bodies are
 //! typically non-chat endpoints (e.g. health checks).
 
+pub mod destructive;
 pub mod dlp;
 pub mod exfil;
 pub mod packs;
@@ -40,6 +41,9 @@ pub enum ViolationKind {
     Dlp,
     /// Command-shaped data exfiltration (DNS exfil, secret piped to network).
     Exfil,
+    /// Catastrophic, data-loss-grade command (recursive-force delete, disk
+    /// destruction, destructive SQL) — detected by shape, not literal match.
+    Destructive,
 }
 
 impl ViolationKind {
@@ -52,6 +56,7 @@ impl ViolationKind {
             ViolationKind::Secret => "secret_detected",
             ViolationKind::Dlp => "dlp_blocked",
             ViolationKind::Exfil => "exfil_blocked",
+            ViolationKind::Destructive => "destructive_blocked",
         }
     }
 }
@@ -90,6 +95,9 @@ impl Violation {
             }
             ViolationKind::Exfil => {
                 format!("tool call looks like data exfiltration: {}", self.matched)
+            }
+            ViolationKind::Destructive => {
+                format!("blocked a catastrophic command: {}", self.matched)
             }
         }
     }
