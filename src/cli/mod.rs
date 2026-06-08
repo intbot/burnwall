@@ -35,6 +35,7 @@ pub mod start;
 pub mod status;
 pub mod statusline;
 pub mod stop;
+pub mod watch;
 #[cfg(feature = "waste")]
 pub mod waste;
 
@@ -106,6 +107,8 @@ pub enum Command {
     Pricing(pricing::PricingArgs),
     /// Render the Burnwall ribbon for Claude Code's status line (reads stdin JSON).
     Statusline(statusline::StatuslineArgs),
+    /// Live cross-tool status ribbon for a spare terminal pane (sourced from the DB).
+    Watch(watch::WatchArgs),
 }
 
 impl Cli {
@@ -145,6 +148,7 @@ impl Cli {
             Command::SelfRollback(args) => self_rollback::run_cmd(args),
             Command::Pricing(args) => pricing::run_cmd(args),
             Command::Statusline(args) => statusline::run_cmd(args),
+            Command::Watch(args) => watch::run_cmd(args),
         }
     }
 }

@@ -108,6 +108,7 @@ fn build_ribbon(cc: &CcInput) -> Ribbon {
     };
 
     let (today, blocks) = db_enrichment();
+    let today_usd = if today > 0.0 { Some(today) } else { None };
 
     let model_id = cc
         .model
@@ -127,8 +128,8 @@ fn build_ribbon(cc: &CcInput) -> Ribbon {
         up,
         down,
         msg_usd: msg,
-        sess_usd: sess,
-        today_usd: today,
+        sess_usd: Some(sess),
+        today_usd,
         blocks_today: blocks,
         ctx,
     }
@@ -197,7 +198,7 @@ mod tests {
         assert_eq!(r.model, "sonnet-4.6");
         assert_eq!(r.up, 13_000); // 5000 + 3000 + 5000
         assert_eq!(r.down, 615);
-        assert!((r.sess_usd - 0.16).abs() < 1e-9);
+        assert!((r.sess_usd.unwrap() - 0.16).abs() < 1e-9);
         assert_eq!(r.ctx, Ctx::Exact(22.0));
     }
 

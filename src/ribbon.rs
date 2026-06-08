@@ -50,10 +50,11 @@ pub struct Ribbon {
     pub down: u64,
     /// Cost of the most recent turn, if known.
     pub msg_usd: Option<f64>,
-    /// Cost of the current session.
-    pub sess_usd: f64,
-    /// Total spend today across all tools (from the proxy DB).
-    pub today_usd: f64,
+    /// Cost of the current session, if the surface has a session concept
+    /// (Claude Code's status line does; the DB-sourced `watch` view does not).
+    pub sess_usd: Option<f64>,
+    /// Total spend today across all tools (from the proxy DB), if known.
+    pub today_usd: Option<f64>,
     /// Security blocks today (from the proxy DB).
     pub blocks_today: u64,
     /// Context-window gauge.
@@ -70,15 +71,22 @@ impl Ribbon {
             let _ = write!(s, " ({t})");
         }
         let _ = write!(s, " · ↑{} ↓{}", human_k(self.up), human_k(self.down));
-        match self.msg_usd {
-            Some(m) => {
-                let _ = write!(s, " · ${:.2} msg ${:.2} sess", m, self.sess_usd);
+        // Cost segment: show msg (per-turn) and/or sess, whichever are known.
+        match (self.msg_usd, self.sess_usd) {
+            (Some(m), Some(sess)) => {
+                let _ = write!(s, " · ${:.2} msg ${:.2} sess", m, sess);
             }
-            None => {
-                let _ = write!(s, " · ${:.2} sess", self.sess_usd);
+            (Some(m), None) => {
+                let _ = write!(s, " · ${:.2} msg", m);
             }
+            (None, Some(sess)) => {
+                let _ = write!(s, " · ${:.2} sess", sess);
+            }
+            (None, None) => {}
         }
-        let _ = write!(s, " · ${:.2} today", self.today_usd);
+        if let Some(today) = self.today_usd {
+            let _ = write!(s, " · ${today:.2} today");
+        }
         if self.blocks_today > 0 {
             let _ = write!(s, " · 🛡{}", self.blocks_today);
         }
@@ -232,8 +240,8 @@ mod tests {
             up: 13_000,
             down: 615,
             msg_usd: Some(0.05),
-            sess_usd: 0.16,
-            today_usd: 2.40,
+            sess_usd: Some(0.16),
+            today_usd: Some(2.40),
             blocks_today: 0,
             ctx: Ctx::Exact(22.0),
         }
@@ -264,6 +272,24 @@ mod tests {
         let s = r.render(false);
         assert!(s.contains("$0.16 sess"));
         assert!(!s.contains("msg"));
+    }
+
+    #[test]
+    fn db_path_shows_msg_and_today_without_session() {
+        // The watch/DB surface has no session concept.
+        let mut r = base();
+        r.sess_usd = None;
+        let s = r.render(false);
+        assert!(s.contains("$0.05 msg"));
+        assert!(!s.contains("sess"));
+        assert!(s.contains("$2.40 today"));
+    }
+
+    #[test]
+    fn omits_today_when_absent() {
+        let mut r = base();
+        r.today_usd = None;
+        assert!(!r.render(false).contains("today"));
     }
 
     #[test]

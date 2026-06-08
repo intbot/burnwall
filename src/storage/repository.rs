@@ -284,6 +284,27 @@ impl Storage {
         })
     }
 
+    /// The most recent successful (non-blocked) request, if any. Powers the
+    /// DB-sourced status ribbon (`burnwall watch` / editor bar): the last
+    /// real turn's model, token counts, and cost.
+    pub fn most_recent_request(&self) -> Result<Option<RequestRecord>> {
+        self.with_conn(|conn| {
+            let r = conn
+                .query_row(
+                    "SELECT id, timestamp, provider, model,
+                            input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
+                            cost_usd, blocked, block_reason, session_id, request_hash,
+                            latency_ms, http_status
+                     FROM requests WHERE blocked = 0
+                     ORDER BY timestamp DESC LIMIT 1",
+                    [],
+                    row_to_request,
+                )
+                .optional()?;
+            Ok(r)
+        })
+    }
+
     /// All requests within the given local date, oldest first.
     pub fn requests_for_date(&self, date: &str) -> Result<Vec<RequestRecord>> {
         self.with_conn(|conn| {

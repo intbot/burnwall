@@ -2,6 +2,28 @@
 
 All notable changes to Burnwall.
 
+## [0.9.6] — 2026-06-07
+
+### Added
+
+- **`burnwall watch`** — a live, cross-tool status ribbon for a spare terminal
+  pane. The in-TUI ribbon only works in Claude Code; this shows the *same*
+  renderer for every tool that routes through the proxy (Codex, Gemini, Aider,
+  …), sourced from the local database. `--oneline` for a compact line, `--once`
+  for a single frame (scripting/tests), `--interval` for the fallback refresh.
+  It refreshes event-driven off the `watch.signal` marker the proxy touches each
+  turn, with a periodic fallback. The headline figure is **today's spend across
+  all tools** — the cross-tool number no single tool shows.
+- The status ribbon's context gauge stays honest on this surface: no tool feeds
+  an exact context %, so it's an estimate (`~`) when the model's window is known
+  and the prompt fits, and `—` otherwise — never an unqualified number.
+
+### Changed
+
+- Ribbon cost fields (`sess`, `today`) are now rendered only when known, so the
+  cross-tool view (which has no per-session concept) shows per-message + today
+  without a misleading "session" figure.
+
 ## [0.9.5] — 2026-06-07
 
 ### Added

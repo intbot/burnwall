@@ -701,3 +701,31 @@ fn statusline_is_fail_open_on_garbage_stdin() {
         .success()
         .stdout(predicate::str::contains("🔥"));
 }
+
+// ─────────────────────────────── watch ───────────────────────────────
+
+#[test]
+fn watch_once_renders_cross_tool_ribbon() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    seed_storage(&path); // one anthropic/claude-sonnet-4-6 request
+
+    burnwall(&path)
+        .args(["watch", "--once", "--oneline", "--no-color"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("🔥 sonnet-4.6"))
+        .stdout(predicate::str::contains("today"));
+}
+
+#[test]
+fn watch_once_empty_db_is_safe() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    burnwall(&path)
+        .args(["watch", "--once", "--no-color"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("🔥"));
+}
