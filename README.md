@@ -101,6 +101,24 @@ cargo install burnwall                                         # from crates.io
 git clone https://github.com/intbot/burnwall && cd burnwall && cargo build --release   # from source
 ```
 
+### Verify your download
+
+Every release binary carries a GitHub Artifact Attestation (Sigstore keyless
+build provenance, SLSA Build L2) — proof it was built from this repo's CI, not
+swapped out. Verify before trusting a binary in your traffic path:
+
+```bash
+gh attestation verify burnwall-x86_64-unknown-linux-gnu.tar.xz --repo intbot/burnwall
+```
+
+Each release also ships per-file `.sha256` checksums and a combined `sha256.sum`:
+
+```bash
+sha256sum --ignore-missing -c sha256.sum
+```
+
+See [`SECURITY.md`](SECURITY.md) for the full integrity + TLS-handling statement.
+
 ## How It Works
 
 Burnwall runs as a local HTTP proxy. You point your AI tools at it via environment variables:

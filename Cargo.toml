@@ -117,6 +117,10 @@ name = "pricing_test"
 path = "tests/unit/pricing_test.rs"
 
 [[test]]
+name = "tls_integrity_test"
+path = "tests/unit/tls_integrity_test.rs"
+
+[[test]]
 name = "storage_test"
 path = "tests/unit/storage_test.rs"
 

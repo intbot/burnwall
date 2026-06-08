@@ -36,3 +36,8 @@ tap = "intbot/homebrew-burnwall"
 publish-jobs = ["./publish-crates", "./publish-nuget", "./publish-pypi"]
 # Run a plan-only check on PRs (don't try to build/publish on every PR).
 pr-run-mode = "plan"
+# Generate GitHub Artifact Attestations (Sigstore keyless build provenance,
+# SLSA Build L2). Every released binary can then be verified with
+# `gh attestation verify <file> --repo intbot/burnwall`. No signing key to
+# manage — a security tool should be exemplary about its own integrity.
+github-attestations = true

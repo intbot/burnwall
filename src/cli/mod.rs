@@ -28,6 +28,7 @@ pub mod pricing;
 pub mod report;
 pub mod routing;
 pub mod rules;
+pub mod savings;
 pub mod security;
 pub mod self_rollback;
 pub mod service;
@@ -109,6 +110,8 @@ pub enum Command {
     Statusline(statusline::StatuslineArgs),
     /// Live cross-tool status ribbon for a spare terminal pane (sourced from the DB).
     Watch(watch::WatchArgs),
+    /// Your own measured cache savings + where caching is underused.
+    Savings(savings::SavingsArgs),
 }
 
 impl Cli {
@@ -149,6 +152,7 @@ impl Cli {
             Command::Pricing(args) => pricing::run_cmd(args),
             Command::Statusline(args) => statusline::run_cmd(args),
             Command::Watch(args) => watch::run_cmd(args),
+            Command::Savings(args) => savings::run_cmd(args),
         }
     }
 }

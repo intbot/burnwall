@@ -97,6 +97,20 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
             mcp_events_today,
             waste_per_day,
         )?;
+        // Self-test heartbeat: make it unmistakable whether protection is live,
+        // so a passive proxy never leaves the user wondering "is it even doing
+        // anything?" (a common reason such tools get distrusted / disabled).
+        writeln!(out)?;
+        match super::daemon::running_pid().ok().flatten() {
+            Some(pid) => writeln!(
+                out,
+                "   🟢 Protection active — proxy running (pid {pid}); every request is scanned."
+            )?,
+            None => writeln!(
+                out,
+                "   ⚪ Proxy not running — start it with `burnwall start` (rules apply only while it runs)."
+            )?,
+        }
     }
     Ok(())
 }

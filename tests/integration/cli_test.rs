@@ -729,3 +729,41 @@ fn watch_once_empty_db_is_safe() {
         .success()
         .stdout(predicate::str::contains("🔥"));
 }
+
+// ─────────────────────────────── savings ───────────────────────────────
+
+#[test]
+fn savings_reports_spend_and_is_json_valid() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    seed_storage(&path); // one anthropic/claude-sonnet-4-6 request, cost > 0
+
+    burnwall(&path)
+        .args(["savings", "--days", "30"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Savings & cost"))
+        .stdout(predicate::str::contains("Real spend"));
+
+    let output = burnwall(&path)
+        .args(["savings", "--json"])
+        .output()
+        .expect("run");
+    assert!(output.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON");
+    assert!(v["real_spend_usd"].as_f64().is_some());
+    assert!(v["opportunities"].is_array());
+}
+
+#[test]
+fn status_shows_protection_heartbeat() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    seed_storage(&path);
+    // Proxy isn't running in the test sandbox → the "not running" heartbeat.
+    burnwall(&path)
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Proxy not running"));
+}
