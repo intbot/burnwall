@@ -1,11 +1,27 @@
 //! JSON scanner.
 //!
-//! Walks every string leaf of a `serde_json::Value` (no schema knowledge —
-//! per ARCHITECTURE.md "any string value containing a denied path or command
-//! triggers a block") and applies the matching primitives from
-//! [`super::rules`] and [`super::secrets`]. Returns the **first** violation
-//! found and stops scanning — there's no value in collecting all violations,
-//! the proxy blocks on any one.
+//! Two entry points over the same walk:
+//!
+//! - [`scan`] applies the **full** check set to every string leaf. Right for
+//!   payloads that are tool-call-shaped end to end: MCP JSON-RPC bodies
+//!   (`tools/call` arguments), advertised MCP tool definitions, and the
+//!   `burnwall rules test` playground.
+//!
+//! - [`scan_request`] is context-aware, for LLM request bodies. Command-shaped
+//!   checks (denied paths, denied commands, network mounts, destructive
+//!   commands, exfil techniques) run only inside **tool-call argument**
+//!   subtrees — an Anthropic `tool_use.input`, an OpenAI `tool_calls` /
+//!   `function_call`, a Gemini `functionCall`. Data-shaped checks (secrets,
+//!   DLP) still run on every string leaf: a credential or card number is
+//!   worth blocking wherever it sits in the payload.
+//!
+//! The split exists because an LLM request carries far more than tool calls:
+//! system prompts, chat history, tool *definitions*, tool results. Those can
+//! legitimately *mention* `~/.ssh` or `rm -rf` — project docs describing a
+//! deny list, a conversation about backup scripts — and only an actual tool
+//! invocation should trip the firewall. Returns the **first** violation found
+//! and stops scanning — there's no value in collecting all violations, the
+//! proxy blocks on any one.
 
 use serde_json::Value;
 
@@ -13,11 +29,36 @@ use super::rules::{self, Ruleset};
 use super::secrets;
 use super::{Violation, ViolationKind};
 
+/// Which checks apply to a string leaf, by where it sits in the payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    /// Inside a tool-call argument subtree → full check set.
+    ToolArgs,
+    /// Anywhere else (system prompt, chat text, tool definitions, tool
+    /// results) → data checks only (secrets, DLP).
+    Prose,
+}
+
+/// Scan every string leaf with the full check set.
 pub fn scan(value: &Value, rules: &Ruleset) -> Option<Violation> {
+    walk(value, rules, Scope::ToolArgs)
+}
+
+/// Context-aware scan for an LLM request body — see the module docs.
+pub fn scan_request(value: &Value, rules: &Ruleset) -> Option<Violation> {
+    walk(value, rules, Scope::Prose)
+}
+
+fn walk(value: &Value, rules: &Ruleset, scope: Scope) -> Option<Violation> {
     match value {
         Value::Object(map) => {
-            for (_, v) in map {
-                if let Some(violation) = scan(v, rules) {
+            for (k, v) in map {
+                let child_scope = if scope == Scope::ToolArgs || holds_tool_args(k, map) {
+                    Scope::ToolArgs
+                } else {
+                    Scope::Prose
+                };
+                if let Some(violation) = walk(v, rules, child_scope) {
                     return Some(violation);
                 }
             }
@@ -25,61 +66,91 @@ pub fn scan(value: &Value, rules: &Ruleset) -> Option<Violation> {
         }
         Value::Array(arr) => {
             for v in arr {
-                if let Some(violation) = scan(v, rules) {
+                if let Some(violation) = walk(v, rules, scope) {
                     return Some(violation);
                 }
             }
             None
         }
-        Value::String(s) => check_string(s, rules),
+        Value::String(s) => check_string(s, rules, scope),
         _ => None,
     }
 }
 
-fn check_string(s: &str, rules: &Ruleset) -> Option<Violation> {
+/// Does `key` (an entry of `obj`) hold tool-call arguments? Matches the
+/// tool-call shapes of the supported providers without full schema knowledge:
+///
+/// - Anthropic content blocks: `{"type": "tool_use", "input": {…}}` (also
+///   `server_tool_use` / `mcp_tool_use` via the suffix match)
+/// - OpenAI Chat Completions: `{"tool_calls": […]}`, legacy
+///   `{"function_call": {…}}`
+/// - OpenAI Responses API items: `{"type": "function_call", "arguments": "…"}`
+///   (also `custom_tool_call`, `computer_call`, … via the suffix match)
+/// - Gemini: `{"functionCall": {"name": …, "args": {…}}}`
+///
+/// Anything else — `tools` definitions, `tool_result` content, `system`,
+/// message text — is prose.
+fn holds_tool_args(key: &str, obj: &serde_json::Map<String, Value>) -> bool {
+    match key {
+        "tool_calls" | "function_call" | "functionCall" => true,
+        "input" => matches!(
+            obj.get("type").and_then(Value::as_str),
+            Some(t) if t.ends_with("tool_use")
+        ),
+        "arguments" | "args" => matches!(
+            obj.get("type").and_then(Value::as_str),
+            Some(t) if t.ends_with("_call")
+        ),
+        _ => false,
+    }
+}
+
+fn check_string(s: &str, rules: &Ruleset, scope: Scope) -> Option<Violation> {
     // Order: paths → commands → mounts → secrets. Paths are the highest-
     // signal category; secrets last so a path-blocked SSH key dump doesn't
     // also accidentally trip the private-key regex.
-    //
-    // A leaf matching a project `allow_paths` exception skips the path-deny
-    // checks entirely — but command, mount, and secret checks below still
-    // run, so `allow_paths` can never green-light a dangerous command.
-    let path_allowed = rules
-        .allow_paths
-        .iter()
-        .any(|allow| rules::path_matches(s, allow));
-    if !path_allowed {
-        for rule in &rules.deny_paths {
-            if rules::path_matches(s, rule) {
+    if scope == Scope::ToolArgs {
+        // A leaf matching a project `allow_paths` exception skips the path-deny
+        // checks entirely — but command, mount, and secret checks below still
+        // run, so `allow_paths` can never green-light a dangerous command.
+        let path_allowed = rules
+            .allow_paths
+            .iter()
+            .any(|allow| rules::path_matches(s, allow));
+        if !path_allowed {
+            for rule in &rules.deny_paths {
+                if rules::path_matches(s, rule) {
+                    return Some(Violation {
+                        kind: ViolationKind::Path,
+                        matched: rule.clone(),
+                    });
+                }
+            }
+        }
+        for rule in &rules.deny_commands {
+            if rules::command_matches(s, rule) {
                 return Some(Violation {
-                    kind: ViolationKind::Path,
+                    kind: ViolationKind::Command,
                     matched: rule.clone(),
                 });
             }
         }
-    }
-    for rule in &rules.deny_commands {
-        if rules::command_matches(s, rule) {
+        // Catastrophic-command detection by *shape* (flag-order / spacing /
+        // target expansion independent) — always on when security is enabled,
+        // since these are data-loss-grade and narrow enough to avoid false
+        // positives.
+        if let Some(label) = super::destructive::first_match(s) {
             return Some(Violation {
-                kind: ViolationKind::Command,
-                matched: rule.clone(),
+                kind: ViolationKind::Destructive,
+                matched: label.to_string(),
             });
         }
-    }
-    // Catastrophic-command detection by *shape* (flag-order / spacing / target
-    // expansion independent) — always on when security is enabled, since these
-    // are data-loss-grade and narrow enough to avoid false positives.
-    if let Some(label) = super::destructive::first_match(s) {
-        return Some(Violation {
-            kind: ViolationKind::Destructive,
-            matched: label.to_string(),
-        });
-    }
-    if rules.block_network_mounts && rules::mount_matches(s) {
-        return Some(Violation {
-            kind: ViolationKind::Mount,
-            matched: extract_mount_prefix(s).to_string(),
-        });
+        if rules.block_network_mounts && rules::mount_matches(s) {
+            return Some(Violation {
+                kind: ViolationKind::Mount,
+                matched: extract_mount_prefix(s).to_string(),
+            });
+        }
     }
     if rules.detect_secrets {
         // Built-in patterns scan the FULL leaf — we must never miss a known
@@ -109,12 +180,15 @@ fn check_string(s: &str, rules: &Ruleset) -> Option<Violation> {
     if rules.detect_egress {
         let hay = capped(s, MAX_PACK_SCAN_INPUT);
         // Technique-shaped exfil (DNS exfil, secret→network) first — highest
-        // signal and names the technique, not the data.
-        if let Some(name) = super::exfil::first_match(hay) {
-            return Some(Violation {
-                kind: ViolationKind::Exfil,
-                matched: name.to_string(),
-            });
+        // signal and names the technique, not the data. Command-shaped, so
+        // tool-args only.
+        if scope == Scope::ToolArgs {
+            if let Some(name) = super::exfil::first_match(hay) {
+                return Some(Violation {
+                    kind: ViolationKind::Exfil,
+                    matched: name.to_string(),
+                });
+            }
         }
         // Then structured exfiltration-prone data (cards, SSNs).
         if let Some(name) = super::dlp::first_match(hay) {

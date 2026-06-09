@@ -106,7 +106,10 @@ pub async fn handle(
     let session_id = session_from_headers(&parts.headers);
 
     // ─── security check ───
-    if let Some(violation) = state.security.scan(&body_bytes) {
+    // `scan_request`, not `scan`: command-shaped rules apply only to tool-call
+    // arguments, so a system prompt or chat message that merely *mentions* a
+    // denied path/command doesn't 403 the whole session.
+    if let Some(violation) = state.security.scan_request(&body_bytes) {
         warn!("🛡️ BLOCKED {}: {}", provider, violation.message());
 
         // When log_redact_details is on, storage rows strip the matched-rule

