@@ -49,6 +49,8 @@ pub async fn run_cmd(args: SidecarArgs) -> anyhow::Result<()> {
     println!();
 
     // Delegate to the normal start path with the sidecar bind defaults.
+    // `no_routing`: a sidecar serves a remote sandbox/CI agent — local shell
+    // routing is `burnwall start`'s concern, not this command's.
     start::run_cmd(StartArgs {
         port: Some(port),
         host: Some(host),
@@ -57,6 +59,7 @@ pub async fn run_cmd(args: SidecarArgs) -> anyhow::Result<()> {
         upstream_openai: "https://api.openai.com".to_string(),
         upstream_google: "https://generativelanguage.googleapis.com".to_string(),
         rewrite_anthropic_cache: false,
+        no_routing: true,
     })
     .await
 }

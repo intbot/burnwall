@@ -201,11 +201,27 @@ fn write_routing(w: &mut impl Write, sty: &Styler) -> std::io::Result<()> {
                 w,
                 "      Traffic goes straight to the provider: no security scan, no cost capture."
             )?;
-            writeln!(
-                w,
-                "      Fix:  {}   (then restart your AI tool)",
-                sty.bold("burnwall enable-routing")
-            )
+            // Routing paused by `burnwall stop` resumes on `start`; anything
+            // else needs an explicit enable.
+            let paused = crate::cli::init::Shell::detect()
+                .map(|s| {
+                    crate::cli::routing::env_file_state(s)
+                        == Some(crate::cli::routing::EnvFileState::Paused)
+                })
+                .unwrap_or(false);
+            if paused {
+                writeln!(
+                    w,
+                    "      Fix:  {}   (routing is paused while the proxy is stopped)",
+                    sty.bold("burnwall start")
+                )
+            } else {
+                writeln!(
+                    w,
+                    "      Fix:  {}   (then restart your AI tool)",
+                    sty.bold("burnwall enable-routing")
+                )
+            }
         }
         EnvRouting::Bypassed => writeln!(
             w,

@@ -40,6 +40,10 @@ pub struct StartArgs {
     /// Overrides `proxy.cache_injection` from config when present.
     #[arg(long)]
     pub rewrite_anthropic_cache: bool,
+    /// Leave shell routing untouched: don't re-enable it once the proxy is
+    /// up, and don't pause it when the proxy exits.
+    #[arg(long)]
+    pub no_routing: bool,
 }
 
 pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
@@ -193,10 +197,75 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
     // we are killed without the chance to.
     daemon::write_pid_file(std::process::id())?;
 
+    // Routing follows the proxy lifecycle: resume it now that the port is
+    // actually bound (never before — routing at a dead port is the failure
+    // mode this exists to prevent), pause it again on the way out so a
+    // Ctrl-C'd foreground proxy doesn't strand new shells either.
+    if !args.no_routing {
+        resume_and_report(&format!("http://localhost:{port}"));
+    }
+
     let result = serve_with_shutdown(listener, Arc::new(state), daemon::shutdown_signal()).await;
     daemon::remove_pid_file().ok();
+    if !args.no_routing {
+        super::stop::pause_and_report();
+    }
     result.context("proxy serve")?;
     Ok(())
+}
+
+/// Re-enable shell routing now that the proxy is serving, honoring an
+/// explicit `disable-routing`, and say what happened. Failures are warnings —
+/// routing is a convenience layer and must never stop the proxy.
+/// Also called by the `--daemon` launcher once the child reports ready.
+pub(crate) fn resume_and_report(proxy_url: &str) {
+    use super::routing::ResumeAction;
+
+    let outcomes = match super::routing::resume_routing(proxy_url) {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!("could not re-enable shell routing: {e}");
+            return;
+        }
+    };
+    let sty = crate::term::Styler::stdout();
+    if outcomes.is_empty() {
+        println!(
+            "   Routing:  no shell configured — run `burnwall init` (or `burnwall enable-routing`) to route AI tools here."
+        );
+        return;
+    }
+    let labels = |action: ResumeAction| -> Vec<&str> {
+        outcomes
+            .iter()
+            .filter(|o| o.action == action)
+            .map(|o| o.shell.label())
+            .collect()
+    };
+    let resumed = labels(ResumeAction::Resumed);
+    if !resumed.is_empty() {
+        println!(
+            "   Routing:  {} for {} — new shells route through the proxy",
+            sty.green("re-enabled"),
+            resumed.join(", ")
+        );
+    }
+    let refreshed = labels(ResumeAction::Refreshed);
+    if !refreshed.is_empty() {
+        println!(
+            "   Routing:  {} for {}",
+            sty.green("active"),
+            refreshed.join(", ")
+        );
+    }
+    let left = labels(ResumeAction::LeftDisabled);
+    if !left.is_empty() {
+        println!(
+            "   Routing:  {} for {} (explicitly disabled — `burnwall enable-routing` to turn on)",
+            sty.yellow("left off"),
+            left.join(", ")
+        );
+    }
 }
 
 fn init_tracing() {

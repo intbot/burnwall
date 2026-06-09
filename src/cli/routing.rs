@@ -95,6 +95,146 @@ pub fn env_file_disabled(shell: Shell) -> String {
     )
 }
 
+/// Marker carried by an env file that `burnwall stop` paused, telling it
+/// apart from an explicit `disable-routing`: `start` re-enables paused files
+/// but never overrides a deliberate disable.
+const PAUSED_MARKER: &str = "# burnwall:paused";
+
+/// Render the paused stub (no exports). Used by `burnwall stop`.
+pub fn env_file_paused(shell: Shell) -> String {
+    let comment = match shell {
+        Shell::Powershell => "#",
+        _ => "#",
+    };
+    format!(
+        "{comment} burnwall routing — paused (proxy stopped). `burnwall start` re-enables it.\n{PAUSED_MARKER}\n"
+    )
+}
+
+/// The persistent routing state one env file records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvFileState {
+    /// Export lines present — new shells route through the proxy.
+    Active,
+    /// Paused by `burnwall stop` — `start` re-enables it automatically.
+    Paused,
+    /// Explicitly disabled with `disable-routing` — only `enable-routing`
+    /// (or `init`) turns it back on.
+    Disabled,
+}
+
+/// Classify env-file contents. Pure over its input for testability.
+pub fn classify_env_contents(contents: &str) -> EnvFileState {
+    if contents.contains("ANTHROPIC_BASE_URL") {
+        EnvFileState::Active
+    } else if contents.contains(PAUSED_MARKER) {
+        EnvFileState::Paused
+    } else {
+        EnvFileState::Disabled
+    }
+}
+
+/// The state of this shell's env file, or `None` when no file exists.
+pub fn env_file_state(shell: Shell) -> Option<EnvFileState> {
+    let contents = std::fs::read_to_string(env_file_path(shell)?).ok()?;
+    Some(classify_env_contents(&contents))
+}
+
+/// Pause routing for every env file that is currently ACTIVE: replace the
+/// exports with the paused stub so new shells go direct while the proxy is
+/// down. Explicitly-disabled stubs and absent files are left alone — a
+/// `disable-routing` decision survives a stop/start cycle untouched.
+/// Returns the env files rewritten (deduped — bash and zsh share one).
+pub fn pause_routing() -> Result<Vec<PathBuf>> {
+    let mut paused = Vec::new();
+    for shell in Shell::ALL {
+        let Some(path) = env_file_path(shell) else {
+            continue;
+        };
+        if paused.contains(&path) {
+            continue;
+        }
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if classify_env_contents(&contents) != EnvFileState::Active {
+            continue;
+        }
+        std::fs::write(&path, env_file_paused(shell))
+            .with_context(|| format!("writing {}", path.display()))?;
+        paused.push(path);
+    }
+    Ok(paused)
+}
+
+/// What `start` did to one configured shell's routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeAction {
+    /// Routing was already on; the env file was rewritten with the current
+    /// proxy URL (picks up a port change).
+    Refreshed,
+    /// Paused by `stop` (or the env file was missing) — turned back on.
+    Resumed,
+    /// Explicitly disabled by the user — respected, left off.
+    LeftDisabled,
+}
+
+pub struct ResumeOutcome {
+    pub shell: Shell,
+    pub action: ResumeAction,
+}
+
+/// Pure resume decision for one shell, from its env-file state.
+pub fn resume_action_for(state: Option<EnvFileState>) -> ResumeAction {
+    match state {
+        Some(EnvFileState::Disabled) => ResumeAction::LeftDisabled,
+        Some(EnvFileState::Active) => ResumeAction::Refreshed,
+        Some(EnvFileState::Paused) | None => ResumeAction::Resumed,
+    }
+}
+
+/// Re-enable routing on proxy start, for every shell the user previously
+/// configured (rc hook present, or own env file for fish/PowerShell). Never
+/// wires up a fresh shell — that's `init` / `enable-routing`'s job — and
+/// never overrides an explicit `disable-routing`.
+pub fn resume_routing(proxy_url: &str) -> Result<Vec<ResumeOutcome>> {
+    let mut out = Vec::new();
+    let mut seen_paths: Vec<PathBuf> = Vec::new();
+    for shell in Shell::configured() {
+        let Some(path) = env_file_path(shell) else {
+            continue;
+        };
+        // bash and zsh share env.sh — write it once, report it once.
+        if seen_paths.contains(&path) {
+            continue;
+        }
+        seen_paths.push(path);
+        let action = resume_action_for(env_file_state(shell));
+        match action {
+            ResumeAction::Refreshed | ResumeAction::Resumed => {
+                write_env_file(shell, proxy_url)?;
+            }
+            ResumeAction::LeftDisabled => {}
+        }
+        out.push(ResumeOutcome { shell, action });
+    }
+    Ok(out)
+}
+
+/// Plain commands a user can paste to drop the routing vars from an
+/// already-open shell. Deliberately NOT `disable-routing --eval`: that would
+/// also flip the persistent state to explicitly-disabled and stop `start`
+/// from auto-resuming.
+pub fn manual_unset_hint(shell: Shell) -> &'static str {
+    match shell {
+        Shell::Zsh | Shell::Bash => "unset ANTHROPIC_BASE_URL OPENAI_BASE_URL",
+        Shell::Fish => "set -e ANTHROPIC_BASE_URL; set -e OPENAI_BASE_URL",
+        Shell::Powershell => {
+            "Remove-Item Env:ANTHROPIC_BASE_URL, Env:OPENAI_BASE_URL -ErrorAction SilentlyContinue"
+        }
+    }
+}
+
 /// Lines that set the proxy env vars for the given shell.
 pub fn export_lines(shell: Shell, proxy_url: &str) -> Vec<String> {
     let anthropic = format!("{}/anthropic", proxy_url);
@@ -276,12 +416,9 @@ pub fn rc_hook_present(shell: Shell) -> bool {
 }
 
 /// True if routing is *actively enabled* for this shell — the env file exists
-/// and still carries the export lines (not the `disable-routing` stub).
+/// and still carries the export lines (not a paused or disabled stub).
 pub fn routing_active(shell: Shell) -> bool {
-    env_file_path(shell)
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .map(|c| c.contains("ANTHROPIC_BASE_URL"))
-        .unwrap_or(false)
+    env_file_state(shell) == Some(EnvFileState::Active)
 }
 
 /// Append the rc-source line to the user's shell rc, if not already there.
@@ -378,6 +515,70 @@ mod tests {
         let body = env_file_disabled(Shell::Zsh);
         assert!(!body.contains("export"));
         assert!(body.starts_with("# burnwall routing"));
+    }
+
+    #[test]
+    fn env_file_paused_is_no_op_when_sourced() {
+        let body = env_file_paused(Shell::Zsh);
+        assert!(!body.contains("export"));
+        assert!(body.starts_with("# burnwall routing"));
+        assert!(body.contains(PAUSED_MARKER));
+    }
+
+    #[test]
+    fn env_file_states_are_distinguishable() {
+        // The three persistent states must classify distinctly, for every
+        // shell flavor — `start`'s resume decision rides on this.
+        for shell in Shell::ALL {
+            assert_eq!(
+                classify_env_contents(&env_file_contents(shell, PROXY_DEFAULT)),
+                EnvFileState::Active,
+                "{}",
+                shell.label()
+            );
+            assert_eq!(
+                classify_env_contents(&env_file_paused(shell)),
+                EnvFileState::Paused,
+                "{}",
+                shell.label()
+            );
+            assert_eq!(
+                classify_env_contents(&env_file_disabled(shell)),
+                EnvFileState::Disabled,
+                "{}",
+                shell.label()
+            );
+        }
+    }
+
+    #[test]
+    fn resume_respects_explicit_disable_but_recovers_paused() {
+        // Paused (by stop) or missing → resume; active → refresh the URL;
+        // explicitly disabled → hands off.
+        assert_eq!(
+            resume_action_for(Some(EnvFileState::Paused)),
+            ResumeAction::Resumed
+        );
+        assert_eq!(resume_action_for(None), ResumeAction::Resumed);
+        assert_eq!(
+            resume_action_for(Some(EnvFileState::Active)),
+            ResumeAction::Refreshed
+        );
+        assert_eq!(
+            resume_action_for(Some(EnvFileState::Disabled)),
+            ResumeAction::LeftDisabled
+        );
+    }
+
+    #[test]
+    fn manual_unset_hint_has_no_persistent_side_effects() {
+        // The stop-time hint must only touch the live shell env — it must
+        // not mention disable-routing (which would flip persistent state).
+        for shell in Shell::ALL {
+            let hint = manual_unset_hint(shell);
+            assert!(hint.contains("ANTHROPIC_BASE_URL"), "{hint}");
+            assert!(!hint.contains("disable-routing"), "{hint}");
+        }
     }
 
     #[test]

@@ -133,6 +133,15 @@ pub async fn spawn_background(args: &StartArgs) -> anyhow::Result<()> {
                     "\u{1f6e1}\u{fe0f}  Burnwall is running in the background (PID {pid})."
                 ))
             );
+            // The child was spawned with --no-routing: it is detached, so its
+            // routing report would go nowhere. The launcher resumes routing
+            // here instead, once the child is confirmed serving.
+            if !args.no_routing {
+                super::start::resume_and_report(&format!(
+                    "http://localhost:{}",
+                    resolved_port(args)
+                ));
+            }
             println!("   Check it with `burnwall status`; stop it with `burnwall stop`.");
             return Ok(());
         }
@@ -154,8 +163,10 @@ pub async fn spawn_background(args: &StartArgs) -> anyhow::Result<()> {
 }
 
 /// Rebuild the `start` argument list for the child, dropping `--daemon`.
+/// The child always gets `--no-routing`: the launcher handles routing (and
+/// its messaging) after readiness, and `burnwall stop` handles the pause.
 fn child_args(args: &StartArgs) -> Vec<String> {
-    let mut out = vec!["start".to_string()];
+    let mut out = vec!["start".to_string(), "--no-routing".to_string()];
     if let Some(port) = args.port {
         out.push("--port".to_string());
         out.push(port.to_string());
@@ -174,6 +185,19 @@ fn child_args(args: &StartArgs) -> Vec<String> {
         out.push("--rewrite-anthropic-cache".to_string());
     }
     out
+}
+
+/// The port the child will serve on: the explicit flag, else the configured
+/// port, else the built-in default — same resolution `start` itself uses.
+fn resolved_port(args: &StartArgs) -> u16 {
+    if let Some(p) = args.port {
+        return p;
+    }
+    crate::config::default_path()
+        .ok()
+        .and_then(|p| crate::config::load_or_default(&p).ok())
+        .map(|c| c.proxy.port)
+        .unwrap_or(4100)
 }
 
 /// Resolve when the process is asked to shut down: Ctrl-C on any platform,
