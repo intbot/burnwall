@@ -37,12 +37,7 @@ case "$uname_m" in
     *) die "unsupported architecture: $uname_m. Try 'cargo install burnwall' or build from source." ;;
 esac
 
-# We currently ship aarch64-darwin, x86_64-darwin, x86_64-linux.
-# Linux aarch64 needs a cross build that isn't wired up yet.
-if [ "$os_part" = "unknown-linux-gnu" ] && [ "$arch_part" = "aarch64" ]; then
-    die "Linux aarch64 prebuilt binaries are not yet published. Use 'cargo install burnwall' or build from source."
-fi
-
+# Published targets: aarch64-darwin, x86_64-darwin, aarch64-linux, x86_64-linux.
 target="${arch_part}-${os_part}"
 
 # Resolve version → tag
@@ -58,23 +53,26 @@ else
     tag="v${VERSION#v}"
 fi
 
-url="https://github.com/${REPO}/releases/download/${tag}/burnwall-${target}.tar.gz"
+url="https://github.com/${REPO}/releases/download/${tag}/burnwall-${target}.tar.xz"
 
 # Tempdir + cleanup
 tmp=$(mktemp -d 2>/dev/null || mktemp -d -t burnwall)
 trap 'rm -rf "$tmp"' EXIT INT HUP TERM
 
 info "downloading ${tag} for ${target}..."
-if ! curl -fsSL -o "${tmp}/burnwall.tar.gz" "$url"; then
+if ! curl -fsSL -o "${tmp}/burnwall.tar.xz" "$url"; then
     die "download failed: ${url}"
 fi
 
 info "extracting..."
-tar -xzf "${tmp}/burnwall.tar.gz" -C "$tmp"
-[ -f "${tmp}/burnwall" ] || die "tarball did not contain a 'burnwall' binary"
+tar -xJf "${tmp}/burnwall.tar.xz" -C "$tmp"
+# The archive extracts to a `burnwall-<target>/` subdir — locate the binary
+# rather than assuming a flat layout.
+bin_path=$(find "$tmp" -type f -name burnwall | head -n 1)
+[ -n "$bin_path" ] || die "archive did not contain a 'burnwall' binary"
 
 mkdir -p "$INSTALL_DIR"
-mv "${tmp}/burnwall" "${INSTALL_DIR}/burnwall"
+mv "$bin_path" "${INSTALL_DIR}/burnwall"
 chmod 755 "${INSTALL_DIR}/burnwall"
 
 info ""

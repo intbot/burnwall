@@ -87,9 +87,10 @@ Works on macOS (arm64 + x86_64) and Linuxbrew.
 Prebuilt archives for every release are at
 <https://github.com/intbot/burnwall/releases>:
 
-- `burnwall-aarch64-apple-darwin.tar.gz` — macOS Apple Silicon
-- `burnwall-x86_64-apple-darwin.tar.gz` — macOS Intel
-- `burnwall-x86_64-unknown-linux-gnu.tar.gz` — Linux x86_64
+- `burnwall-aarch64-apple-darwin.tar.xz` — macOS Apple Silicon
+- `burnwall-x86_64-apple-darwin.tar.xz` — macOS Intel
+- `burnwall-aarch64-unknown-linux-gnu.tar.xz` — Linux arm64
+- `burnwall-x86_64-unknown-linux-gnu.tar.xz` — Linux x86_64
 - `burnwall-x86_64-pc-windows-msvc.zip` — Windows x86_64
 
 Extract and put the `burnwall` binary anywhere on your `PATH`.
