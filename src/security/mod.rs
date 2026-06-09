@@ -120,10 +120,28 @@ impl SecurityEngine {
         &self.rules
     }
 
-    /// Scan a request body. `Some(Violation)` → block; `None` → forward.
+    /// Scan a payload that is tool-call-shaped end to end (MCP JSON-RPC
+    /// bodies, rule testing): every string leaf gets the full check set.
+    /// `Some(Violation)` → block; `None` → forward.
     ///
     /// Non-JSON bodies return `None` (see fail-open in the module docs).
     pub fn scan(&self, body: &[u8]) -> Option<Violation> {
+        let json = self.parse_for_scan(body)?;
+        scanner::scan(&json, &self.rules)
+    }
+
+    /// Scan an LLM request body, scoping command-shaped checks (paths,
+    /// commands, mounts, destructive, exfil) to tool-call argument subtrees.
+    /// Prose — the system prompt, chat text, tool definitions, tool results —
+    /// only gets the data checks (secrets, DLP), so a payload that merely
+    /// *mentions* a denied path or command is not blocked. See
+    /// [`scanner::scan_request`].
+    pub fn scan_request(&self, body: &[u8]) -> Option<Violation> {
+        let json = self.parse_for_scan(body)?;
+        scanner::scan_request(&json, &self.rules)
+    }
+
+    fn parse_for_scan(&self, body: &[u8]) -> Option<serde_json::Value> {
         // Master switch — `security.enabled = false` forwards without scanning.
         if !self.rules.enabled {
             return None;
@@ -133,7 +151,6 @@ impl SecurityEngine {
         // the fail-open path. Real clients never emit a BOM; this is
         // defense-in-depth.
         let body = body.strip_prefix(b"\xef\xbb\xbf").unwrap_or(body);
-        let json: serde_json::Value = serde_json::from_slice(body).ok()?;
-        scanner::scan(&json, &self.rules)
+        serde_json::from_slice(body).ok()
     }
 }
