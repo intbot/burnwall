@@ -36,6 +36,23 @@ pub enum Ctx {
     Hidden,
 }
 
+/// Whether the surfaced tool's traffic is actually flowing through Burnwall.
+/// Only the unhealthy states render anything — the happy path stays clean, and
+/// the `🔥 burnwall` prefix already implies "protected".
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Routing {
+    /// Confirmed routed through the proxy. Renders nothing (no clutter).
+    Proxied,
+    /// Going straight to the provider — Burnwall sees nothing: no security
+    /// scanning, no cost capture. Rendered as a loud warning.
+    Direct,
+    /// Routed, but the `BURNWALL_BYPASS` kill switch makes the proxy a pure
+    /// relay (checks off). Rendered as a softer caution.
+    Bypassed,
+    /// The surface has no environment context to judge routing. Renders nothing.
+    Unknown,
+}
+
 /// Subscription-plan limit headroom, derived from a [`crate::plan::PlanSnapshot`].
 /// When present, it *replaces* the dollar cost segment — for a flat-rate plan the
 /// scarce resource is window headroom, not (notional) money.
@@ -78,6 +95,9 @@ pub struct Ribbon {
     /// Subscription-plan limit headroom. When `Some`, the renderer shows it in
     /// place of the dollar cost segment (subscription mode).
     pub plan: Option<PlanLimits>,
+    /// Whether traffic is actually flowing through the proxy. Warns when it
+    /// isn't; silent on the healthy path.
+    pub routing: Routing,
     /// Context-window gauge.
     pub ctx: Ctx,
 }
@@ -90,6 +110,17 @@ impl Ribbon {
         let _ = write!(s, "🔥 burnwall · {}", self.model);
         if let Some(t) = &self.tool {
             let _ = write!(s, " ({t})");
+        }
+        // Routing health sits right after the model so an unprotected tool is
+        // impossible to miss. Shown only when something is wrong.
+        match self.routing {
+            Routing::Direct => {
+                let _ = write!(s, " · {}", warn_segment("⚠ DIRECT (unprotected)", color, Hue::Red));
+            }
+            Routing::Bypassed => {
+                let _ = write!(s, " · {}", warn_segment("⚠ bypass", color, Hue::Yellow));
+            }
+            Routing::Proxied | Routing::Unknown => {}
         }
         let _ = write!(s, " · ↑{} ↓{}", human_k(self.up), human_k(self.down));
         // Subscription mode replaces the (notional) dollar cost with real plan
@@ -265,6 +296,17 @@ fn bar(pct: f64, color: bool) -> String {
     }
 }
 
+/// A short, optionally-coloured warning chip (e.g. the not-routed banner). Bold
+/// so it stands out from the metric segments around it.
+fn warn_segment(text: &str, color: bool, hue: Hue) -> String {
+    if color {
+        let code = hue_code(hue);
+        format!("\x1b[1;{code}m{text}\x1b[0m")
+    } else {
+        text.to_string()
+    }
+}
+
 fn pct_label(pct: f64, color: bool) -> String {
     let raw = format!("{}%", pct.round() as i64);
     if color {
@@ -295,14 +337,17 @@ fn ctx_color(pct: f64) -> Hue {
     }
 }
 
-fn colorize(s: &str, hue: Hue) -> String {
-    let code = match hue {
+fn hue_code(hue: Hue) -> &'static str {
+    match hue {
         Hue::Green => "32",
         Hue::Yellow => "33",
         Hue::Orange => "38;5;208",
         Hue::Red => "31",
-    };
-    format!("\x1b[{code}m{s}\x1b[0m")
+    }
+}
+
+fn colorize(s: &str, hue: Hue) -> String {
+    format!("\x1b[{}m{s}\x1b[0m", hue_code(hue))
 }
 
 #[cfg(test)]
@@ -320,6 +365,7 @@ mod tests {
             today_usd: Some(2.40),
             blocks_today: 0,
             plan: None,
+            routing: Routing::Unknown,
             ctx: Ctx::Exact(22.0),
         }
     }
@@ -490,5 +536,44 @@ mod tests {
     fn color_output_contains_ansi() {
         let s = base().render(true);
         assert!(s.contains("\x1b["), "colored render should contain ANSI codes");
+    }
+
+    #[test]
+    fn direct_routing_renders_loud_warning() {
+        let mut r = base();
+        r.routing = Routing::Direct;
+        let s = r.render(false);
+        assert!(s.contains("⚠ DIRECT (unprotected)"), "got: {s}");
+        // Placed right after the model, before the token counts.
+        let warn_at = s.find("DIRECT").unwrap();
+        let up_at = s.find("↑13k").unwrap();
+        assert!(warn_at < up_at, "warning should precede the token segment");
+    }
+
+    #[test]
+    fn bypass_routing_renders_caution() {
+        let mut r = base();
+        r.routing = Routing::Bypassed;
+        let s = r.render(false);
+        assert!(s.contains("⚠ bypass"));
+        assert!(!s.contains("DIRECT"));
+    }
+
+    #[test]
+    fn proxied_and_unknown_routing_render_nothing() {
+        for routing in [Routing::Proxied, Routing::Unknown] {
+            let mut r = base();
+            r.routing = routing;
+            let s = r.render(false);
+            assert!(!s.contains('⚠'), "{routing:?} should not warn: {s}");
+        }
+    }
+
+    #[test]
+    fn direct_warning_is_bold_red_in_color_mode() {
+        let mut r = base();
+        r.routing = Routing::Direct;
+        let s = r.render(true);
+        assert!(s.contains("\x1b[1;31m"), "expected bold-red warning: {s}");
     }
 }

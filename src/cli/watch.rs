@@ -150,6 +150,10 @@ fn ribbon_from_db(db: &Storage) -> Ribbon {
             let now = chrono::Utc::now().timestamp();
             crate::plan::freshest(now, 12 * 3600).and_then(|s| s.to_ribbon_limits(now))
         },
+        // The aggregate DB view spans every tool; there's no single tool
+        // environment to judge routing from, so stay silent here. Per-tool
+        // coverage is shown in the dashboard's `coverage:` block instead.
+        routing: ribbon::Routing::Unknown,
         ctx,
     }
 }

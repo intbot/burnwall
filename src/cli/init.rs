@@ -112,6 +112,50 @@ impl Shell {
             Shell::Powershell => "PowerShell",
         }
     }
+
+    /// Every shell family burnwall can wire up. Iteration order is stable so
+    /// teardown/sync output is deterministic.
+    pub const ALL: [Shell; 4] = [Shell::Zsh, Shell::Bash, Shell::Fish, Shell::Powershell];
+
+    /// Is this shell already configured for routing? True when its rc-hook is
+    /// present, or — for shells with a *unique* env file — when that env file
+    /// exists.
+    ///
+    /// Bash and zsh deliberately rely on the rc-hook signal only: they share a
+    /// single `env.sh`, so env-file presence can't tell them apart, and we must
+    /// not pull a never-used shell into a sync (which would, e.g., create a
+    /// spurious `~/.zshrc` on a bash-only box). Fish/PowerShell have their own
+    /// env files, so presence is unambiguous there.
+    fn is_configured(self) -> bool {
+        if super::routing::rc_hook_present(self) {
+            return true;
+        }
+        match self {
+            Shell::Powershell | Shell::Fish => super::routing::env_file_present(self),
+            Shell::Bash | Shell::Zsh => false,
+        }
+    }
+
+    /// Shells the user has previously configured for routing. This is why a
+    /// command run from one shell can keep the *other* shells consistent — the
+    /// single-shell assumption breaks on Windows, where PowerShell and Git-bash
+    /// commonly coexist.
+    pub fn configured() -> Vec<Shell> {
+        Self::ALL.into_iter().filter(|s| s.is_configured()).collect()
+    }
+
+    /// The shells an enable/disable should act on: every already-configured
+    /// shell, plus the one we're running in now (so first-time setup still
+    /// works on a fresh machine where nothing is configured yet).
+    pub fn routing_targets() -> Vec<Shell> {
+        let mut v = Self::configured();
+        if let Some(cur) = Self::detect() {
+            if !v.contains(&cur) {
+                v.push(cur);
+            }
+        }
+        v
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

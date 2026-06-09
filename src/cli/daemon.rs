@@ -126,7 +126,13 @@ pub async fn spawn_background(args: &StartArgs) -> anyhow::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(pid) = read_pid_file()? {
-            println!("\u{1f6e1}\u{fe0f}  Burnwall is running in the background (PID {pid}).");
+            let sty = crate::term::Styler::stdout();
+            println!(
+                "{}",
+                sty.green(&format!(
+                    "\u{1f6e1}\u{fe0f}  Burnwall is running in the background (PID {pid})."
+                ))
+            );
             println!("   Check it with `burnwall status`; stop it with `burnwall stop`.");
             return Ok(());
         }

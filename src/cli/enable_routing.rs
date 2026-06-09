@@ -9,14 +9,23 @@
 //! When stdout is **a pipe** (`eval "$(burnwall enable-routing)"`): bare
 //! `export …` lines suitable for direct evaluation, plus the persistent
 //! file write. The current shell picks up the env vars immediately.
+//!
+//! ## Multi-shell sync
+//!
+//! Routing is applied to every shell the user has configured (plus the current
+//! one), not just the detected shell — see [`Shell::routing_targets`]. A
+//! Windows user typically drives both PowerShell and Git-bash; enabling from
+//! one must not leave the other silently unrouted.
 
 use std::io::{IsTerminal, Write};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Args;
 
 use super::init::Shell;
 use super::routing::{self, PROXY_DEFAULT};
+use crate::term::Styler;
 
 #[derive(Args, Debug)]
 pub struct EnableRoutingArgs {
@@ -33,10 +42,20 @@ pub struct EnableRoutingArgs {
     pub eval: bool,
 }
 
+/// Outcome of writing one shell's routing files.
+struct ShellWrite {
+    shell: Shell,
+    env_path: PathBuf,
+    /// `Some(true)` rc hook added, `Some(false)` already present, `None` the
+    /// shell has no rc file we auto-edit (PowerShell — by design).
+    hook: Option<bool>,
+}
+
 pub async fn run_cmd(args: EnableRoutingArgs) -> Result<()> {
-    let shell = Shell::detect()
+    let current = Shell::detect()
         .ok_or_else(|| anyhow::anyhow!("could not detect shell — set $SHELL or use --eval"))?;
     let eval_mode = args.eval || !std::io::stdout().is_terminal();
+    let sty = Styler::stdout();
 
     // ─── pre-flight (skip on --skip-preflight) ───
     if !args.skip_preflight {
@@ -44,60 +63,130 @@ pub async fn run_cmd(args: EnableRoutingArgs) -> Result<()> {
             // Pre-flight failure means: don't write the env file. Emit a
             // clear error and bail. The user can re-run with --skip-preflight
             // if they want to activate anyway.
+            let est = Styler::stderr();
             let mut stderr = std::io::stderr().lock();
-            writeln!(stderr, "burnwall: pre-flight failed — routing NOT enabled.")?;
+            writeln!(
+                stderr,
+                "{}",
+                est.red("burnwall: pre-flight failed — routing NOT enabled.")
+            )?;
             writeln!(stderr, "  {}", e)?;
-            writeln!(stderr, "  (override with `--skip-preflight` if you know what you're doing)")?;
+            writeln!(
+                stderr,
+                "  (override with `--skip-preflight` if you know what you're doing)"
+            )?;
             anyhow::bail!("pre-flight check failed");
         }
     }
 
-    // ─── persistent write: env file + rc hook ───
-    let env_path = routing::write_env_file(shell, &args.proxy_url)?;
-    let hook_added = match routing::install_rc_hook(shell, &env_path) {
-        Ok(b) => b,
-        Err(e) => {
-            // Hook install fails on PowerShell (no rc path support) — that's
-            // OK in eval mode; the user pipes our output and sets the rc up
-            // by hand if they want persistence. Surface the warning only in
-            // TTY mode.
-            if !eval_mode {
-                eprintln!("burnwall: could not install rc hook ({}). The env file is written but won't auto-load.", e);
+    // ─── persistent write: env file + rc hook, for every target shell ───
+    let targets = Shell::routing_targets();
+    let mut writes: Vec<ShellWrite> = Vec::new();
+    for shell in targets {
+        let env_path = routing::write_env_file(shell, &args.proxy_url)?;
+        let hook = if shell.rc_path().is_some() {
+            match routing::install_rc_hook(shell, &env_path) {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    // A real I/O failure on a shell that *does* have an rc file.
+                    if !eval_mode {
+                        let est = Styler::stderr();
+                        eprintln!(
+                            "{}",
+                            est.yellow(&format!(
+                                "burnwall: could not install rc hook for {} ({e}). \
+                                 The env file is written but won't auto-load.",
+                                shell.label()
+                            ))
+                        );
+                    }
+                    Some(false)
+                }
             }
-            false
-        }
-    };
+        } else {
+            None // PowerShell: we don't auto-edit the profile (by design).
+        };
+        writes.push(ShellWrite {
+            shell,
+            env_path,
+            hook,
+        });
+    }
 
     // ─── output ───
     let mut out = std::io::stdout().lock();
     if eval_mode {
-        // Bare exports for eval "$(burnwall enable-routing)".
-        for line in routing::export_lines(shell, &args.proxy_url) {
+        // Bare exports for the *current* shell only — you can't eval PowerShell
+        // syntax in bash. The persistent files above already cover the rest.
+        for line in routing::export_lines(current, &args.proxy_url) {
             writeln!(out, "{}", line)?;
         }
     } else {
-        writeln!(out, "🛡  Burnwall routing enabled.")?;
-        writeln!(out, "   Env file:  {}", env_path.display())?;
-        if hook_added {
-            if let Some(rc) = shell.rc_path() {
-                writeln!(out, "   Rc hook:   {} (sourced on new shells)", rc.display())?;
+        writeln!(out, "{}", sty.green("🛡  Burnwall routing enabled."))?;
+        for w in &writes {
+            let tag = if w.shell == current {
+                format!("{} (current)", w.shell.label())
+            } else {
+                w.shell.label().to_string()
+            };
+            writeln!(
+                out,
+                "   {}  env file:  {}",
+                sty.bold(&tag),
+                sty.blue(&w.env_path.display().to_string())
+            )?;
+            match (w.hook, w.shell.rc_path()) {
+                (Some(true), Some(rc)) => writeln!(
+                    out,
+                    "       rc hook:   {} (sourced on new shells)",
+                    sty.blue(&rc.display().to_string())
+                )?,
+                (Some(false), Some(rc)) => writeln!(
+                    out,
+                    "       rc hook:   {} (already present — left unchanged)",
+                    sty.blue(&rc.display().to_string())
+                )?,
+                _ => writeln!(
+                    out,
+                    "       rc hook:   {}",
+                    sty.yellow("PowerShell profile not auto-edited — use the eval line below")
+                )?,
             }
-        } else if let Some(rc) = shell.rc_path() {
-            writeln!(out, "   Rc hook:   {} (already present — left unchanged)", rc.display())?;
+        }
+        if writes.len() > 1 {
+            writeln!(
+                out,
+                "   {}",
+                sty.cyan(&format!(
+                    "Synced {} shells so routing is consistent across all of them.",
+                    writes.len()
+                ))
+            )?;
         }
         writeln!(out)?;
         writeln!(out, "   To activate in *this* shell without restarting:")?;
-        match shell {
+        match current {
             Shell::Powershell => {
-                writeln!(out, "     burnwall enable-routing --eval | Out-String | Invoke-Expression")?;
+                writeln!(
+                    out,
+                    "     {}",
+                    sty.bold("burnwall enable-routing --eval | Out-String | Invoke-Expression")
+                )?;
             }
             _ => {
-                writeln!(out, "     eval \"$(burnwall enable-routing)\"")?;
+                writeln!(out, "     {}", sty.bold("eval \"$(burnwall enable-routing)\""))?;
             }
         }
         writeln!(out)?;
-        writeln!(out, "   Kill switch (instant bypass without disabling):  BURNWALL_BYPASS=1")?;
-        writeln!(out, "   Full disable:                                    burnwall disable-routing")?;
+        writeln!(
+            out,
+            "   Kill switch (instant bypass without disabling):  {}",
+            sty.yellow("BURNWALL_BYPASS=1")
+        )?;
+        writeln!(
+            out,
+            "   Full disable:                                    burnwall disable-routing"
+        )?;
     }
     Ok(())
 }

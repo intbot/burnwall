@@ -132,7 +132,34 @@ fn build_ribbon(cc: &CcInput) -> Ribbon {
         today_usd,
         blocks_today: blocks,
         plan: plan_limits(),
+        routing: routing_state(&model_id),
         ctx,
+    }
+}
+
+/// Routing health for the status line. The `statusline` process is spawned by
+/// Claude Code and inherits its environment, so the tool's `*_BASE_URL` tells us
+/// whether traffic is actually reaching the proxy. We key off the model's
+/// provider (Claude Code is Anthropic, but be correct if that ever changes).
+fn routing_state(model_id: &str) -> ribbon::Routing {
+    let provider = provider_of(model_id);
+    match crate::cli::routing::current_routing(provider) {
+        crate::cli::routing::EnvRouting::Proxied => ribbon::Routing::Proxied,
+        crate::cli::routing::EnvRouting::Direct => ribbon::Routing::Direct,
+        crate::cli::routing::EnvRouting::Bypassed => ribbon::Routing::Bypassed,
+    }
+}
+
+/// Best-effort provider guess from a model id (only the families a status line
+/// surfaces). Defaults to `anthropic` — the Claude Code case.
+fn provider_of(model_id: &str) -> &'static str {
+    let m = model_id.to_ascii_lowercase();
+    if m.contains("gpt") || m.starts_with("o1") || m.starts_with("o3") || m.contains("openai") {
+        "openai"
+    } else if m.contains("gemini") || m.contains("google") {
+        "google"
+    } else {
+        "anthropic"
     }
 }
 

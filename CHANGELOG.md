@@ -2,6 +2,38 @@
 
 All notable changes to Burnwall.
 
+## [0.9.12] — 2026-06-09
+
+### Fixed
+
+- **Routing commands now act on every configured shell, not just the detected
+  one.** A user often drives more than one shell (on Windows, PowerShell *and*
+  Git-bash are the norm). Previously `enable-routing` / `disable-routing` /
+  `uninstall` resolved a single shell and touched only its env file + rc hook, so
+  enabling from PowerShell left bash silently unrouted (and `uninstall` could
+  leave a live rc hook pointing at a removed proxy). They now sync the detected
+  shell **plus** every shell already configured for routing, keeping them
+  consistent. Bash/zsh are disambiguated by their rc-hook (they share one
+  `env.sh`); fish/PowerShell by their own env files — so a never-used shell is
+  never pulled in (no spurious `~/.zshrc`).
+
+### Added
+
+- **Not-routed warning on the Claude Code status line.** When a tool's traffic
+  isn't flowing through the proxy, the ribbon shows a loud `⚠ DIRECT
+  (unprotected)` chip (and `⚠ bypass` when `BURNWALL_BYPASS` is set) right after
+  the model — so "the proxy is running but my traffic isn't reaching it" can't go
+  unnoticed. Detected from the tool's `*_BASE_URL` in the environment the status
+  line inherits; silent on the healthy path.
+- **Routing readout in `burnwall status`.** A per-shell line states whether this
+  shell points traffic at the proxy, with the one-line fix when it doesn't; also
+  surfaced as `env_routing` in `status --json` for the editor extension.
+- **Colorized console output.** The install scripts (`install.sh` / `install.ps1`),
+  the proxy banner, the background-start and login-service messages, and the
+  routing/coverage readouts now use semantic color (green = active/healthy,
+  yellow = caution, red = unprotected). Honors `NO_COLOR` and non-TTY output, so
+  piped/redirected text stays clean.
+
 ## [0.9.11] — 2026-06-08
 
 ### Added

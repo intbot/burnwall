@@ -261,8 +261,12 @@ fn print_banner(
     #[cfg(feature = "observe")] otel: Option<&crate::observe::otel::SpanWriter>,
 ) {
     let _ = storage;
-    println!("🛡️  Burnwall v{}", env!("CARGO_PKG_VERSION"));
-    println!("   Proxy:    http://{}:{}", host, port);
+    let sty = crate::term::Styler::stdout();
+    println!(
+        "{}",
+        sty.cyan(&sty.bold(&format!("🛡️  Burnwall v{}", env!("CARGO_PKG_VERSION"))))
+    );
+    println!("   Proxy:    {}", sty.green(&format!("http://{}:{}", host, port)));
     println!("   Routes:");
     println!("     /anthropic/* → {}", args.upstream_anthropic);
     println!("     /openai/*    → {}", args.upstream_openai);
@@ -315,5 +319,5 @@ fn print_banner(
     if let Some(w) = otel {
         println!("   OTel:     GenAI spans → {}", w.path().display());
     }
-    println!("   Ready. Press Ctrl-C to stop.");
+    println!("   {}", sty.green("🟢 Ready. Press Ctrl-C to stop."));
 }

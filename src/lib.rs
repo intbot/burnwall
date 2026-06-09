@@ -25,5 +25,6 @@ pub mod proxy;
 pub mod ribbon;
 pub mod security;
 pub mod storage;
+pub mod term;
 #[cfg(feature = "waste")]
 pub mod waste;

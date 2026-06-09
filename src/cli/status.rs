@@ -15,6 +15,7 @@ use crate::logscrape::{self, ScrapeBreakdown};
 use crate::pricing;
 use crate::providers::TokenUsage;
 use crate::storage::{ModelBreakdown, Storage};
+use crate::term::Styler;
 
 #[derive(Args, Debug)]
 pub struct StatusArgs {
@@ -118,19 +119,28 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
         // Self-test heartbeat: make it unmistakable whether protection is live,
         // so a passive proxy never leaves the user wondering "is it even doing
         // anything?" (a common reason such tools get distrusted / disabled).
+        let sty = Styler::stdout();
         writeln!(out)?;
         match super::daemon::running_pid().ok().flatten() {
             Some(pid) => writeln!(
                 out,
-                "   🟢 Protection active — proxy running (pid {pid}); every request is scanned."
+                "   {} proxy running (pid {pid}); every request is scanned.",
+                sty.green("🟢 Protection active —")
             )?,
             None => writeln!(
                 out,
-                "   ⚪ Proxy not running — start it with `burnwall start` (rules apply only while it runs)."
+                "   {} start it with `burnwall start` (rules apply only while it runs).",
+                sty.yellow("⚪ Proxy not running —")
             )?,
         }
 
-        write_coverage(&mut out, &coverage)?;
+        // Routing health for *this* shell: even with the proxy up, traffic only
+        // reaches it if the tool's base URL points here. Reading the env that
+        // `burnwall status` runs in catches the silent "running but unrouted"
+        // gap (the common Windows case: routed in PowerShell, not in bash).
+        write_routing(&mut out, &sty)?;
+
+        write_coverage(&mut out, &coverage, &sty)?;
     }
     Ok(())
 }
@@ -142,6 +152,7 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
 fn write_coverage(
     w: &mut impl Write,
     coverage: &[crate::coverage::ToolCoverage],
+    sty: &Styler,
 ) -> std::io::Result<()> {
     if coverage.is_empty() {
         return Ok(());
@@ -149,7 +160,13 @@ fn write_coverage(
     writeln!(w)?;
     writeln!(w, "   Coverage (tools that route through Burnwall):")?;
     for tc in coverage {
-        writeln!(w, "     {:<14} {}", tc.label, tc.state.summary())?;
+        // Colour the verdict by severity so a not-protected tool stands out.
+        let summary = match &tc.state {
+            crate::coverage::CoverageState::Protected { .. } => sty.green(&tc.state.summary()),
+            crate::coverage::CoverageState::InstalledNotSeen => sty.yellow(&tc.state.summary()),
+            crate::coverage::CoverageState::Bypasses { .. } => sty.red(&tc.state.summary()),
+        };
+        writeln!(w, "     {:<14} {}", tc.label, summary)?;
     }
     if coverage
         .iter()
@@ -161,6 +178,41 @@ fn write_coverage(
         )?;
     }
     Ok(())
+}
+
+/// Routing readout for the shell `burnwall status` runs in: is the AI tool you'd
+/// launch here actually pointed at the proxy? Catches the "proxy up but traffic
+/// goes direct" gap that leaves a user unprotected without any error.
+fn write_routing(w: &mut impl Write, sty: &Styler) -> std::io::Result<()> {
+    use crate::cli::routing::{current_routing, EnvRouting};
+    match current_routing("anthropic") {
+        EnvRouting::Proxied => writeln!(
+            w,
+            "   {} this shell points Anthropic traffic at the proxy.",
+            sty.green("🟢 Routed —")
+        ),
+        EnvRouting::Direct => {
+            writeln!(
+                w,
+                "   {} ANTHROPIC_BASE_URL is not set to the proxy in this shell.",
+                sty.orange("⚠  Not routed —")
+            )?;
+            writeln!(
+                w,
+                "      Traffic goes straight to the provider: no security scan, no cost capture."
+            )?;
+            writeln!(
+                w,
+                "      Fix:  {}   (then restart your AI tool)",
+                sty.bold("burnwall enable-routing")
+            )
+        }
+        EnvRouting::Bypassed => writeln!(
+            w,
+            "   {} BURNWALL_BYPASS is set — the proxy relays without scanning.",
+            sty.yellow("⚠  Bypass active —")
+        ),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -420,8 +472,18 @@ fn write_json(
         }
     };
 
+    // Routing health for the shell this ran in, so an editor/extension can warn
+    // when the tool it launches would bypass the proxy. `proxied` / `direct` /
+    // `bypassed`.
+    let env_routing = match crate::cli::routing::current_routing("anthropic") {
+        crate::cli::routing::EnvRouting::Proxied => "proxied",
+        crate::cli::routing::EnvRouting::Direct => "direct",
+        crate::cli::routing::EnvRouting::Bypassed => "bypassed",
+    };
+
     let value = json!({
         "date": date,
+        "env_routing": env_routing,
         "total_cost_usd": today_cost,
         "total_requests": total_requests,
         "blocked_requests": blocked,

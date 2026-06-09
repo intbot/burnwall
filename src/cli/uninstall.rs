@@ -71,23 +71,38 @@ pub fn run_cmd(args: UninstallArgs) -> Result<()> {
         None => writeln!(out, "   • could not locate ~/.claude/settings.json")?,
     }
 
-    // 4. Shell routing (env file + rc hook).
+    // 4. Shell routing (env file + rc hook) — across EVERY configured shell,
+    // not just the one we're running in. A single-shell teardown is the bug
+    // that leaves, e.g., bash still sourcing a hook that points at a removed
+    // proxy after you uninstalled from PowerShell.
     writeln!(out, "4. Disabling shell routing…")?;
-    if let Some(shell) = Shell::detect() {
-        match super::routing::clear_env_file(shell) {
-            Ok(p) => writeln!(out, "   ✓ emptied env file: {}", p.display())?,
-            Err(e) => writeln!(out, "   • env file: {e}")?,
+    let mut shells: Vec<Shell> = Shell::configured();
+    if let Some(cur) = Shell::detect() {
+        if !shells.contains(&cur) {
+            shells.push(cur);
         }
-        match super::routing::remove_rc_hook(shell) {
-            Ok(true) => writeln!(out, "   ✓ removed the rc-source hook")?,
-            Ok(false) => writeln!(out, "   • no rc hook present")?,
-            Err(e) => writeln!(out, "   • rc hook: {e}")?,
+    }
+    let mut touched_any = false;
+    for shell in &shells {
+        // Only act on shells that actually carry our state — don't create a
+        // disabled-stub env file in a shell the user never wired up (that would
+        // *leave* a file behind on uninstall, the opposite of clean).
+        if !super::routing::env_file_present(*shell) && !super::routing::rc_hook_present(*shell) {
+            continue;
         }
-    } else {
-        writeln!(
-            out,
-            "   • shell not detected — unset ANTHROPIC_BASE_URL / OPENAI_BASE_URL manually"
-        )?;
+        touched_any = true;
+        match super::routing::clear_env_file(*shell) {
+            Ok(p) => writeln!(out, "   ✓ {} env file emptied: {}", shell.label(), p.display())?,
+            Err(e) => writeln!(out, "   • {} env file: {e}", shell.label())?,
+        }
+        match super::routing::remove_rc_hook(*shell) {
+            Ok(true) => writeln!(out, "   ✓ {} rc-source hook removed", shell.label())?,
+            Ok(false) => writeln!(out, "   • {} no rc hook present", shell.label())?,
+            Err(e) => writeln!(out, "   • {} rc hook: {e}", shell.label())?,
+        }
+    }
+    if !touched_any {
+        writeln!(out, "   • nothing of ours found in any shell")?;
     }
 
     // 5. Data directory (--purge) and the binary.

@@ -176,6 +176,114 @@ pub fn clear_env_file(shell: Shell) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Whether a tool's traffic is actually reaching the proxy, judged from the
+/// base-URL env var the tool would use. A surface that can see the tool's
+/// environment (the Claude Code status line, `burnwall status`) uses this to
+/// warn when traffic is silently going direct — i.e. unprotected and untracked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvRouting {
+    /// Base URL points at the local proxy → routed through Burnwall.
+    Proxied,
+    /// No proxy base URL (or a non-loopback one) → traffic goes straight to the
+    /// provider. Burnwall sees nothing: no security scan, no cost capture.
+    Direct,
+    /// Routed at the proxy, but `BURNWALL_BYPASS` makes it a pure relay — checks
+    /// are off even though traffic still flows through.
+    Bypassed,
+}
+
+/// Truthy `BURNWALL_BYPASS` values, matching the proxy's own `bypass_active`
+/// (`1`/`true`/`yes`/`on`, case-insensitive, trimmed).
+pub fn bypass_truthy(v: Option<&str>) -> bool {
+    matches!(
+        v.map(|s| s.trim().to_ascii_lowercase()),
+        Some(ref s) if matches!(s.as_str(), "1" | "true" | "yes" | "on")
+    )
+}
+
+/// Does this base URL point at a loopback host (i.e. the local proxy)? A crude
+/// authority scan rather than a full URL parser — enough to tell `localhost` /
+/// `127.0.0.1` / `[::1]` apart from `api.anthropic.com`, without a new dep.
+pub fn url_is_loopback(u: &str) -> bool {
+    let after_scheme = u.split("://").nth(1).unwrap_or(u);
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim();
+    // Strip any userinfo (`user@host[:port]`), then isolate the host from the
+    // port — matching the *exact* hostname so `localhost.evil.com` doesn't slip
+    // through a prefix check.
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(rest) = host_port.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("") // IPv6 literal: "[::1]:4100" → "::1"
+    } else {
+        host_port.split(':').next().unwrap_or("")
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "0.0.0.0" | "::1")
+}
+
+/// Classify routing from the relevant base-URL value and the bypass flag. Pure
+/// over its inputs for testability — the caller supplies the env values.
+pub fn classify_routing(base_url: Option<&str>, bypass: Option<&str>) -> EnvRouting {
+    match base_url {
+        Some(u) if url_is_loopback(u) => {
+            if bypass_truthy(bypass) {
+                EnvRouting::Bypassed
+            } else {
+                EnvRouting::Proxied
+            }
+        }
+        _ => EnvRouting::Direct,
+    }
+}
+
+/// The base-URL env var a tool for `provider` reads to find its endpoint.
+pub fn base_url_var_for_provider(provider: &str) -> &'static str {
+    match provider {
+        "openai" => "OPENAI_BASE_URL",
+        "google" => "GOOGLE_BASE_URL",
+        _ => "ANTHROPIC_BASE_URL",
+    }
+}
+
+/// Classify the current process's routing for `provider` by reading the live
+/// environment. Used by surfaces that run inside the tool's env (the status
+/// line is spawned by Claude Code and inherits its variables).
+pub fn current_routing(provider: &str) -> EnvRouting {
+    let var = base_url_var_for_provider(provider);
+    let base = std::env::var(var).ok();
+    let bypass = std::env::var("BURNWALL_BYPASS").ok();
+    classify_routing(base.as_deref(), bypass.as_deref())
+}
+
+/// True if this shell has a burnwall env file on disk — whether enabled or the
+/// disabled stub. Used to decide which shells a sync/teardown should touch.
+pub fn env_file_present(shell: Shell) -> bool {
+    env_file_path(shell).map(|p| p.exists()).unwrap_or(false)
+}
+
+/// True if this shell's rc file carries our source-hook marker — i.e. the user
+/// previously wired this shell up. The strongest signal that a shell is
+/// "configured", and the one that disambiguates bash vs zsh (which share a
+/// single `env.sh`).
+pub fn rc_hook_present(shell: Shell) -> bool {
+    shell
+        .rc_path()
+        .and_then(|rc| std::fs::read_to_string(rc).ok())
+        .map(|c| c.contains(RC_MARKER))
+        .unwrap_or(false)
+}
+
+/// True if routing is *actively enabled* for this shell — the env file exists
+/// and still carries the export lines (not the `disable-routing` stub).
+pub fn routing_active(shell: Shell) -> bool {
+    env_file_path(shell)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|c| c.contains("ANTHROPIC_BASE_URL"))
+        .unwrap_or(false)
+}
+
 /// Append the rc-source line to the user's shell rc, if not already there.
 /// Returns `true` if the file was modified.
 pub fn install_rc_hook(shell: Shell, env_path: &Path) -> Result<bool> {
@@ -277,5 +385,60 @@ mod tests {
         let line = rc_source_line(Shell::Bash, Path::new("/tmp/env.sh"));
         assert!(line.contains("# burnwall:routing"));
         assert!(line.contains("/tmp/env.sh"));
+    }
+
+    #[test]
+    fn loopback_urls_recognized() {
+        assert!(url_is_loopback("http://localhost:4100/anthropic"));
+        assert!(url_is_loopback("http://127.0.0.1:4100"));
+        assert!(url_is_loopback("http://[::1]:4100/anthropic"));
+        assert!(url_is_loopback("http://0.0.0.0:4100"));
+        assert!(!url_is_loopback("https://api.anthropic.com"));
+        assert!(!url_is_loopback("https://api.openai.com/v1"));
+        assert!(!url_is_loopback("https://localhost.evil.com")); // host is localhost.evil.com
+    }
+
+    #[test]
+    fn classify_routing_states() {
+        // Routed at the local proxy.
+        assert_eq!(
+            classify_routing(Some("http://localhost:4100/anthropic"), None),
+            EnvRouting::Proxied
+        );
+        // Routed but bypassed → checks off.
+        assert_eq!(
+            classify_routing(Some("http://localhost:4100/anthropic"), Some("1")),
+            EnvRouting::Bypassed
+        );
+        // No base URL set → direct to provider.
+        assert_eq!(classify_routing(None, None), EnvRouting::Direct);
+        // Explicit upstream → direct.
+        assert_eq!(
+            classify_routing(Some("https://api.anthropic.com"), None),
+            EnvRouting::Direct
+        );
+        // Bypass only matters when actually routed; direct stays direct.
+        assert_eq!(
+            classify_routing(Some("https://api.anthropic.com"), Some("1")),
+            EnvRouting::Direct
+        );
+    }
+
+    #[test]
+    fn bypass_truthiness_matches_proxy_semantics() {
+        for v in ["1", "true", "TRUE", "yes", "on", " on "] {
+            assert!(bypass_truthy(Some(v)), "{v:?} should be truthy");
+        }
+        for v in ["0", "false", "", "off", "no"] {
+            assert!(!bypass_truthy(Some(v)), "{v:?} should be falsy");
+        }
+        assert!(!bypass_truthy(None));
+    }
+
+    #[test]
+    fn base_url_var_by_provider() {
+        assert_eq!(base_url_var_for_provider("anthropic"), "ANTHROPIC_BASE_URL");
+        assert_eq!(base_url_var_for_provider("openai"), "OPENAI_BASE_URL");
+        assert_eq!(base_url_var_for_provider("whatever"), "ANTHROPIC_BASE_URL");
     }
 }

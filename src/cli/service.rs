@@ -31,6 +31,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Args;
 
+#[allow(unused_imports)]
+use crate::term::Styler;
+
 #[cfg(target_os = "macos")]
 const SERVICE_ID: &str = "io.github.intbot.burnwall";
 #[cfg(target_os = "windows")]
@@ -111,7 +114,11 @@ fn install(exe: &std::path::Path, start: bool, _task: bool) -> Result<()> {
     }
     std::fs::write(&path, plist_contents(exe))
         .with_context(|| format!("writing {}", path.display()))?;
-    println!("🛡  Installed LaunchAgent: {}", path.display());
+    let sty = Styler::stdout();
+    println!(
+        "{}",
+        sty.green(&format!("🛡  Installed LaunchAgent: {}", path.display()))
+    );
     if start {
         let status = std::process::Command::new("launchctl")
             .args(["load", "-w", path.to_str().unwrap_or("")])
@@ -120,7 +127,7 @@ fn install(exe: &std::path::Path, start: bool, _task: bool) -> Result<()> {
         if !status.success() {
             anyhow::bail!("launchctl load failed (status {})", status);
         }
-        println!("   Loaded and started.");
+        println!("   {}", sty.green("🟢 Loaded and started."));
     } else {
         println!("   (not started — run `launchctl load -w {}`)", path.display());
     }
@@ -188,7 +195,11 @@ fn install(exe: &std::path::Path, start: bool, _task: bool) -> Result<()> {
     }
     std::fs::write(&path, unit_contents(exe))
         .with_context(|| format!("writing {}", path.display()))?;
-    println!("🛡  Installed systemd user unit: {}", path.display());
+    let sty = Styler::stdout();
+    println!(
+        "{}",
+        sty.green(&format!("🛡  Installed systemd user unit: {}", path.display()))
+    );
     let _ = std::process::Command::new("systemctl")
         .args(["--user", "daemon-reload"])
         .status();
@@ -207,7 +218,7 @@ fn install(exe: &std::path::Path, start: bool, _task: bool) -> Result<()> {
         if !s.success() {
             anyhow::bail!("systemctl start failed (status {})", s);
         }
-        println!("   Enabled and started.");
+        println!("   {}", sty.green("🟢 Enabled and started."));
     } else {
         println!("   Enabled. Start now: systemctl --user start burnwall");
     }
@@ -336,12 +347,18 @@ fn install_run_key(exe: &std::path::Path, start: bool) -> Result<()> {
              manually, or try `burnwall install-service --task` from an elevated terminal."
         );
     }
-    println!("🛡  Registered login auto-start (HKCU Run): {TASK_NAME}");
+    let sty = Styler::stdout();
+    println!(
+        "{}",
+        sty.green(&format!(
+            "🛡  Registered login auto-start (HKCU Run): {TASK_NAME}"
+        ))
+    );
     println!("   Launches `burnwall start --daemon` at logon — no admin required.");
     if start {
         start_daemon_now(exe);
     } else {
-        println!("   (not started — will start at next logon)");
+        println!("   {}", sty.yellow("(not started — will start at next logon)"));
     }
     println!("   Tip: `--task` installs a Scheduled Task with crash-restart (needs an elevated terminal).");
     Ok(())
@@ -411,12 +428,16 @@ fn install_scheduled_task(exe: &std::path::Path, start: bool) -> Result<()> {
 
 #[cfg(target_os = "windows")]
 fn start_daemon_now(exe: &std::path::Path) {
+    let sty = Styler::stdout();
     match std::process::Command::new(exe)
         .args(["start", "--daemon"])
         .status()
     {
-        Ok(s) if s.success() => println!("   Started."),
-        _ => println!("   (could not start now — will start at next logon)"),
+        Ok(s) if s.success() => println!("   {}", sty.green("🟢 Proxy started — now protecting traffic.")),
+        _ => println!(
+            "   {}",
+            sty.yellow("(could not start now — will start at next logon)")
+        ),
     }
 }
 
