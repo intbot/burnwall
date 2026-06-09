@@ -48,9 +48,11 @@ pub fn run_cmd(args: UninstallArgs) -> Result<()> {
     }
     writeln!(out)?;
 
-    // 1. Stop the proxy (best-effort — not running is fine).
+    // 1. Stop the proxy (best-effort — not running is fine). keep_routing:
+    //    step 4 does the full routing teardown (env files AND rc hooks) — a
+    //    pause here would only double-write the env files.
     writeln!(out, "1. Stopping the proxy…")?;
-    if let Err(e) = super::stop::run_cmd(super::stop::StopArgs {}) {
+    if let Err(e) = super::stop::run_cmd(super::stop::StopArgs { keep_routing: true }) {
         writeln!(out, "   • {e}")?;
     }
 

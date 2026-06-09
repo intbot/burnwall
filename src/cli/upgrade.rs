@@ -43,11 +43,14 @@ pub fn run_cmd(args: UpgradeArgs) -> Result<()> {
         return Ok(());
     }
 
-    // 1. Stop the running proxy so the binary can be replaced.
+    // 1. Stop the running proxy so the binary can be replaced. Keep routing:
+    //    the stop is transient (we restart right after the install), and the
+    //    restart refreshes it anyway. Every path below that ends with the
+    //    proxy still down pauses routing explicitly instead.
     let was_running = matches!(super::daemon::running_pid(), Ok(Some(_)));
     if was_running {
         println!("   Stopping the running proxy so the binary can be replaced…");
-        let _ = super::stop::run_cmd(super::stop::StopArgs {});
+        let _ = super::stop::run_cmd(super::stop::StopArgs { keep_routing: true });
     }
 
     // The canonical install path, captured before any rename so the restart
@@ -62,17 +65,23 @@ pub fn run_cmd(args: UpgradeArgs) -> Result<()> {
 
     println!("   ✓ Installed the latest release.");
 
-    // 3. Restart the proxy if it was running.
+    // 3. Restart the proxy if it was running. If it stays down — restart
+    //    failed or --no-restart — pause routing so shells aren't left pointed
+    //    at a dead port.
     if was_running && !args.no_restart {
         match std::process::Command::new(&exe)
             .args(["start", "--daemon"])
             .status()
         {
             Ok(s) if s.success() => println!("   Restarted the proxy on the new version."),
-            _ => println!("   (could not auto-restart — run `burnwall start --daemon`)"),
+            _ => {
+                println!("   (could not auto-restart — run `burnwall start --daemon`)");
+                super::stop::pause_and_report();
+            }
         }
     } else if was_running {
         println!("   (not restarted — run `burnwall start --daemon` when ready)");
+        super::stop::pause_and_report();
     }
     Ok(())
 }

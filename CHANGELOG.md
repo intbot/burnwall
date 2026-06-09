@@ -2,6 +2,31 @@
 
 All notable changes to Burnwall.
 
+## [Unreleased]
+
+### Fixed
+
+- **Talking *about* a denied path or command no longer blocks the request.**
+  The proxy's security scan previously applied every rule to every string in
+  the request body, so a system prompt, chat message, tool definition, or tool
+  result that merely *mentioned* `~/.ssh` or `rm -rf` returned a 403 — e.g. a
+  project's CLAUDE.md documenting a deny list made every Claude Code request
+  from that repo fail (surfacing in the client as a bogus "run /login" auth
+  error). Command-shaped rules (denied paths/commands, network mounts,
+  destructive commands, exfil techniques) now apply only inside tool-call
+  argument subtrees (Anthropic `tool_use.input`, OpenAI
+  `tool_calls`/`function_call` arguments, Gemini `functionCall`) — the places
+  an agent actually acts. Secret detection and DLP still scan the entire
+  payload, and MCP `tools/call` bodies keep the strict whole-body scan.
+- **`burnwall stop` no longer strands routed shells on a dead proxy.** Stopping
+  the proxy used to leave `ANTHROPIC_BASE_URL`/`OPENAI_BASE_URL` pointing at
+  the closed port, so every AI tool failed with a connection error until the
+  user discovered `disable-routing`. `stop` now pauses routing (new shells go
+  direct), prints how to clear the variables from already-open terminals, and
+  `start` resumes routing automatically. An explicit `burnwall
+  disable-routing` is remembered and never overridden by `start`; opt out of
+  the coupling with `stop --keep-routing` / `start --no-routing`.
+
 ## [0.9.12] — 2026-06-09
 
 ### Fixed
