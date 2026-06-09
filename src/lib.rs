@@ -11,12 +11,14 @@ pub mod audit;
 pub mod budget;
 pub mod cli;
 pub mod config;
+pub mod coverage;
 #[cfg(feature = "logscrape")]
 pub mod logscrape;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 #[cfg(feature = "observe")]
 pub mod observe;
+pub mod plan;
 pub mod pricing;
 pub mod providers;
 pub mod proxy;

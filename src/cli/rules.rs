@@ -52,6 +52,23 @@ pub enum RulesAction {
         /// Path to a JSON request body to test against.
         file: PathBuf,
     },
+    /// Lint a pack against the community-registry acceptance rules — stricter
+    /// than the runtime parser. Rejects forbidden/unknown keys, uncompilable or
+    /// over-broad rules, and (with `--sig`) checks the signature. Exits non-zero
+    /// on any error, so the `burnwall-rules` CI validator can call it directly.
+    Lint {
+        /// Pack `.toml` to lint.
+        file: PathBuf,
+        /// Optional detached signature (hex) to verify as part of the lint.
+        #[arg(long)]
+        sig: Option<PathBuf>,
+        /// Extra trusted publisher key(s) (hex) for `--sig` verification.
+        #[arg(long = "publisher")]
+        publishers: Vec<String>,
+        /// Emit JSON instead of the text report.
+        #[arg(long)]
+        json: bool,
+    },
     /// Install a third-party rule pack from a local file (Trust-On-First-Use).
     Add {
         /// Path to a local pack `.toml` file.
@@ -115,6 +132,12 @@ pub fn run_cmd(args: RulesArgs) -> anyhow::Result<()> {
         RulesAction::List { json } => list(json),
         RulesAction::Install { name } => install(&name),
         RulesAction::Test { pack, file } => test(&pack, &file),
+        RulesAction::Lint {
+            file,
+            sig,
+            publishers,
+            json,
+        } => lint_cmd(&file, sig.as_deref(), &publishers, json),
         RulesAction::Add { file, yes } => add(&file, yes),
         RulesAction::Revoke { name } => revoke(&name),
         RulesAction::Keygen { out } => keygen(&out),
@@ -477,6 +500,95 @@ fn verify(file: &Path, sig: &Path, extra: &[String]) -> anyhow::Result<()> {
             Ok(())
         }
         None => anyhow::bail!("signature does NOT verify against any trusted publisher"),
+    }
+}
+
+/// `rules lint` — run the registry-acceptance linter over a pack, optionally
+/// verifying its signature, and exit non-zero on any error. This is what the
+/// `burnwall-rules` CI gate invokes; it's the product's own parser, so a pack
+/// that lints clean here is one the binary will accept.
+fn lint_cmd(
+    file: &Path,
+    sig: Option<&Path>,
+    publishers: &[String],
+    json: bool,
+) -> anyhow::Result<()> {
+    let content =
+        std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let findings = packs::lint(&content);
+
+    // Optional signature check, folded into the overall pass/fail.
+    let sig_result: Option<Result<String, String>> =
+        sig.map(|sigpath| check_signature(file, sigpath, publishers));
+
+    let errors = findings
+        .iter()
+        .filter(|f| f.severity == packs::LintSeverity::Error)
+        .count();
+    let warnings = findings.len() - errors;
+    let sig_failed = matches!(&sig_result, Some(Err(_)));
+
+    let mut out = std::io::stdout().lock();
+    if json {
+        let value = serde_json::json!({
+            "file": file.display().to_string(),
+            "clean": errors == 0 && !sig_failed,
+            "errors": errors,
+            "warnings": warnings,
+            "findings": findings.iter().map(|f| serde_json::json!({
+                "severity": f.severity.as_str(),
+                "code": f.code,
+                "message": f.message,
+            })).collect::<Vec<_>>(),
+            "signature": match &sig_result {
+                None => serde_json::Value::Null,
+                Some(Ok(name)) => serde_json::json!({ "verified": true, "publisher": name }),
+                Some(Err(e)) => serde_json::json!({ "verified": false, "error": e }),
+            },
+        });
+        writeln!(out, "{}", serde_json::to_string_pretty(&value).unwrap())?;
+    } else {
+        writeln!(out, "🔎 Linting {}", file.display())?;
+        for f in &findings {
+            let glyph = match f.severity {
+                packs::LintSeverity::Error => "✗",
+                packs::LintSeverity::Warning => "⚠",
+            };
+            writeln!(out, "   {glyph} [{}] {}", f.code, f.message)?;
+        }
+        match &sig_result {
+            Some(Ok(name)) => writeln!(out, "   ✓ signature verifies (publisher '{name}')")?,
+            Some(Err(e)) => writeln!(out, "   ✗ signature: {e}")?,
+            None => {}
+        }
+        writeln!(out)?;
+        if errors == 0 && !sig_failed {
+            writeln!(out, "✅ registry-clean ({warnings} warning(s))")?;
+        }
+    }
+
+    if errors > 0 || sig_failed {
+        anyhow::bail!(
+            "lint failed: {errors} error(s){}",
+            if sig_failed { " + signature" } else { "" }
+        );
+    }
+    Ok(())
+}
+
+/// Verify a detached signature → `Ok(publisher)` / `Err(reason)`. Reuses the
+/// same trusted-publisher resolution as `verify`/`fetch`. Returns `Err` rather
+/// than bailing so the linter can report it as one finding among others.
+fn check_signature(file: &Path, sig: &Path, extra: &[String]) -> Result<String, String> {
+    let bytes = std::fs::read(file).map_err(|e| format!("reading pack: {e}"))?;
+    let sig_hex = std::fs::read_to_string(sig).map_err(|e| format!("reading signature: {e}"))?;
+    let publishers = gather_publishers(extra).map_err(|e| format!("loading publishers: {e}"))?;
+    if publishers.is_empty() {
+        return Err("no trusted publishers (config or --publisher)".to_string());
+    }
+    match signing::verify_hex(&bytes, &sig_hex, &publishers) {
+        Some(name) => Ok(name),
+        None => Err("does not verify against any trusted publisher".to_string()),
     }
 }
 

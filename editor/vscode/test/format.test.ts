@@ -52,3 +52,78 @@ test("tooltip notes when no daily limit is set", () => {
   const tip = tooltip(summarize({ total_cost_usd: 1 }));
   assert.ok(tip.includes("no daily limit set"), tip);
 });
+
+test("subscription plan: status bar leads with the binding window, not dollars", () => {
+  const s = summarize({
+    total_cost_usd: 190.11,
+    plan: {
+      providers: [
+        {
+          provider: "anthropic",
+          status: "allowed",
+          windows: [
+            { label: "5h", utilization: 0.17, reset_in_secs: 7007 },
+            { label: "7d", utilization: 0.1, reset_in_secs: 198495 },
+          ],
+        },
+      ],
+    },
+  });
+  assert.ok(s.plan, "plan should be summarized");
+  const text = statusBarText(s);
+  assert.ok(text.includes("5h 17% (1h56m)"), text);
+  assert.ok(!text.includes("$190"), text); // notional dollars suppressed
+  const tip = tooltip(s);
+  assert.ok(tip.includes("Plan (anthropic)"), tip);
+  assert.ok(tip.includes("7d: 10% used"), tip);
+});
+
+test("no plan -> dollar status bar (API / fallback)", () => {
+  const s = summarize({ total_cost_usd: 2, plan: null });
+  assert.equal(s.plan, null);
+  assert.ok(statusBarText(s).includes("$2.00"));
+});
+
+test("subscription plan: throttled flag surfaces", () => {
+  const s = summarize({
+    plan: {
+      providers: [
+        {
+          provider: "anthropic",
+          status: "throttled",
+          windows: [{ label: "5h", utilization: 1.0, reset_in_secs: 600 }],
+        },
+      ],
+    },
+  });
+  assert.ok(statusBarText(s).includes("throttled"));
+});
+
+test("coverage: a bypassing tool warns in the status bar and tooltip", () => {
+  const s = summarize({
+    total_cost_usd: 2,
+    coverage: [
+      { tool: "Claude Code", binary: "claude", state: "protected", seen_secs_ago: 120 },
+      {
+        tool: "Codex CLI",
+        binary: "codex",
+        state: "bypasses",
+        reason: "Codex on ChatGPT login routes to the ChatGPT backend",
+      },
+    ],
+  });
+  const text = statusBarText(s);
+  assert.ok(text.includes("$(warning) Codex CLI unprotected"), text);
+  const tip = tooltip(s);
+  assert.ok(tip.includes("Coverage (routes through Burnwall):"), tip);
+  assert.ok(tip.includes("Claude Code: protected (seen 2m ago)"), tip);
+  assert.ok(tip.includes("Codex CLI: NOT protected"), tip);
+});
+
+test("coverage: all-protected shows no status-bar warning", () => {
+  const s = summarize({
+    total_cost_usd: 2,
+    coverage: [{ tool: "Claude Code", binary: "claude", state: "protected", seen_secs_ago: 30 }],
+  });
+  assert.ok(!statusBarText(s).includes("unprotected"));
+});

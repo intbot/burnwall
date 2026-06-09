@@ -5,7 +5,7 @@
 //! `~/.burnwall/config.toml`. `burnwall start` discovers it once at boot and
 //! merges it into the runtime [`Ruleset`] and [`BudgetConfig`].
 //!
-//! Schema (matches docs/SPEC.md §"v0.2 Additions"):
+//! Schema (matches internal/SPEC.md §"v0.2 Additions"):
 //! ```yaml
 //! allow_paths:
 //!   - ./src

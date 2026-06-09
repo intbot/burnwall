@@ -205,7 +205,7 @@ Scan `tool_use` / `function_call` blocks in the REQUEST body (before forwarding)
 
 ## Important Notes for Claude Code Sessions
 
-- Read `docs/SPEC.md` for exact CLI behavior and output formats
+- Run `burnwall <cmd> --help` and read `README.md` for current CLI behavior and output formats
 - Read `docs/ARCHITECTURE.md` for component design and data flow
 - Work in focused, scoped sessions — one component at a time
 - Write tests FIRST for any new parser or calculator logic

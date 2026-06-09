@@ -680,7 +680,7 @@ fn statusline_renders_ribbon_from_claude_code_json() {
         .write_stdin(json)
         .assert()
         .success()
-        .stdout(predicate::str::contains("🔥 sonnet-4.6"))
+        .stdout(predicate::str::contains("🔥 burnwall · sonnet-4.6"))
         .stdout(predicate::str::contains("↑13k ↓615"))   // input buckets summed
         .stdout(predicate::str::contains("$0.16 sess"))
         .stdout(predicate::str::contains("ctx [▓▓"))
@@ -714,7 +714,7 @@ fn watch_once_renders_cross_tool_ribbon() {
         .args(["watch", "--once", "--oneline", "--no-color"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("🔥 sonnet-4.6"))
+        .stdout(predicate::str::contains("🔥 burnwall · sonnet-4.6"))
         .stdout(predicate::str::contains("today"));
 }
 

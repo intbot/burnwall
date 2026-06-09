@@ -63,4 +63,4 @@ across every tool — none of which a hosted router can do for you.
 
 If you run more than one base URL for a provider, configure `[resilience]` so
 Burnwall retries the same request against the next endpoint on a connection error
-or 5xx. See `docs/SPEC.md`.
+or 5xx. Run `burnwall config show` to see the `[resilience]` section.

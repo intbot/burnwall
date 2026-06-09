@@ -1,0 +1,19 @@
+# Burnwall official rule pack — Node.js / npm.
+# Bundled in the binary (inherently trusted). Declarative + deny-only.
+id = "node"
+name = "Node.js / npm security rules"
+version = "1.0.0"
+
+# Registry-auth files that hold publish tokens.
+deny_paths = [
+    "~/.npmrc",
+    "/.npmrc",
+    "~/.yarnrc.yml",
+    "/.yarnrc.yml",
+    "~/.config/configstore/update-notifier-npm.json",
+]
+
+# An npm automation/publish token in a payload.
+[[secret_patterns]]
+name = "npm access token"
+regex = '''npm_[A-Za-z0-9]{36}'''

@@ -2,17 +2,34 @@
 # Bundled in the binary (inherently trusted). Declarative + deny-only.
 id = "infrastructure"
 name = "Infrastructure security rules"
-version = "1.0.0"
+version = "1.1.0"
 
-# Terraform state files store secrets in plaintext; agents should not read them.
+# State + credential files that store secrets in plaintext.
 deny_paths = [
     "/terraform.tfstate",
     "/terraform.tfstate.backup",
+    "/.terraform/terraform.tfstate",
+    "~/.terraformrc",
+    "~/.terraform.d/credentials.tfrc.json",
+    "~/.ansible/vault_pass",
 ]
 
 # Genuinely destructive infrastructure commands.
 deny_commands = [
     "terraform destroy",
     "terraform apply -auto-approve",
+    "terraform state rm",
+    "terragrunt destroy",
     "kubectl delete namespace",
+    "pulumi destroy",
 ]
+
+# A classic AWS access key id in a payload (paired secret usually nearby).
+[[secret_patterns]]
+name = "AWS access key id"
+regex = '''\bAKIA[0-9A-Z]{16}\b'''
+
+# A Terraform Cloud / Enterprise API token literal.
+[[secret_patterns]]
+name = "Terraform Cloud token"
+regex = '''[A-Za-z0-9]{14}\.atlasv1\.[A-Za-z0-9_\-]{20,}'''

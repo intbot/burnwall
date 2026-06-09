@@ -2,10 +2,25 @@
 # Bundled in the binary (inherently trusted). Declarative + deny-only.
 id = "data-science"
 name = "Data science security rules"
-version = "1.0.0"
+version = "1.1.0"
 
 # Credential files for common data/ML platforms.
 deny_paths = [
     "/.kaggle/kaggle.json",
-    "/.netrc",
+    "~/.kaggle/kaggle.json",
+    "~/.huggingface/token",
+    "/.huggingface/token",
+    "~/.cache/huggingface/token",
+    "~/.config/wandb/settings",
+    "~/.netrc",
 ]
+
+# Hugging Face user access token (read/write to private models + datasets).
+[[secret_patterns]]
+name = "Hugging Face token"
+regex = '''hf_[A-Za-z0-9]{34,}'''
+
+# Weights & Biases API key (40-hex), as it appears in `wandb login <key>` or env.
+[[secret_patterns]]
+name = "Weights & Biases API key"
+regex = '''WANDB_API_KEY\s*[=:]\s*['"]?[0-9a-f]{40}'''

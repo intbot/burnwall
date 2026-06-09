@@ -305,6 +305,25 @@ impl Storage {
         })
     }
 
+    /// Most recent non-blocked request timestamp per provider. Powers the
+    /// coverage readout: a provider that appears here has been seen routing
+    /// through the proxy, so the tool that talks to it is actually protected
+    /// (the originating *tool* isn't recoverable from proxied HTTP, but each
+    /// provider maps to a known set of tools — see `crate::coverage`).
+    pub fn provider_last_seen(&self) -> Result<Vec<(String, DateTime<Utc>)>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT provider, MAX(timestamp) AS last
+                 FROM requests WHERE blocked = 0
+                 GROUP BY provider",
+            )?;
+            let rows: rusqlite::Result<Vec<(String, DateTime<Utc>)>> = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get::<_, DateTime<Utc>>(1)?)))?
+                .collect();
+            Ok(rows?)
+        })
+    }
+
     /// Per-session spend for a local date (sessions only — rows with a non-empty
     /// `session_id`), newest-spend first. Powers the "by session / swarm" view
     /// for users who set the opt-in `x-burnwall-session` header. Returns

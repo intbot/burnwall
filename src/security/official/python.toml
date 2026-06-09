@@ -1,0 +1,19 @@
+# Burnwall official rule pack — Python packaging.
+# Bundled in the binary (inherently trusted). Declarative + deny-only.
+id = "python"
+name = "Python packaging security rules"
+version = "1.0.0"
+
+# Files that hold PyPI / index upload credentials.
+deny_paths = [
+    "~/.pypirc",
+    "/.pypirc",
+    "~/.config/pip/pip.conf",
+    "~/.config/pypoetry/auth.toml",
+    "~/.netrc",
+]
+
+# A PyPI upload token in a payload.
+[[secret_patterns]]
+name = "PyPI upload token"
+regex = '''pypi-[A-Za-z0-9_\-]{16,}'''

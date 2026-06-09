@@ -3,7 +3,7 @@
 //! Rates are expressed in **dollars per 1M tokens** (USD/MTok). The table is a
 //! `const` slice — embedded in the binary, no I/O, no allocation. A user-
 //! supplied `~/.burnwall/pricing.toml` override is loaded on top in a later
-//! session (see `docs/SPEC.md` "Pricing Database").
+//! session (see `internal/SPEC.md` "Pricing Database").
 //!
 //! ### Model-name normalization
 //!
@@ -19,7 +19,7 @@
 //! The rates below assume 5-minute cache write (1.25× input). The 1-hour
 //! write rate (2× input) is signalled by `cache_control` in the **request**,
 //! not the response, so we can't reliably tell from the response alone.
-//! See `docs/SPEC.md` Pricing Notes for the trade-off.
+//! See `internal/SPEC.md` Pricing Notes for the trade-off.
 
 /// Date the embedded rate card was last edited, `YYYY-MM-DD`. Bump
 /// whenever you change [`KNOWN_MODELS`]. The status command warns the user

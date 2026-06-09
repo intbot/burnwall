@@ -58,6 +58,10 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
     let budget = BudgetTracker::new((&config.budget).into());
     budget.hydrate_for_date(&storage, &today)?;
 
+    // Coverage: which installed tools actually route through the proxy. Surfaces
+    // silent non-coverage (e.g. ChatGPT-login Codex bypasses entirely).
+    let coverage = crate::coverage::assess(&storage, chrono::Utc::now().timestamp());
+
     let mut out = std::io::stdout().lock();
     if args.json {
         write_json(
@@ -77,6 +81,7 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
             projected_savings,
             mcp_events_today,
             waste_per_day,
+            &coverage,
         )?;
     } else {
         write_table(
@@ -124,6 +129,36 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
                 "   ⚪ Proxy not running — start it with `burnwall start` (rules apply only while it runs)."
             )?,
         }
+
+        write_coverage(&mut out, &coverage)?;
+    }
+    Ok(())
+}
+
+/// Per-tool coverage readout: who's actually behind the firewall. Only shown
+/// when at least one supported tool is installed, so it stays out of the way on
+/// machines with none. The point is to make *non*-coverage visible — a
+/// ChatGPT-login Codex user must not be left assuming protection they don't have.
+fn write_coverage(
+    w: &mut impl Write,
+    coverage: &[crate::coverage::ToolCoverage],
+) -> std::io::Result<()> {
+    if coverage.is_empty() {
+        return Ok(());
+    }
+    writeln!(w)?;
+    writeln!(w, "   Coverage (tools that route through Burnwall):")?;
+    for tc in coverage {
+        writeln!(w, "     {:<14} {}", tc.label, tc.state.summary())?;
+    }
+    if coverage
+        .iter()
+        .any(|c| matches!(c.state, crate::coverage::CoverageState::Bypasses { .. }))
+    {
+        writeln!(
+            w,
+            "   ℹ️  Burnwall only protects traffic that flows through it; subscription-backend\n      traffic (e.g. ChatGPT-login Codex) bypasses any no-MITM proxy."
+        )?;
     }
     Ok(())
 }
@@ -326,6 +361,7 @@ fn write_json(
     projected_savings: f64,
     mcp_events: i64,
     waste_per_day: f64,
+    coverage: &[crate::coverage::ToolCoverage],
 ) -> std::io::Result<()> {
     use serde_json::json;
     let bcfg = budget.config();
@@ -355,6 +391,34 @@ fn write_json(
     };
     #[cfg(not(feature = "logscrape"))]
     let (log_scrape_json, log_subtotal) = (Option::<serde_json::Value>::None, 0.0_f64);
+
+    // Subscription-plan limit headroom, per provider, for the status bar / IDE
+    // extension. `null` when no fresh snapshot exists (API user, or the proxy
+    // hasn't captured a `unified-*` response). Reset is emitted as seconds-from-
+    // now so the consumer needn't know the capture time.
+    let plan_json = {
+        let now = chrono::Utc::now().timestamp();
+        let providers: Vec<_> = crate::plan::read_all()
+            .into_iter()
+            .filter(|s| !s.is_stale(now, 12 * 3600))
+            .map(|s| {
+                json!({
+                    "provider": s.provider,
+                    "status": s.status,
+                    "windows": s.windows.iter().map(|w| json!({
+                        "label": w.label,
+                        "utilization": w.utilization,
+                        "reset_in_secs": (w.reset - now).max(0),
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        if providers.is_empty() {
+            serde_json::Value::Null
+        } else {
+            json!({ "providers": providers })
+        }
+    };
 
     let value = json!({
         "date": date,
@@ -389,6 +453,28 @@ fn write_json(
         // per-tool/model rows plus their subtotal. Read-only — not the proxy DB.
         "log_scrape": log_scrape_json,
         "combined_total_usd": today_cost + log_subtotal,
+        // Per-provider subscription limit headroom; `null` for API-only usage.
+        "plan": plan_json,
+        // Per-tool coverage: which installed tools route through the proxy,
+        // which are unseen, and which bypass it entirely (e.g. ChatGPT-login
+        // Codex). Lets the IDE extension show who's actually protected.
+        "coverage": coverage.iter().map(|c| {
+            let mut obj = json!({
+                "tool": c.label,
+                "binary": c.binary,
+                "state": c.state.kind(),
+            });
+            match &c.state {
+                crate::coverage::CoverageState::Protected { since_secs } => {
+                    obj["seen_secs_ago"] = json!(since_secs);
+                }
+                crate::coverage::CoverageState::Bypasses { reason } => {
+                    obj["reason"] = json!(reason);
+                }
+                crate::coverage::CoverageState::InstalledNotSeen => {}
+            }
+            obj
+        }).collect::<Vec<_>>(),
     });
     writeln!(w, "{}", serde_json::to_string_pretty(&value).unwrap())?;
     Ok(())

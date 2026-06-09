@@ -1,0 +1,17 @@
+# Burnwall official rule pack — Go.
+# Bundled in the binary (inherently trusted). Declarative + deny-only.
+id = "go"
+name = "Go security rules"
+version = "1.0.0"
+
+# Credential files used for private module access (GOPRIVATE over HTTPS/netrc).
+deny_paths = [
+    "~/.netrc",
+    "/.netrc",
+    "~/.config/go/env",
+]
+
+# A GitHub personal-access token, commonly used for private Go modules.
+[[secret_patterns]]
+name = "GitHub personal access token"
+regex = '''gh[pousr]_[A-Za-z0-9]{36,}'''

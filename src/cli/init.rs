@@ -212,6 +212,20 @@ pub fn run_cmd(args: InitArgs) -> anyhow::Result<()> {
         let status = if d.found { "found" } else { "not found" };
         writeln!(out, "  {} {} ({})", mark, d.label, status)?;
     }
+
+    // Coverage caveat at the moment it matters: a detected Codex on ChatGPT
+    // login routes to the ChatGPT backend (OAuth) and cannot be protected by
+    // Burnwall — or any no-MITM proxy. Say so plainly, with the fix.
+    if detections.iter().any(|d| d.binary == "codex" && d.found)
+        && crate::coverage::codex_auth_mode() == Some(crate::coverage::CodexAuth::ChatGpt)
+    {
+        writeln!(out)?;
+        writeln!(out, "  ⚠️  Codex is on ChatGPT login — its traffic goes to the ChatGPT")?;
+        writeln!(out, "      backend and CANNOT be protected by Burnwall (or any no-MITM")?;
+        writeln!(out, "      proxy). Codex in API-key mode would route through Burnwall, but")?;
+        writeln!(out, "      it bills per-token rather than your flat subscription — weigh")?;
+        writeln!(out, "      the cost trade-off before switching.")?;
+    }
     writeln!(out)?;
 
     let shell = Shell::detect();
@@ -314,7 +328,7 @@ pub fn run_cmd(args: InitArgs) -> anyhow::Result<()> {
                 match super::claude_settings::install(&path) {
                     Ok(super::claude_settings::InstallOutcome::Wrote) => {
                         writeln!(out, "   ✓ added `statusLine` to {}", path.display())?;
-                        writeln!(out, "     restart Claude Code to see: 🔥 model · ↑/↓ tokens · $ spend")?;
+                        writeln!(out, "     restart Claude Code to see: 🔥 burnwall · model · ↑/↓ tokens · $ spend")?;
                     }
                     Ok(super::claude_settings::InstallOutcome::AlreadyOurs) => {
                         writeln!(out, "   • already wired up in {}", path.display())?;

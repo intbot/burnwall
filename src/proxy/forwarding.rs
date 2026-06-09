@@ -138,6 +138,13 @@ pub async fn forward(
     let status_code = status.as_u16() as i64;
     let resp_headers = upstream_resp.headers().clone();
 
+    // Subscription-plan limit headroom rides on the upstream response (e.g.
+    // Anthropic's `unified-*` headers); `None` for API keys / unprobed providers.
+    // Parsed here (cheap, in-memory); persisted off the response path in the tee
+    // callback below.
+    let plan_snapshot =
+        crate::plan::parse_limits(provider, &resp_headers, chrono::Utc::now().timestamp());
+
     // Tee callback: parse the full body once the stream finishes and record
     // a `requests` row (with latency + status) + bump the budget tracker +
     // feed the loop detector's cost-spiral window + emit an OTel span. Fire-
@@ -152,6 +159,12 @@ pub async fn forward(
     let session_for_tee = session_id.clone();
 
     let teed = streaming::tee_stream(upstream_resp.bytes_stream(), move |chunks| {
+        // Persist the subscription-limit snapshot if this was a unified response.
+        // Off the response path — the client already has its bytes.
+        if let Some(snap) = &plan_snapshot {
+            let _ = crate::plan::write_snapshot(snap);
+        }
+
         let mut total = Vec::with_capacity(chunks.iter().map(|b| b.len()).sum());
         for b in &chunks {
             total.extend_from_slice(b);

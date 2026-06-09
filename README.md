@@ -157,12 +157,24 @@ Burnwall sits on the **LLM API path** — the HTTP traffic between your AI tool 
 
 The LLM-path proxy does **not** automatically see **MCP** (Model Context Protocol) traffic — that flows from your AI tool to MCP servers directly. For that layer, Burnwall ships a dedicated **MCP firewall** you put in front of your MCP servers (`burnwall mcp-watch`): it detects tool-poisoning and "rug-pull" (silent post-approval redefinition) attacks and enforces an approval workflow. Run it alongside the main proxy for end-to-end coverage.
 
+### The coverage boundary
+
+Burnwall protects the traffic that **flows through it**. It does not man-in-the-middle TLS — it forwards via base-URL routing — so a tool that talks to a provider over a path the base URL can't redirect is simply not visible to it. By design, no proxy that avoids TLS interception can see that traffic.
+
+In practice:
+
+- **Routable, fully protected:** Claude Code (including on a Pro/Max subscription), Codex CLI in **API-key mode**, Aider, OpenCode, and other tools that honor `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` or an equivalent API-base setting.
+- **Not routable, bypasses entirely:** Codex CLI signed in with **ChatGPT login**, which talks to the ChatGPT backend over OAuth. Codex in **API-key mode** routes through Burnwall and can be protected — but it bills per-token instead of your flat subscription, so weigh the cost trade-off before switching.
+
+So you're never left guessing, Burnwall tells you which of your installed tools are actually behind the firewall: `burnwall init` warns at setup if a tool is in a bypassing mode, and `burnwall status` (and `burnwall watch`) show a per-tool **Coverage** readout — *protected*, *installed but unseen*, or *bypasses*.
+
 ## Supported Tools
 
 | Tool | Support | Configuration |
 |------|---------|---------------|
 | Claude Code | ✅ Full | `ANTHROPIC_BASE_URL` |
 | Codex CLI (API key mode) | ✅ Full | `OPENAI_BASE_URL` |
+| Codex CLI (ChatGPT login) | ❌ | Not interceptable (OAuth backend) |
 | Aider | ✅ Full | `--openai-api-base` |
 | OpenCode | ✅ Full | Settings |
 | Cline | ✅ Full | Extension settings |

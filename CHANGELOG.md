@@ -2,7 +2,72 @@
 
 All notable changes to Burnwall.
 
-## Unreleased
+## [0.9.11] — 2026-06-08
+
+### Added
+
+- **Subscription-aware status, across every surface.** For a Claude Pro/Max plan,
+  dollar figures are notional (you pay a flat rate), so Burnwall now shows what's
+  actually scarce: your usage-window headroom. The proxy reads Anthropic's
+  `anthropic-ratelimit-unified-*` response headers (rolling 5-hour + 7-day windows)
+  off traffic it already forwards and persists a small, non-sensitive, **per-provider**
+  snapshot; surfaces render e.g. `5h [▓░░░░░░░] 17% (1h56m) · 7d 10%` in place of the
+  dollar segment, leading with whichever window the provider reports as binding and
+  flagging a throttled status. Auto-detected (a subscription emits these headers, an
+  API key doesn't — verified against Anthropic's docs), so API users keep the
+  dollar/cost view with no configuration; falls back to dollars when no fresh snapshot
+  exists. Surfaced on:
+  - the **Claude Code status line** (`burnwall statusline`);
+  - **`burnwall watch`** — the cross-tool pane for CLIs without their own status bar
+    (Codex, Aider, …): run it in a split pane to see the gauge;
+  - **`burnwall watch --title`** — emits the ribbon as a terminal-title (OSC) escape,
+    for a shell prompt hook or `tmux status-right`, so even a status-bar-less CLI gets
+    it in the window title;
+  - **`status --json`** — a `plan` block (per-provider windows + reset countdown),
+    rendered by the **VS Code / Cursor / Windsurf extension** status bar + tooltip.
+
+  The capture is provider-generic; OpenAI/Google hooks exist but return nothing until
+  their subscription signal is probed and verified (we don't synthesize a window from
+  per-minute API limits).
+
+- **Coverage readout — which of your tools are actually behind the firewall.** A
+  proxy only protects traffic that flows through it, and the dangerous failure mode
+  is *silent* non-coverage — a tool you assume is protected whose traffic never
+  reaches Burnwall. Burnwall now makes coverage visible per installed tool:
+  - **`burnwall init`** warns at setup when a detected tool is in a bypassing mode —
+    concretely, Codex signed in with ChatGPT login (read from `~/.codex/auth.json`,
+    a local non-secret mode flag), whose traffic goes to the ChatGPT backend over
+    OAuth and can't be routed through any no-MITM proxy. It notes that API-key
+    mode would route through Burnwall but bills per-token — an informed trade-off,
+    not a blanket "switch."
+  - **`burnwall status`** and **`burnwall watch`** show a per-tool **Coverage**
+    section: *protected* (provider seen routing recently), *installed but no traffic
+    seen*, or *bypasses*. `status --json` carries a `coverage` array, and the VS Code
+    / Cursor / Windsurf extension surfaces a `⚠ <tool> unprotected` warning plus a
+    tooltip breakdown.
+  - README documents the boundary outright.
+
+- **More official security rule packs.** The bundled, signed-release rule packs
+  grew from 4 to **8** — added `node`, `python`, `go`, and `kubernetes`, and
+  fleshed out `django` / `react` / `infrastructure` / `data-science` (now ~61
+  rules total). Each targets unambiguously sensitive credential/state files
+  (`.npmrc`, `.pypirc`, kubeconfigs, `terraform.tfstate`, …) and genuinely
+  destructive commands, keeping the low-false-positive bar. Install with
+  `burnwall rules install <id>`; list with `burnwall rules list`.
+- **`burnwall rules lint`** — validate a rule pack against strict acceptance rules
+  (stricter than the runtime: forbidden/unknown keys, uncompilable or over-broad
+  rules are hard errors), optionally verifying its signature (`--sig`). Exits
+  non-zero on any error and supports `--json`, so it can gate a community rule
+  repo's CI. The bundled official packs are themselves checked by it in CI.
+
+### Changed
+
+- Status ribbon now carries a `burnwall` wordmark — `🔥 burnwall · <model> · …` —
+  across every surface (Claude Code status line, `burnwall watch`, editor status
+  bar), which share one renderer.
+- `short_model` now keeps a trailing context-variant tag and upper-cases it, and
+  no longer lets it defeat the version dotting: `claude-opus-4-8[1m]` renders as
+  `opus-4.8[1M]` (was `opus-4-8[1m]`).
 
 ## [0.9.10] — 2026-06-08
 

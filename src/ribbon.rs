@@ -36,6 +36,24 @@ pub enum Ctx {
     Hidden,
 }
 
+/// Subscription-plan limit headroom, derived from a [`crate::plan::PlanSnapshot`].
+/// When present, it *replaces* the dollar cost segment — for a flat-rate plan the
+/// scarce resource is window headroom, not (notional) money.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanLimits {
+    /// Label of the binding window (`5h` / `7d`).
+    pub primary_label: String,
+    /// Binding-window utilization, 0–100.
+    pub primary_pct: f64,
+    /// Seconds until the binding window resets, if known.
+    pub primary_reset_in: Option<i64>,
+    /// Optional second window `(label, utilization 0–100)` — some providers
+    /// expose only one.
+    pub secondary: Option<(String, f64)>,
+    /// The provider reports the plan as currently throttled.
+    pub throttled: bool,
+}
+
 /// All the data the ribbon can display. Surfaces fill what they know; the
 /// renderer drops segments that don't apply.
 #[derive(Debug, Clone)]
@@ -57,6 +75,9 @@ pub struct Ribbon {
     pub today_usd: Option<f64>,
     /// Security blocks today (from the proxy DB).
     pub blocks_today: u64,
+    /// Subscription-plan limit headroom. When `Some`, the renderer shows it in
+    /// place of the dollar cost segment (subscription mode).
+    pub plan: Option<PlanLimits>,
     /// Context-window gauge.
     pub ctx: Ctx,
 }
@@ -66,26 +87,50 @@ impl Ribbon {
     /// bars and other surfaces that don't render them).
     pub fn render(&self, color: bool) -> String {
         let mut s = String::new();
-        let _ = write!(s, "🔥 {}", self.model);
+        let _ = write!(s, "🔥 burnwall · {}", self.model);
         if let Some(t) = &self.tool {
             let _ = write!(s, " ({t})");
         }
         let _ = write!(s, " · ↑{} ↓{}", human_k(self.up), human_k(self.down));
-        // Cost segment: show msg (per-turn) and/or sess, whichever are known.
-        match (self.msg_usd, self.sess_usd) {
-            (Some(m), Some(sess)) => {
-                let _ = write!(s, " · ${:.2} msg ${:.2} sess", m, sess);
+        // Subscription mode replaces the (notional) dollar cost with real plan
+        // headroom; otherwise show the dollar cost + today's spend.
+        match &self.plan {
+            Some(p) => {
+                let _ = write!(
+                    s,
+                    " · {} {} {}",
+                    p.primary_label,
+                    bar(p.primary_pct, color),
+                    pct_label(p.primary_pct, color)
+                );
+                if let Some(secs) = p.primary_reset_in {
+                    let _ = write!(s, " ({})", human_duration(secs));
+                }
+                if let Some((label, pct)) = &p.secondary {
+                    let _ = write!(s, " · {} {}", label, pct_label(*pct, color));
+                }
+                if p.throttled {
+                    let _ = write!(s, " · ⛔ throttled");
+                }
             }
-            (Some(m), None) => {
-                let _ = write!(s, " · ${:.2} msg", m);
+            None => {
+                // Cost segment: show msg (per-turn) and/or sess, whichever are known.
+                match (self.msg_usd, self.sess_usd) {
+                    (Some(m), Some(sess)) => {
+                        let _ = write!(s, " · ${:.2} msg ${:.2} sess", m, sess);
+                    }
+                    (Some(m), None) => {
+                        let _ = write!(s, " · ${:.2} msg", m);
+                    }
+                    (None, Some(sess)) => {
+                        let _ = write!(s, " · ${:.2} sess", sess);
+                    }
+                    (None, None) => {}
+                }
+                if let Some(today) = self.today_usd {
+                    let _ = write!(s, " · ${today:.2} today");
+                }
             }
-            (None, Some(sess)) => {
-                let _ = write!(s, " · ${:.2} sess", sess);
-            }
-            (None, None) => {}
-        }
-        if let Some(today) = self.today_usd {
-            let _ = write!(s, " · ${today:.2} today");
         }
         if self.blocks_today > 0 {
             let _ = write!(s, " · 🛡{}", self.blocks_today);
@@ -107,6 +152,23 @@ impl Ribbon {
     }
 }
 
+/// Compact "time until" label for a reset countdown: `45m`, `2h28m`, `2d7h`.
+/// Non-positive (already reset) renders as `now`.
+pub fn human_duration(secs: i64) -> String {
+    if secs <= 0 {
+        return "now".to_string();
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{mins}m");
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return format!("{hours}h{:02}m", mins % 60);
+    }
+    format!("{}d{}h", hours / 24, hours % 24)
+}
+
 /// Compact token count: `615`, `4.7k`, `13k`.
 pub fn human_k(n: u64) -> String {
     match n {
@@ -116,29 +178,43 @@ pub fn human_k(n: u64) -> String {
     }
 }
 
-/// Shorten a provider model id for display: strip a date suffix, drop the
-/// `claude-` prefix, and render the trailing `-<minor>` as `.<minor>`
-/// (`claude-sonnet-4-6-20250514` → `sonnet-4.6`). Non-Claude ids that already
-/// carry a dot (`gpt-5.4`) pass through unchanged.
+/// Shorten a provider model id for display: peel off a trailing variant tag,
+/// strip a date suffix, drop the `claude-` prefix, and render the trailing
+/// `-<minor>` as `.<minor>` (`claude-sonnet-4-6-20250514` → `sonnet-4.6`).
+/// A trailing bracketed variant tag like `[1m]` (the 1M-context variant) is
+/// kept and upper-cased (`claude-opus-4-8[1m]` → `opus-4.8[1M]`) — without
+/// peeling it first, the `]` would defeat the version-dotting step. Non-Claude
+/// ids that already carry a dot (`gpt-5.4`) pass through unchanged.
 pub fn short_model(id: &str) -> String {
-    let mut s = id.trim();
+    let s = id.trim();
+    // Peel a trailing bracketed variant tag (e.g. `[1m]`). Upper-case it so the
+    // unit (`m` = million) reads as `1M`; re-attached after the base is dotted.
+    let (mut base, tag) = match s.rfind('[') {
+        Some(idx) if s.ends_with(']') => (&s[..idx], s[idx..].to_uppercase()),
+        _ => (s, String::new()),
+    };
     // Strip a `-YYYYMMDD` date suffix.
-    if let Some(idx) = s.rfind('-') {
-        let tail = &s[idx + 1..];
-        if tail.len() == 8 && tail.bytes().all(|b| b.is_ascii_digit()) {
-            s = &s[..idx];
+    if let Some(idx) = base.rfind('-') {
+        let date = &base[idx + 1..];
+        if date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()) {
+            base = &base[..idx];
         }
     }
-    let s = s.strip_prefix("claude-").unwrap_or(s);
+    let base = base.strip_prefix("claude-").unwrap_or(base);
     // `name-<major>-<minor>` → `name-<major>.<minor>` (Claude family).
-    if let Some(idx) = s.rfind('-') {
-        let (head, tail) = (&s[..idx], &s[idx + 1..]);
-        let head_ends_digit = head.bytes().last().is_some_and(|b| b.is_ascii_digit());
-        if head_ends_digit && !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) {
-            return format!("{head}.{tail}");
+    let normalized = match base.rfind('-') {
+        Some(idx) => {
+            let (head, tail) = (&base[..idx], &base[idx + 1..]);
+            let head_ends_digit = head.bytes().last().is_some_and(|b| b.is_ascii_digit());
+            if head_ends_digit && !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) {
+                format!("{head}.{tail}")
+            } else {
+                base.to_string()
+            }
         }
-    }
-    s.to_string()
+        None => base.to_string(),
+    };
+    format!("{normalized}{tag}")
 }
 
 /// Known model context-window sizes (tokens), matched by name prefix. Used only
@@ -243,6 +319,7 @@ mod tests {
             sess_usd: Some(0.16),
             today_usd: Some(2.40),
             blocks_today: 0,
+            plan: None,
             ctx: Ctx::Exact(22.0),
         }
     }
@@ -252,7 +329,7 @@ mod tests {
         let s = base().render(false);
         assert_eq!(
             s,
-            "🔥 sonnet-4.6 · ↑13k ↓615 · $0.05 msg $0.16 sess · $2.40 today · ctx [▓▓░░░░░░] 22%"
+            "🔥 burnwall · sonnet-4.6 · ↑13k ↓615 · $0.05 msg $0.16 sess · $2.40 today · ctx [▓▓░░░░░░] 22%"
         );
     }
 
@@ -322,7 +399,7 @@ mod tests {
     fn tool_label_shown_when_present() {
         let mut r = base();
         r.tool = Some("codex".to_string());
-        assert!(r.render(false).contains("🔥 sonnet-4.6 (codex)"));
+        assert!(r.render(false).contains("🔥 burnwall · sonnet-4.6 (codex)"));
     }
 
     #[test]
@@ -333,12 +410,67 @@ mod tests {
     }
 
     #[test]
+    fn human_duration_formatting() {
+        assert_eq!(human_duration(0), "now");
+        assert_eq!(human_duration(-5), "now");
+        assert_eq!(human_duration(45 * 60), "45m");
+        assert_eq!(human_duration(2 * 3600 + 28 * 60), "2h28m");
+        assert_eq!(human_duration(2 * 86400 + 7 * 3600), "2d7h");
+    }
+
+    #[test]
+    fn plan_segment_replaces_cost_in_subscription_mode() {
+        let mut r = base();
+        r.plan = Some(PlanLimits {
+            primary_label: "5h".to_string(),
+            primary_pct: 11.0,
+            primary_reset_in: Some(2 * 3600 + 28 * 60),
+            secondary: Some(("7d".to_string(), 10.0)),
+            throttled: false,
+        });
+        let s = r.render(false);
+        // Limit headroom shown; notional dollars suppressed.
+        assert!(s.contains("5h [▓░░░░░░░] 11% (2h28m)"), "got: {s}");
+        assert!(s.contains("7d 10%"));
+        assert!(!s.contains("msg"));
+        assert!(!s.contains("sess"));
+        assert!(!s.contains("today"));
+        // Shared segments still render.
+        assert!(s.contains("🔥 burnwall · sonnet-4.6"));
+        assert!(s.contains("↑13k ↓615"));
+        assert!(s.contains("ctx ["));
+    }
+
+    #[test]
+    fn plan_segment_flags_throttled() {
+        let mut r = base();
+        r.plan = Some(PlanLimits {
+            primary_label: "5h".to_string(),
+            primary_pct: 100.0,
+            primary_reset_in: Some(600),
+            secondary: Some(("7d".to_string(), 80.0)),
+            throttled: true,
+        });
+        assert!(r.render(false).contains("⛔ throttled"));
+    }
+
+    #[test]
     fn short_model_normalizes_names() {
         assert_eq!(short_model("claude-sonnet-4-6"), "sonnet-4.6");
         assert_eq!(short_model("claude-opus-4-8-20250514"), "opus-4.8");
         assert_eq!(short_model("gpt-5.4"), "gpt-5.4");
         assert_eq!(short_model("gpt-5.4-mini"), "gpt-5.4-mini");
         assert_eq!(short_model("gemini-2.5-pro"), "gemini-2.5-pro");
+    }
+
+    #[test]
+    fn short_model_keeps_and_uppercases_variant_tag() {
+        // The 1M-context variant tag survives, upper-cased, and the version is
+        // still dotted (the `[1m]` previously defeated the dotting).
+        assert_eq!(short_model("claude-opus-4-8[1m]"), "opus-4.8[1M]");
+        assert_eq!(short_model("claude-sonnet-4-6[1m]"), "sonnet-4.6[1M]");
+        // Date suffix + variant tag together.
+        assert_eq!(short_model("claude-opus-4-8-20250514[1m]"), "opus-4.8[1M]");
     }
 
     #[test]

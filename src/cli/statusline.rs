@@ -131,8 +131,20 @@ fn build_ribbon(cc: &CcInput) -> Ribbon {
         sess_usd: Some(sess),
         today_usd,
         blocks_today: blocks,
+        plan: plan_limits(),
         ctx,
     }
+}
+
+/// Build the subscription-limit segment from the freshest proxy-captured
+/// snapshot, or `None` when there's no fresh subscription reading (API user,
+/// proxy not capturing, or idle long enough the windows are stale). When `Some`,
+/// the ribbon shows real plan headroom instead of the notional dollar cost.
+fn plan_limits() -> Option<ribbon::PlanLimits> {
+    let now = chrono::Utc::now().timestamp();
+    // A subscriber refreshes this on every request; a >12h-old reading means
+    // they've been idle — show nothing rather than a misleading window.
+    crate::plan::freshest(now, 12 * 3600).and_then(|s| s.to_ribbon_limits(now))
 }
 
 /// Claude Code reports *cumulative* session cost; cache the previous total per

@@ -34,13 +34,23 @@ pub struct WatchArgs {
     /// Disable ANSI color / screen clearing.
     #[arg(long)]
     pub no_color: bool,
+    /// Emit the ribbon as a terminal-title escape (OSC) instead of drawing a
+    /// pane — so a status-bar-less CLI gets the ribbon in its window/tab title.
+    /// Wire into your shell's prompt hook (e.g. `precmd`/`PROMPT_COMMAND`), or
+    /// `tmux` via `status-right` (those can also use `--once --oneline`).
+    #[arg(long)]
+    pub title: bool,
 }
 
 pub fn run_cmd(args: WatchArgs) -> anyhow::Result<()> {
     let db = Storage::open_default().context("opening storage")?;
 
     if args.once {
-        let frame = render_frame(&db, &args);
+        let frame = if args.title {
+            title_frame(&db)
+        } else {
+            render_frame(&db, &args)
+        };
         print!("{frame}");
         std::io::stdout().flush().ok();
         return Ok(());
@@ -66,12 +76,24 @@ pub fn run_cmd(args: WatchArgs) -> anyhow::Result<()> {
 
 /// Clear the screen (unless colour/clearing is off) and paint one frame.
 fn draw(db: &Storage, args: &WatchArgs) {
+    if args.title {
+        // Title mode never clears the screen — it only updates the title.
+        print!("{}", title_frame(db));
+        std::io::stdout().flush().ok();
+        return;
+    }
     if !args.no_color {
         // Clear screen + move cursor home.
         print!("\x1b[2J\x1b[H");
     }
     print!("{}", render_frame(db, args));
     std::io::stdout().flush().ok();
+}
+
+/// OSC escape that sets the terminal window/icon title to the (uncoloured)
+/// ribbon. `ESC ] 0 ; <text> BEL` is the widely-supported form.
+fn title_frame(db: &Storage) -> String {
+    format!("\x1b]0;{}\x07", ribbon_from_db(db).render(false))
 }
 
 /// Render the current frame to a string (pure given the DB snapshot) — the
@@ -122,6 +144,12 @@ fn ribbon_from_db(db: &Storage) -> Ribbon {
         sess_usd: None, // the aggregate view has no session concept
         today_usd: Some(today_usd),
         blocks_today: blocks,
+        // Subscription headroom (freshest provider) — the universal surface for
+        // CLIs without their own status bar (run `watch` in a side pane).
+        plan: {
+            let now = chrono::Utc::now().timestamp();
+            crate::plan::freshest(now, 12 * 3600).and_then(|s| s.to_ribbon_limits(now))
+        },
         ctx,
     }
 }
@@ -150,6 +178,17 @@ fn dashboard(db: &Storage, ribbon: &Ribbon, color: bool) -> String {
             s.push('\n');
         }
     }
+    // Coverage: which installed tools actually route through the proxy. Makes
+    // silent non-coverage visible (e.g. ChatGPT-login Codex bypasses entirely).
+    let coverage = crate::coverage::assess(db, chrono::Utc::now().timestamp());
+    if !coverage.is_empty() {
+        s.push_str(" coverage:\n");
+        for tc in &coverage {
+            s.push_str(&format!("   {:<14} {}\n", tc.label, tc.state.summary()));
+        }
+        s.push('\n');
+    }
+
     s.push_str(&format!(" {rule}\n"));
     s.push_str(" refreshing on activity · ctrl-c to exit\n");
     s
@@ -213,9 +252,10 @@ mod tests {
             once: true,
             interval: 2,
             no_color: true,
+            title: false,
         };
         let frame = render_frame(&db, &args);
-        assert!(frame.contains("🔥 sonnet-4.6"));
+        assert!(frame.contains("🔥 burnwall · sonnet-4.6"));
         assert!(frame.contains("$0.05 msg"));
     }
 
@@ -227,6 +267,7 @@ mod tests {
             once: true,
             interval: 2,
             no_color: true,
+            title: false,
         };
         let frame = render_frame(&db, &args);
         assert!(frame.contains("burnwall · live"));
