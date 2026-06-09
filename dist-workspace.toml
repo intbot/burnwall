@@ -36,6 +36,12 @@ tap = "intbot/homebrew-burnwall"
 publish-jobs = ["./publish-crates", "./publish-nuget", "./publish-pypi"]
 # Run a plan-only check on PRs (don't try to build/publish on every PR).
 pr-run-mode = "plan"
+# `release.yml` carries a manual patch over the dist-generated workflow (the
+# attestation-retry block — re-apply after any `dist generate`). Without this,
+# dist's CI-consistency guard fails `plan` because the committed workflow no
+# longer matches what dist would emit. Scope is "ci" only, so every other file
+# is still checked for drift.
+allow-dirty = ["ci"]
 # Generate GitHub Artifact Attestations (Sigstore keyless build provenance,
 # SLSA Build L2). Every released binary can then be verified with
 # `gh attestation verify <file> --repo intbot/burnwall`. No signing key to
