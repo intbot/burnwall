@@ -2,6 +2,52 @@
 
 All notable changes to Burnwall.
 
+## [0.9.14] — 2026-06-10
+
+A real-world robustness pass driven by dogfooding: a multi-agent review of
+every feature, focused on the failure modes that make a tool freeze, falsely
+block, or mislead — the kind that trigger an uninstall.
+
+### Fixed
+
+- **The daily budget now resets at midnight.** A long-running proxy used to
+  accumulate spend across days and eventually return "budget exceeded" on every
+  request even though the day's real spend was small. The counter is now
+  day- and month-aware (restart- and clock-change-proof), and the monthly cap
+  is actually enforced.
+- **Loop detection no longer gets stuck on retries.** A blocked request (and a
+  client's automatic retry of it, or a retry after a provider outage) no longer
+  feeds the loop-detection window, so a transient blip can't wedge a session
+  into a permanent 429 loop. Blocks now carry a `Retry-After`, and the window is
+  keyed per method/provider/path so unrelated requests don't collide.
+- **Fewer false security blocks.** Writing or discussing a file that merely
+  mentions a sensitive path (e.g. `~/.ssh` in a README) no longer 403s — only
+  shell-tool arguments get command checks. Windows paths in tool arguments are
+  no longer mistaken for network mounts, scoped deletes like `rm -rf /tmp/x`
+  pass, and well-known documentation/example keys are exempt. Blocks now explain
+  what was caught and how to proceed, and `burnwall report-bug` writes a
+  sanitized local report for false positives.
+- **The proxy no longer hangs on a stalled or unreachable upstream**, and
+  cancelling a request (Esc) stops the upstream instead of billing the full
+  response.
+- **Accurate cost capture for more tools.** OpenAI's Responses API (used by
+  Codex) is now parsed instead of silently recording $0, unknown models warn
+  instead of recording $0, and the cross-tool "today" total no longer
+  double-counts traffic that went through the proxy.
+
+### Changed
+
+- **A crashed or stopped proxy no longer breaks your terminals.** Shell routing
+  is liveness-gated: if the proxy isn't running, a new shell talks directly to
+  the provider (unprotected but working) instead of failing to connect. Every
+  status surface shows a clear "proxy down" warning when routing points at a
+  dead port. PowerShell now gets persistent routing like the other shells.
+- Plan-aware budgeting: on a flat-rate subscription, the dollar cap is treated
+  as advisory (tracked and warned, not blocked) unless you opt in.
+- Hardening across MCP (prose-safe scanning, clearer approval errors), the audit
+  chain (lost-key detection), storage (schema versioning), and the daemon
+  (a real log file, PID identity checks).
+
 ## [0.9.13] — 2026-06-09
 
 ### Fixed
