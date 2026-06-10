@@ -65,6 +65,33 @@ fn lookup_does_not_match_unrelated_prefix() {
     assert!(get_pricing("claude-sonnet-4-6dev").is_none());
 }
 
+#[test]
+fn fable_5_is_priced() {
+    // Released 2026-06-09: $10/$50 per MTok, standard cache multipliers.
+    let p = get_pricing("claude-fable-5").expect("fable 5");
+    assert!((p.input_per_mtok - 10.00).abs() < EPSILON);
+    assert!((p.output_per_mtok - 50.00).abs() < EPSILON);
+    assert!((p.cache_write_per_mtok - 12.50).abs() < EPSILON);
+    assert!((p.cache_read_per_mtok - 1.00).abs() < EPSILON);
+}
+
+#[test]
+fn opus_4_8_is_priced_at_opus_rates() {
+    let p48 = get_pricing("claude-opus-4-8").expect("opus 4.8");
+    let p47 = get_pricing("claude-opus-4-7").expect("opus 4.7");
+    assert_eq!(p48, p47);
+}
+
+#[test]
+fn lookup_strips_bracket_variant_tag() {
+    // Claude Code requests the 1M-context tier as `<model>[1m]` — the tag
+    // must resolve to the base model's rates, not fall through to unknown.
+    let exact = get_pricing("claude-fable-5").expect("exact");
+    let tagged = get_pricing("claude-fable-5[1m]").expect("with [1m] tag");
+    assert_eq!(exact, tagged);
+    assert!(get_pricing("claude-opus-4-8[1m]").is_some());
+}
+
 // ─────────────────────────── Cost calculation ───────────────────────────
 
 #[test]
