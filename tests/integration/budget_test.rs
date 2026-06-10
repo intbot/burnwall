@@ -21,6 +21,7 @@ fn cfg(daily: f64, warn: u8) -> BudgetConfig {
         monthly_usd: 0.0,
         warn_percent: warn,
         per_session_usd: 0.0,
+        enforce_on_plan: false,
     }
 }
 
@@ -30,10 +31,68 @@ fn cfg_session(per_session: f64) -> BudgetConfig {
         monthly_usd: 0.0,
         warn_percent: 80,
         per_session_usd: per_session,
+        enforce_on_plan: false,
     }
 }
 
 const EPS: f64 = 1e-9;
+
+// ───────────────────── Monthly cap (B-H2) ─────────────────────
+
+fn cfg_monthly(monthly: f64) -> BudgetConfig {
+    BudgetConfig {
+        daily_usd: 0.0, // unlimited daily, isolate the monthly check
+        monthly_usd: monthly,
+        warn_percent: 80,
+        per_session_usd: 0.0,
+        enforce_on_plan: false,
+    }
+}
+
+#[test]
+fn monthly_cap_unlimited_when_zero() {
+    let t = BudgetTracker::new(cfg_monthly(0.0));
+    t.record(1_000.0);
+    assert!(matches!(t.check_monthly(), BudgetStatus::Ok));
+}
+
+#[test]
+fn monthly_cap_blocks_when_exceeded() {
+    let t = BudgetTracker::new(cfg_monthly(100.0));
+    t.record(99.0);
+    assert!(matches!(t.check_monthly(), BudgetStatus::Ok));
+    t.record(2.0); // 101 > 100
+    assert!(
+        matches!(t.check_monthly(), BudgetStatus::Exceeded { .. }),
+        "monthly cap should block once exceeded"
+    );
+    // The daily check is independent and unlimited here.
+    assert!(matches!(t.check(), BudgetStatus::Ok));
+}
+
+#[test]
+fn record_accumulates_into_both_day_and_month() {
+    let t = BudgetTracker::new(BudgetConfig {
+        daily_usd: 0.0,
+        monthly_usd: 0.0,
+        warn_percent: 80,
+        per_session_usd: 0.0,
+        enforce_on_plan: false,
+    });
+    t.record(3.0);
+    t.record(4.0);
+    assert!((t.today_spent() - 7.0).abs() < EPS);
+    assert!((t.month_spent() - 7.0).abs() < EPS);
+}
+
+#[test]
+fn reset_zeroes_day_but_not_month() {
+    let t = BudgetTracker::new(cfg_monthly(0.0));
+    t.record(5.0);
+    t.reset();
+    assert!((t.today_spent()).abs() < EPS, "daily reset to zero");
+    assert!((t.month_spent() - 5.0).abs() < EPS, "month untouched by daily reset");
+}
 
 // ───────────────────────────── Pure check ─────────────────────────────
 
@@ -262,8 +321,12 @@ fn loop_cfg(max_identical: u32, window: u32, max_cost: f64) -> LoopConfig {
         window_seconds: window,
         max_cost_per_window: max_cost,
         cost_spiral_enforce: false,
-        hash_prefix_bytes: 200,
     }
+}
+
+/// Hash a body with the standard method/provider/path context.
+fn lh(det: &LoopDetector, body: &[u8]) -> u64 {
+    det.hash("POST", "anthropic", "/v1/messages", body)
 }
 
 #[test]
@@ -275,43 +338,62 @@ fn loop_detector_passes_unique_requests() {
         b"third body".as_slice(),
     ];
     for body in &bodies {
-        let h = det.hash(body);
+        let h = lh(&det, body);
         assert_eq!(det.check_request(h), LoopVerdict::Ok);
+        det.record_arrival(h);
     }
 }
 
 #[test]
-fn loop_detector_blocks_on_nth_identical_request() {
-    // max_identical_requests = 3 -> the 3rd identical request triggers the block.
+fn loop_detector_blocks_after_max_identical_successes() {
+    // peek/record model: N identical *successful* requests are tolerated (each
+    // recorded by the tee on a 2xx); the next identical peek blocks.
     let det = LoopDetector::new(loop_cfg(3, 60, 0.0));
-    let body = b"identical body";
-    let h = det.hash(body);
+    let h = lh(&det, b"identical body");
 
-    assert_eq!(det.check_request(h), LoopVerdict::Ok, "1st should pass");
-    assert_eq!(det.check_request(h), LoopVerdict::Ok, "2nd should pass");
+    for _ in 0..3 {
+        assert_eq!(det.check_request(h), LoopVerdict::Ok);
+        det.record_arrival(h);
+    }
     let v = det.check_request(h);
     assert!(
         matches!(v, LoopVerdict::Repeated { count: 3, .. }),
-        "3rd should block, got {:?}",
+        "should block once 3 successes are recorded, got {:?}",
         v
     );
 }
 
 #[test]
-fn loop_detector_hashes_only_prefix_bytes() {
-    // Same prefix (200 bytes by default), different suffix -> same hash.
+fn loop_detector_check_is_read_only() {
+    // The death-spiral regression (B-C2): check_request never records, so a
+    // client hammering a 429 can't keep its own window full.
+    let det = LoopDetector::new(loop_cfg(3, 60, 0.0));
+    let h = lh(&det, b"retry body");
+    for _ in 0..50 {
+        assert_eq!(det.check_request(h), LoopVerdict::Ok);
+    }
+}
+
+#[test]
+fn loop_detector_hashes_full_body() {
+    // Same long prefix, different suffix -> DIFFERENT hash. Agentic clients
+    // resend the whole (growing) transcript every turn, so a shared prefix
+    // is normal session traffic, not a loop — only byte-identical bodies
+    // may collide.
     let mut a = vec![b'A'; 200];
     let mut b = a.clone();
     a.extend_from_slice(b"-different-suffix-A");
     b.extend_from_slice(b"-different-suffix-B");
     let det = LoopDetector::with_defaults();
-    assert_eq!(det.hash(&a), det.hash(&b));
+    assert_ne!(lh(&det, &a), lh(&det, &b));
 
-    // Different first 200 bytes -> different hash.
-    let mut c = vec![b'A'; 200];
+    // Identical bodies -> identical hash.
+    assert_eq!(lh(&det, &a), lh(&det, &a.clone()));
+
+    // Different content -> different hash.
+    let c = vec![b'A'; 200];
     let d = vec![b'B'; 200];
-    c[0] = b'X';
-    assert_ne!(det.hash(&c), det.hash(&d));
+    assert_ne!(lh(&det, &c), lh(&det, &d));
 }
 
 #[test]
@@ -320,20 +402,24 @@ fn loop_detector_disabled_returns_ok() {
         enabled: false,
         ..loop_cfg(1, 60, 1.0) // would block immediately if enabled
     });
-    let h = det.hash(b"any");
-    assert_eq!(det.check_request(h), LoopVerdict::Ok);
+    let h = lh(&det, b"any");
+    det.record_arrival(h);
+    det.record_arrival(h);
     assert_eq!(det.check_request(h), LoopVerdict::Ok);
 }
 
 #[test]
 fn loop_detector_independent_hashes_dont_cross_count() {
     let det = LoopDetector::new(loop_cfg(2, 60, 0.0));
-    let h1 = det.hash(b"body one");
-    let h2 = det.hash(b"body two");
+    let h1 = lh(&det, b"body one");
+    let h2 = lh(&det, b"body two");
 
+    // Record one arrival under each — neither reaches the cap of 2.
+    det.record_arrival(h1);
+    det.record_arrival(h2);
     assert_eq!(det.check_request(h1), LoopVerdict::Ok);
-    assert_eq!(det.check_request(h2), LoopVerdict::Ok);
-    // Each hash now has count=1, neither should block.
+    // A second success under h2 brings it to the cap; the next peek blocks.
+    det.record_arrival(h2);
     let v = det.check_request(h2);
     assert!(matches!(v, LoopVerdict::Repeated { count: 2, .. }));
 }
@@ -375,10 +461,10 @@ fn current_window_cost_excludes_expired_entries() {
 
 #[test]
 fn loop_detector_safe_under_concurrent_writers() {
-    // 8 threads pounding the same hash. Set max_identical=1 so every call
-    // returns Repeated{count}, letting us verify no increments are lost.
+    // 8 threads recording arrivals under the same hash; verify no increments
+    // are lost under contention (the arrival path is what mutates state now).
     let det = Arc::new(LoopDetector::new(loop_cfg(1, 60, 0.0)));
-    let h = det.hash(b"shared body");
+    let h = lh(&det, b"shared body");
     let threads = 8;
     let per_thread = 1000;
     let mut handles = Vec::with_capacity(threads);
@@ -386,19 +472,18 @@ fn loop_detector_safe_under_concurrent_writers() {
         let d = det.clone();
         handles.push(std::thread::spawn(move || {
             for _ in 0..per_thread {
-                let _ = d.check_request(h);
+                d.record_arrival(h);
             }
         }));
     }
-    for h in handles {
-        h.join().unwrap();
+    for handle in handles {
+        handle.join().unwrap();
     }
-    let final_verdict = det.check_request(h);
-    let final_count = match final_verdict {
+    let final_count = match det.check_request(h) {
         LoopVerdict::Repeated { count, .. } => count,
         v => panic!("expected Repeated, got {:?}", v),
     };
-    let expected = (threads * per_thread + 1) as u32;
+    let expected = (threads * per_thread) as u32;
     assert_eq!(final_count, expected, "lost increments under contention");
 }
 

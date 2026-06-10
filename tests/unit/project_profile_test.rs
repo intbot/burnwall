@@ -185,6 +185,7 @@ fn budget(daily: f64) -> BudgetConfig {
         monthly_usd: 0.0,
         warn_percent: 80,
         per_session_usd: 0.0,
+        enforce_on_plan: false,
     }
 }
 

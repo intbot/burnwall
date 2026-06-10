@@ -15,6 +15,14 @@ pub struct BudgetConfig {
     /// `x-burnwall-session` request header. `0.0` = unlimited (off). Lets agents
     /// in a fan-out that share a session id share one blast-radius ceiling.
     pub per_session_usd: f64,
+    /// Enforce the dollar caps (daily/monthly/session) on subscription traffic
+    /// too. Off by default: a flat-rate plan (Claude Pro/Max via OAuth) is not
+    /// metered per token, so the calculated API-equivalent dollar figure is
+    /// notional — blocking on it walls the user off from money they are not
+    /// spending. With `false`, subscription requests are tracked and *warned*
+    /// but never blocked on the dollar cap; metered API-key traffic is always
+    /// enforced. The loop detector / cost spiral still apply to both. See B-H4.
+    pub enforce_on_plan: bool,
 }
 
 impl Default for BudgetConfig {
@@ -24,6 +32,7 @@ impl Default for BudgetConfig {
             monthly_usd: 0.0, // unlimited per SPEC default
             warn_percent: 80,
             per_session_usd: 0.0, // off by default
+            enforce_on_plan: false,
         }
     }
 }
@@ -68,6 +77,24 @@ pub fn check_daily(spent_usd: f64, config: &BudgetConfig) -> BudgetStatus {
             spent: spent_usd,
             limit: config.daily_usd,
             percent: pct,
+        };
+    }
+    BudgetStatus::Ok
+}
+
+/// Pure: classify `spent_usd` (month-to-date) against the monthly limit.
+///
+/// Mirrors [`check_daily`] but against `monthly_usd` and with no warn tier —
+/// the monthly cap is a hard backstop, and the daily warn already nudges.
+/// `0.0` monthly limit = unlimited.
+pub fn check_monthly(spent_usd: f64, config: &BudgetConfig) -> BudgetStatus {
+    if config.monthly_usd <= 0.0 {
+        return BudgetStatus::Ok;
+    }
+    if spent_usd >= config.monthly_usd {
+        return BudgetStatus::Exceeded {
+            spent: spent_usd,
+            limit: config.monthly_usd,
         };
     }
     BudgetStatus::Ok

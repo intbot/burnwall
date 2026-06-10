@@ -119,6 +119,14 @@ pub struct BudgetConfig {
     /// same session id share one blast-radius ceiling.
     #[serde(default)]
     pub per_session: f64,
+    /// Enforce the dollar caps on subscription (flat-rate plan) traffic too.
+    /// Off by default — a Claude Pro/Max session authenticates with an OAuth
+    /// token and is not metered per token, so the calculated dollar figure is
+    /// notional. Burnwall still *tracks* and *warns* on plan traffic, but does
+    /// not 429-block it on the dollar cap unless this is `true` (B-H4). Metered
+    /// API-key traffic is always enforced.
+    #[serde(default)]
+    pub enforce_on_plan: bool,
 }
 
 impl Default for BudgetConfig {
@@ -128,6 +136,7 @@ impl Default for BudgetConfig {
             monthly: 0.0,
             warn_percent: 80,
             per_session: 0.0,
+            enforce_on_plan: false,
         }
     }
 }
@@ -398,6 +407,7 @@ impl From<&BudgetConfig> for crate::budget::BudgetConfig {
             monthly_usd: c.monthly,
             warn_percent: c.warn_percent,
             per_session_usd: c.per_session,
+            enforce_on_plan: c.enforce_on_plan,
         }
     }
 }
@@ -408,12 +418,14 @@ impl From<&SecurityConfig> for crate::security::Ruleset {
     fn from(c: &SecurityConfig) -> Self {
         Self {
             enabled: c.enabled,
-            deny_paths: c.deny_paths.clone(),
+            // Filter blank rules: a hand-edited config with an empty entry
+            // would otherwise match every leaf and block all traffic (S-H8).
+            deny_paths: crate::security::rules::non_empty_rules(c.deny_paths.clone()),
             // `allow_paths` is project-profile-only — the global config has
             // no allow list. A discovered `.burnwall.yaml` merges into this
             // afterwards (see `cli::start`).
             allow_paths: Vec::new(),
-            deny_commands: c.deny_commands.clone(),
+            deny_commands: crate::security::rules::non_empty_rules(c.deny_commands.clone()),
             block_network_mounts: c.block_network_mounts,
             detect_secrets: c.detect_secrets,
             detect_egress: c.dlp,
@@ -447,18 +459,15 @@ impl ResilienceConfig {
 }
 
 /// Convert the persistent loop_detection block into the runtime
-/// [`crate::budget::LoopConfig`]. `hash_prefix_bytes` keeps its built-in
-/// default (200) — we don't expose it as a TOML knob in v0.2.
+/// [`crate::budget::LoopConfig`].
 impl From<&LoopDetectionConfig> for crate::budget::LoopConfig {
     fn from(c: &LoopDetectionConfig) -> Self {
-        let defaults = crate::budget::LoopConfig::default();
         Self {
             enabled: c.enabled,
             max_identical_requests: c.max_identical_requests,
             window_seconds: c.window_seconds,
             max_cost_per_window: c.max_cost_per_window,
             cost_spiral_enforce: c.cost_spiral_enforce,
-            hash_prefix_bytes: defaults.hash_prefix_bytes,
         }
     }
 }
