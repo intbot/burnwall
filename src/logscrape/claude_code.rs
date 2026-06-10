@@ -32,6 +32,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -62,25 +63,32 @@ pub fn parse_str(contents: &str) -> Vec<ParsedTurn> {
 /// de-duplicated across files. Fail-open: returns empty if the log
 /// directory is absent or unreadable.
 pub fn collect() -> Vec<UsageEntry> {
+    collect_since(None)
+}
+
+/// [`collect`] with an optional mtime cutoff: session files untouched since
+/// before the window start (minus the safety margin) are skipped unread —
+/// these files can run to 100MB+, so the lines are streamed, never slurped.
+pub fn collect_since(cutoff: Option<SystemTime>) -> Vec<UsageEntry> {
     let Some(root) = log_root() else {
         return Vec::new();
     };
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
-    for path in super::find_jsonl_files(&root) {
-        let Ok(contents) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        for turn in parse_str(&contents) {
+    for path in super::find_jsonl_files(&root, cutoff) {
+        super::for_each_line(&path, |line| {
+            let Some(turn) = parse_line(line) else {
+                return;
+            };
             // Repeated (message.id, requestId) across files = the same API
             // call re-logged by a resumed/forked session — drop the repeat.
             if let Some(key) = turn.dedup_key {
                 if !seen.insert(key) {
-                    continue;
+                    return;
                 }
             }
             out.push(turn.entry);
-        }
+        });
     }
     out
 }

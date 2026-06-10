@@ -284,6 +284,21 @@ impl Storage {
         })
     }
 
+    /// Total spend for a local calendar month. `month` is a `YYYY-MM` string;
+    /// rows are bucketed by their local-time month so the boundary matches the
+    /// daily query and the user's clock. Powers the monthly budget cap (B-H2).
+    pub fn total_cost_for_month(&self, month: &str) -> Result<f64> {
+        self.with_conn(|conn| {
+            let cost: f64 = conn.query_row(
+                "SELECT COALESCE(SUM(cost_usd), 0.0) FROM requests
+                 WHERE strftime('%Y-%m', timestamp, 'localtime') = ?1",
+                params![month],
+                |row| row.get(0),
+            )?;
+            Ok(cost)
+        })
+    }
+
     /// The most recent successful (non-blocked) request, if any. Powers the
     /// DB-sourced status ribbon (`burnwall watch` / editor bar): the last
     /// real turn's model, token counts, and cost.
@@ -370,8 +385,11 @@ impl Storage {
     pub fn daily_totals(&self, days: i64) -> Result<Vec<DailyTotal>> {
         self.with_conn(|conn| {
             // `DATE('now', 'localtime', '-N days')` gives the local date N
-            // days ago. Bind `-N days` as a parameter, not concatenated.
-            let offset = format!("-{} days", days);
+            // days ago. A window of `days` days *includes* today, so the
+            // earliest included date is `days - 1` back — matching the other
+            // `*_since_days` queries. Bind `-N days` as a parameter, not
+            // concatenated.
+            let offset = format!("-{} days", days - 1);
             let mut stmt = conn.prepare(
                 "SELECT
                     DATE(timestamp, 'localtime')                            AS date,

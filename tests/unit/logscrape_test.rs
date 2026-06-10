@@ -4,6 +4,7 @@
 use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::{Duration as StdDuration, SystemTime};
 
 use chrono::{DateTime, Duration, Local, NaiveDate, Utc};
 
@@ -403,6 +404,113 @@ fn aggregate_unknown_model_costs_zero() {
 #[test]
 fn aggregate_empty_input_is_empty() {
     assert!(logscrape::aggregate(Vec::new(), &local_date(0)).is_empty());
+}
+
+// ──────────────────────── mtime cutoff pruning ────────────────────────
+
+/// Rewind a file's mtime by `days` days from now.
+fn age_file(path: &Path, days: u64) {
+    let mtime = SystemTime::now() - StdDuration::from_secs(days * 24 * 60 * 60);
+    let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.set_modified(mtime).unwrap();
+}
+
+/// A window-start cutoff `days` days before now.
+fn cutoff_days_ago(days: u64) -> SystemTime {
+    SystemTime::now() - StdDuration::from_secs(days * 24 * 60 * 60)
+}
+
+#[test]
+fn mtime_staleness_allows_a_one_day_margin_past_the_cutoff() {
+    let cutoff = SystemTime::now();
+    let hour = StdDuration::from_secs(3600);
+    // At or after the cutoff → fresh.
+    assert!(!logscrape::mtime_is_stale(cutoff, cutoff));
+    assert!(!logscrape::mtime_is_stale(cutoff + hour, cutoff));
+    // Before the cutoff but within the 1-day safety margin → still fresh
+    // (clock skew / buffered writes must not drop in-window data).
+    assert!(!logscrape::mtime_is_stale(cutoff - 23 * hour, cutoff));
+    // More than the margin before the cutoff → stale, skipped unread.
+    assert!(logscrape::mtime_is_stale(cutoff - 25 * hour, cutoff));
+}
+
+#[test]
+fn cutoff_for_local_date_parses_dates_fail_open() {
+    // A valid local date maps to its local midnight: today's cutoff is in
+    // the past, and yesterday's is strictly earlier.
+    let today = logscrape::cutoff_for_local_date(&local_date(0)).expect("valid date");
+    let yesterday = logscrape::cutoff_for_local_date(&local_date(-1)).expect("valid date");
+    assert!(today <= SystemTime::now());
+    assert!(yesterday < today);
+    // Garbage yields no cutoff — scrape everything rather than prune wrongly.
+    assert!(logscrape::cutoff_for_local_date("not-a-date").is_none());
+    assert!(logscrape::cutoff_for_local_date("").is_none());
+}
+
+#[test]
+fn claude_code_collect_since_prunes_files_older_than_the_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("project-a");
+    fs::create_dir_all(&sub).unwrap();
+
+    // An old session file (mtime 10 days back) and a fresh one written now,
+    // with distinct dedup keys so pruning — not dedup — decides the count.
+    let old = sub.join("old.jsonl");
+    fs::write(&old, fixture("claude_code_session.jsonl")).unwrap();
+    age_file(&old, 10);
+    let fresh = sub.join("fresh.jsonl");
+    fs::write(
+        &fresh,
+        r#"{"type":"assistant","timestamp":"2026-06-10T09:00:05.000Z","requestId":"req_fresh","sessionId":"sess_f","cwd":"/w","message":{"id":"msg_fresh","model":"claude-opus-4-7","usage":{"input_tokens":10,"output_tokens":5}}}"#,
+    )
+    .unwrap();
+
+    let _guard = set_log_dir("BURNWALL_CLAUDE_LOG_DIR", dir.path());
+
+    // Window starts 2 days ago: the 10-day-old file cannot contribute rows
+    // inside it (even with the 1-day margin) and is skipped unread; the
+    // file modified today is parsed.
+    let entries = claude_code::collect_since(Some(cutoff_days_ago(2)));
+    assert_eq!(entries.len(), 1, "got {entries:?}");
+    assert_eq!(entries[0].model, "claude-opus-4-7");
+    assert_eq!(entries[0].session_id.as_deref(), Some("sess_f"));
+
+    // No cutoff preserves the old read-everything behavior:
+    // 3 deduped turns from the old file + 1 fresh.
+    assert_eq!(claude_code::collect_since(None).len(), 4);
+}
+
+#[test]
+fn aider_collect_since_skips_a_stale_analytics_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("analytics.jsonl");
+    fs::write(&path, fixture("aider_analytics.jsonl")).unwrap();
+    age_file(&path, 10);
+
+    let _guard = set_log_dir("BURNWALL_AIDER_ANALYTICS", &path);
+
+    // The analytics log was last touched well before the window → skipped.
+    assert!(aider::collect_since(Some(cutoff_days_ago(2))).is_empty());
+    // No cutoff still reads it (previous behavior preserved).
+    assert_eq!(aider::collect_since(None).len(), 2);
+    // A file touched today survives the same cutoff.
+    age_file(&path, 0);
+    assert_eq!(aider::collect_since(Some(cutoff_days_ago(2))).len(), 2);
+}
+
+#[test]
+fn codex_collect_since_prunes_stale_rollouts() {
+    let dir = tempfile::tempdir().unwrap();
+    let day = dir.path().join("2026").join("05").join("14");
+    fs::create_dir_all(&day).unwrap();
+    let rollout = day.join("rollout-abc.jsonl");
+    fs::write(&rollout, fixture("codex_session.jsonl")).unwrap();
+    age_file(&rollout, 10);
+
+    let _guard = set_log_dir("BURNWALL_CODEX_LOG_DIR", dir.path());
+    assert!(codex::collect_since(Some(cutoff_days_ago(2))).is_empty());
+    // Streaming without a cutoff parses the same 3 events as before.
+    assert_eq!(codex::collect_since(None).len(), 3);
 }
 
 #[test]

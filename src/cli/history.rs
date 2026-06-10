@@ -68,8 +68,11 @@ fn days_in_month(year: i32, month: u32) -> u32 {
 }
 
 pub fn run_cmd(args: HistoryArgs) -> anyhow::Result<()> {
+    // A non-positive --days would produce an invalid SQLite date modifier
+    // and a silently empty table — clamp to at least one day (today).
+    let days = args.days.max(1);
     let storage = Arc::new(Storage::open_default().context("opening storage")?);
-    let totals = storage.daily_totals(args.days)?;
+    let totals = storage.daily_totals(days)?;
 
     let cfg_path = config::default_path()?;
     let cfg = config::load_or_default(&cfg_path).context("loading config")?;
@@ -78,7 +81,7 @@ pub fn run_cmd(args: HistoryArgs) -> anyhow::Result<()> {
     let mut out = std::io::stdout().lock();
     if args.json {
         let value = serde_json::json!({
-            "days": args.days,
+            "days": days,
             "rows": totals.iter().map(|t| serde_json::json!({
                 "date": t.date,
                 "total_cost_usd": t.total_cost,
@@ -102,8 +105,8 @@ pub fn run_cmd(args: HistoryArgs) -> anyhow::Result<()> {
     writeln!(
         out,
         "📅 Last {} day{}",
-        args.days,
-        if args.days == 1 { "" } else { "s" }
+        days,
+        if days == 1 { "" } else { "s" }
     )?;
     if totals.is_empty() {
         writeln!(out, "   (no data)")?;

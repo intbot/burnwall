@@ -165,6 +165,11 @@ pub enum StorageError {
     Io(#[from] std::io::Error),
     #[error("home directory not found")]
     NoHomeDir,
+    #[error(
+        "database schema v{found} is newer than this binary supports (v{supported}) — \
+         it was written by a newer Burnwall. Upgrade, or point BURNWALL_DATA_DIR elsewhere."
+    )]
+    SchemaTooNew { found: i64, supported: i64 },
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;
@@ -228,11 +233,35 @@ impl Storage {
 /// write wait-and-retry instead of failing immediately with `SQLITE_BUSY`.
 /// Both are harmless on an in-memory database (journal mode stays `memory`).
 fn configure(conn: &Connection) -> Result<()> {
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
+    // Set `busy_timeout` FIRST, as its own statement, *before* the WAL switch
+    // (D-M6). The one-time DELETE→WAL conversion on the first launch after a
+    // WAL-introducing upgrade needs brief exclusivity; with no busy handler
+    // armed, a concurrent statusline/daemon open races it into an instant
+    // `SQLITE_BUSY` that aborts `burnwall start`. Arming the timeout first
+    // makes the loser wait-and-retry instead.
+    conn.execute_batch("PRAGMA busy_timeout=5000;")?;
+    conn.execute_batch("PRAGMA journal_mode=WAL;")?;
     Ok(())
 }
 
+/// Schema version this binary writes/understands. Bump on every migration so
+/// an older binary can refuse a DB it would mis-read (D-M7).
+const SCHEMA_VERSION: i64 = 1;
+
 fn migrate(conn: &Connection) -> Result<()> {
+    // Refuse to open a DB stamped newer than we understand: an old binary
+    // running against a newer schema (after a rolled-back upgrade) silently
+    // mis-reading rows is the worst post-update failure. Additive migrations
+    // are still downgrade-safe today (version 0/1), so only a *strictly
+    // greater* stamp is fatal.
+    let on_disk: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if on_disk > SCHEMA_VERSION {
+        return Err(StorageError::SchemaTooNew {
+            found: on_disk,
+            supported: SCHEMA_VERSION,
+        });
+    }
+
     conn.execute_batch(SCHEMA)?;
     // Forward-add columns introduced after a table first shipped. Idempotent:
     // skipped when the column already exists (a DB created from the current
@@ -246,6 +275,10 @@ fn migrate(conn: &Connection) -> Result<()> {
     // v0.7 observability: per-request upstream latency + HTTP status.
     ensure_column(conn, "requests", "latency_ms", "INTEGER")?;
     ensure_column(conn, "requests", "http_status", "INTEGER")?;
+
+    if on_disk < SCHEMA_VERSION {
+        conn.execute_batch(&format!("PRAGMA user_version={SCHEMA_VERSION};"))?;
+    }
     Ok(())
 }
 
@@ -260,10 +293,14 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Re
         .any(|name| name == column);
     drop(stmt);
     if !present {
-        conn.execute(
-            &format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"),
-            [],
-        )?;
+        match conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"), []) {
+            Ok(_) => {}
+            // Tolerate the check-then-ALTER race (D-M6): two processes opening
+            // at once can both see the column missing; the loser's ALTER fails
+            // with "duplicate column name", which is success for our purposes.
+            Err(e) if e.to_string().contains("duplicate column name") => {}
+            Err(e) => return Err(e.into()),
+        }
     }
     Ok(())
 }

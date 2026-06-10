@@ -242,6 +242,40 @@ fn daily_totals_groups_by_date_and_aggregates() {
     assert!((totals[1].total_cost - 0.20).abs() < 1e-9);
 }
 
+#[test]
+fn daily_totals_one_day_window_returns_only_today() {
+    let storage = Storage::open_in_memory().unwrap();
+
+    // One row today, one yesterday. A `days = 1` window means *today only* —
+    // the same inclusive-of-today convention as the `*_since_days` queries
+    // (regression test for the off-by-one that made `history --days 7`
+    // print 8 days).
+    let mut today_row =
+        RequestRecord::successful("anthropic", "claude-sonnet-4-6", &sample_usage(), 0.05, None);
+    today_row.timestamp = local_noon(0);
+    storage.insert_request(&today_row).unwrap();
+
+    let mut yesterday_row =
+        RequestRecord::successful("openai", "gpt-5.4", &sample_usage(), 0.20, None);
+    yesterday_row.timestamp = local_noon(-1);
+    storage.insert_request(&yesterday_row).unwrap();
+
+    let totals = storage.daily_totals(1).unwrap();
+    assert_eq!(
+        totals.len(),
+        1,
+        "1-day window must hold today only, got {totals:?}"
+    );
+    assert_eq!(totals[0].date, local_date(0));
+    assert_eq!(totals[0].total_requests, 1);
+    assert!((totals[0].total_cost - 0.05).abs() < 1e-9);
+
+    // A 2-day window picks yesterday back up.
+    let totals = storage.daily_totals(2).unwrap();
+    assert_eq!(totals.len(), 2);
+    assert_eq!(totals[1].date, local_date(-1));
+}
+
 // ─────────────────────────── Security events ───────────────────────────
 
 #[test]

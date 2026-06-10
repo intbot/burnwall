@@ -24,6 +24,7 @@
 //! events with no known model are skipped, never fatal.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use chrono::{DateTime, Local, NaiveDate, Utc};
 use serde_json::Value;
@@ -39,22 +40,32 @@ const TOOL: &str = "codex";
 pub fn parse_str(contents: &str, fallback_date: Option<NaiveDate>) -> Vec<UsageEntry> {
     let mut state = SessionState::default();
     let mut out = Vec::new();
-
     for line in contents.lines() {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        match value.get("type").and_then(Value::as_str) {
-            Some("turn_context") | Some("session_meta") => state.update_from(&value),
-            Some("event_msg") => {
-                if let Some(entry) = parse_token_count(&value, &state, fallback_date) {
-                    out.push(entry);
-                }
-            }
-            _ => {}
-        }
+        parse_line_into(line, &mut state, fallback_date, &mut out);
     }
     out
+}
+
+/// Absorb one rollout line: context lines update `state`, `token_count`
+/// events append to `out`, everything else is skipped (fail-open).
+fn parse_line_into(
+    line: &str,
+    state: &mut SessionState,
+    fallback_date: Option<NaiveDate>,
+    out: &mut Vec<UsageEntry>,
+) {
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        return;
+    };
+    match value.get("type").and_then(Value::as_str) {
+        Some("turn_context") | Some("session_meta") => state.update_from(&value),
+        Some("event_msg") => {
+            if let Some(entry) = parse_token_count(&value, state, fallback_date) {
+                out.push(entry);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The most recent session context — model, working directory, and session
@@ -89,15 +100,23 @@ impl SessionState {
 /// Discover and parse every Codex rollout log under the log root.
 /// Fail-open: returns empty if the log directory is absent or unreadable.
 pub fn collect() -> Vec<UsageEntry> {
+    collect_since(None)
+}
+
+/// [`collect`] with an optional mtime cutoff: rollout files untouched since
+/// before the window start (minus the safety margin) are skipped unread;
+/// the rest are streamed line by line, never slurped whole.
+pub fn collect_since(cutoff: Option<SystemTime>) -> Vec<UsageEntry> {
     let Some(root) = log_root() else {
         return Vec::new();
     };
     let mut out = Vec::new();
-    for path in super::find_jsonl_files(&root) {
-        let Ok(contents) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        out.extend(parse_str(&contents, date_from_path(&path)));
+    for path in super::find_jsonl_files(&root, cutoff) {
+        let fallback_date = date_from_path(&path);
+        let mut state = SessionState::default();
+        super::for_each_line(&path, |line| {
+            parse_line_into(line, &mut state, fallback_date, &mut out);
+        });
     }
     out
 }
