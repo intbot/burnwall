@@ -18,6 +18,15 @@ All notable changes to Burnwall.
   `tool_calls`/`function_call` arguments, Gemini `functionCall`) — the places
   an agent actually acts. Secret detection and DLP still scan the entire
   payload, and MCP `tools/call` bodies keep the strict whole-body scan.
+- **A blocked tool call no longer poisons the conversation forever.** Clients
+  resend the full history on every request, so one (correctly) blocked call
+  used to re-trigger the 403 on every subsequent message — the only escapes
+  were a new conversation or the bypass switch. Command-shaped rules now apply
+  to the **latest assistant turn's in-flight tool round** only: the request
+  carrying the dangerous call (and its results) is still blocked, but once the
+  user sends a new message that round is adjudicated history and the
+  conversation continues. Secrets/DLP still scan all turns, so sensitive
+  content in old results stays caught.
 - **`burnwall stop` no longer strands routed shells on a dead proxy.** Stopping
   the proxy used to leave `ANTHROPIC_BASE_URL`/`OPENAI_BASE_URL` pointing at
   the closed port, so every AI tool failed with a connection error until the
@@ -26,6 +35,21 @@ All notable changes to Burnwall.
   `start` resumes routing automatically. An explicit `burnwall
   disable-routing` is remembered and never overridden by `start`; opt out of
   the coupling with `stop --keep-routing` / `start --no-routing`.
+
+### Added
+
+- **`uninstall` now removes routing env files instead of stubbing them, and
+  warns about already-open terminals.** The leftover banner-only stub was
+  residue on a machine the user asked to clean, and it kept counting the
+  shell as "configured" forever (fish/PowerShell are detected by env-file
+  presence). Uninstall also can't pull env vars out of running shells — no
+  uninstaller can — so it now says so and prints the per-shell unset command.
+
+- **Pricing for Claude Fable 5 and Opus 4.8** (both released 2026-06-09):
+  `claude-fable-5` at $10/$50 per MTok (cache write $12.50, read $1.00) and
+  `claude-opus-4-8` at the standard Opus $5/$25. Pricing lookup now also
+  resolves bracket variant tags — Claude Code requests the 1M-context tier as
+  `claude-fable-5[1m]`, which previously fell through to "unknown model".
 
 ## [0.9.12] — 2026-06-09
 
