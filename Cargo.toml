@@ -204,6 +204,14 @@ path = "tests/unit/observe_test.rs"
 name = "audit_cli_test"
 path = "tests/integration/audit_cli_test.rs"
 
+[[test]]
+name = "audit_test"
+path = "tests/unit/audit_test.rs"
+
+[[test]]
+name = "torture_test"
+path = "tests/integration/torture_test.rs"
+
 [profile.release]
 opt-level = "z"                      # Optimize for size
 lto = true                          # Link-time optimization
