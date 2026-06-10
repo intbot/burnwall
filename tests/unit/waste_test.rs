@@ -224,8 +224,8 @@ fn flags_heavy_reasoning_on_routine_requests() {
         .expect("should flag reasoning overuse");
     assert_eq!(finding.rule_id, "reasoning-effort-overuse");
     assert_eq!(finding.count, 12);
-    // gpt-5.5 output $10/MTok: 1200 reasoning × 10 / 1e6 = $0.012 each × 12 = $0.144.
-    assert!((finding.observed_waste_usd - 0.144).abs() < 1e-6);
+    // gpt-5.5 output $30/MTok: 1200 reasoning × 30 / 1e6 = $0.036 each × 12 = $0.432.
+    assert!((finding.observed_waste_usd - 0.432).abs() < 1e-6);
 }
 
 #[test]
@@ -290,8 +290,8 @@ fn flags_context_window_saturation() {
         .expect("should flag saturation");
     assert_eq!(f.rule_id, "context-window-saturation");
     assert_eq!(f.count, 12);
-    // gpt-5.5 input $2/MTok: 240000 × 2 / 1e6 = $0.48 each × 12 = $5.76.
-    assert!((f.observed_waste_usd - 5.76).abs() < 1e-6);
+    // gpt-5.5 input $5/MTok: 240000 × 5 / 1e6 = $1.20 each × 12 = $14.40.
+    assert!((f.observed_waste_usd - 14.40).abs() < 1e-6);
 }
 
 #[test]

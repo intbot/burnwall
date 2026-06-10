@@ -47,9 +47,71 @@ fn lookup_strips_openai_date_suffix() {
 #[test]
 fn lookup_disambiguates_gpt_mini_from_gpt_base() {
     // The critical ordering case: `gpt-5.4-mini-2026-03-01` must hit the mini
-    // rates (0.15/MTok), NOT the base gpt-5.4 rates (1.25/MTok).
+    // rates (0.75/MTok), NOT the base gpt-5.4 rates (2.50/MTok).
     let mini = get_pricing("gpt-5.4-mini-2026-03-01").expect("mini variant");
-    assert!((mini.input_per_mtok - 0.15).abs() < EPSILON);
+    assert!((mini.input_per_mtok - 0.75).abs() < EPSILON);
+    // Same for nano and pro — every longer variant must shadow the base.
+    let nano = get_pricing("gpt-5.4-nano").expect("nano variant");
+    assert!((nano.input_per_mtok - 0.20).abs() < EPSILON);
+    let pro = get_pricing("gpt-5.4-pro").expect("pro variant");
+    assert!((pro.input_per_mtok - 30.00).abs() < EPSILON);
+}
+
+#[test]
+fn codex_model_is_priced() {
+    // The Codex CLI's dedicated model id must resolve — it has no bare
+    // `gpt-5.3` base entry to fall back to.
+    let p = get_pricing("gpt-5.3-codex").expect("codex model");
+    assert!((p.input_per_mtok - 1.75).abs() < EPSILON);
+    assert!((p.output_per_mtok - 14.00).abs() < EPSILON);
+}
+
+#[test]
+fn legacy_anthropic_models_are_priced() {
+    // Deprecated-but-billable models must still track cost: Opus 4.1 / Opus 4
+    // bill at 3× the current Opus rate — the worst models to silently miss.
+    for id in [
+        "claude-opus-4-1",
+        "claude-opus-4-1-20250805",
+        "claude-opus-4-0",
+        "claude-opus-4-20250514",
+    ] {
+        let p = get_pricing(id).unwrap_or_else(|| panic!("{id} should be priced"));
+        assert!((p.input_per_mtok - 15.00).abs() < EPSILON, "{id}");
+        assert!((p.output_per_mtok - 75.00).abs() < EPSILON, "{id}");
+    }
+    for id in [
+        "claude-sonnet-4-5",
+        "claude-sonnet-4-5-20250929",
+        "claude-sonnet-4-0",
+        "claude-sonnet-4-20250514",
+        "claude-opus-4-5-20251101",
+    ] {
+        assert!(get_pricing(id).is_some(), "{id} should be priced");
+    }
+}
+
+#[test]
+fn known_models_table_orders_longer_prefixes_first() {
+    // The lookup returns the FIRST dash/bracket-prefix match, so any key that
+    // is itself a dash-prefix of another key must come after it — e.g.
+    // `gpt-5.4` after `gpt-5.4-mini`, `gemini-2.5-flash` after
+    // `gemini-2.5-flash-lite`. This guards the invariant for future edits.
+    let keys: Vec<&str> = burnwall::pricing::KNOWN_MODELS
+        .iter()
+        .map(|(k, _)| *k)
+        .collect();
+    for (i, shorter) in keys.iter().enumerate() {
+        for longer in keys.iter().skip(i + 1) {
+            let shadowed = longer
+                .strip_prefix(shorter)
+                .is_some_and(|rest| rest.starts_with('-') || rest.starts_with('['));
+            assert!(
+                !shadowed,
+                "table order bug: '{shorter}' (index {i}) shadows the later key '{longer}'"
+            );
+        }
+    }
 }
 
 #[test]
@@ -131,12 +193,12 @@ fn cost_anthropic_uncached_matches_hand_calculation() {
 
 #[test]
 fn cost_openai_cached_matches_hand_calculation() {
-    // gpt-5.4 rates (1.25, 0.0, 0.625, 10.00). Fixture splits to
+    // gpt-5.4 rates (2.50, 0.0, 0.25, 15.00). Fixture splits to
     // input=512, output=512, cache_read=1536:
-    //   input:      512  / 1M * 1.25   = 0.00064
-    //   cache_read: 1536 / 1M * 0.625  = 0.00096
-    //   output:     512  / 1M * 10.00  = 0.00512
-    //   total                            0.00672
+    //   input:      512  / 1M * 2.50   = 0.00128
+    //   cache_read: 1536 / 1M * 0.25   = 0.000384
+    //   output:     512  / 1M * 15.00  = 0.00768
+    //   total                            0.009344
     let usage = TokenUsage {
         input_tokens: 512,
         output_tokens: 512,
@@ -144,7 +206,7 @@ fn cost_openai_cached_matches_hand_calculation() {
         cache_read_tokens: 1536,
     };
     let pricing = get_pricing("gpt-5.4").expect("pricing");
-    approx_eq(cost(&usage, pricing), 0.00672, "gpt-5.4 cached cost");
+    approx_eq(cost(&usage, pricing), 0.009344, "gpt-5.4 cached cost");
 }
 
 #[test]
@@ -160,12 +222,12 @@ fn lookup_disambiguates_gemini_pro_from_flash() {
 
 #[test]
 fn cost_gemini_cached_matches_hand_calculation() {
-    // google_cached.json with gemini-2.5-flash rates (0.30, 0.0, 0.075, 2.50).
+    // google_cached.json with gemini-2.5-flash rates (0.30, 0.0, 0.03, 2.50).
     // Split: input=512, output=300, cache_read=1536.
     //   input:      512  / 1M * 0.30  = 0.0001536
-    //   cache_read: 1536 / 1M * 0.075 = 0.0001152
+    //   cache_read: 1536 / 1M * 0.03  = 0.00004608
     //   output:     300  / 1M * 2.50  = 0.00075
-    //   total                           0.0010188
+    //   total                           0.00094968
     let usage = TokenUsage {
         input_tokens: 512,
         output_tokens: 300,
@@ -173,7 +235,27 @@ fn cost_gemini_cached_matches_hand_calculation() {
         cache_read_tokens: 1536,
     };
     let pricing = get_pricing("gemini-2.5-flash").expect("pricing");
-    approx_eq(cost(&usage, pricing), 0.0010188, "gemini flash cached cost");
+    approx_eq(cost(&usage, pricing), 0.00094968, "gemini flash cached cost");
+}
+
+#[test]
+fn lookup_disambiguates_gemini_flash_lite_from_flash() {
+    // `gemini-2.5-flash` is a dash-prefix of `gemini-2.5-flash-lite`, so the
+    // lite entry must come first in the table or it would bill at flash rates.
+    let lite = get_pricing("gemini-2.5-flash-lite").expect("flash lite");
+    assert!((lite.input_per_mtok - 0.10).abs() < EPSILON);
+    let lite31 = get_pricing("gemini-3.1-flash-lite").expect("3.1 flash lite");
+    assert!((lite31.input_per_mtok - 0.25).abs() < EPSILON);
+}
+
+#[test]
+fn gemini_3_generation_is_priced() {
+    // The preview suffixes on current Gemini IDs resolve via the `-` rule.
+    let pro = get_pricing("gemini-3.1-pro-preview").expect("3.1 pro preview");
+    assert!((pro.input_per_mtok - 2.00).abs() < EPSILON);
+    let flash = get_pricing("gemini-3-flash-preview").expect("3 flash preview");
+    assert!((flash.input_per_mtok - 0.50).abs() < EPSILON);
+    assert!(get_pricing("gemini-3.5-flash").is_some());
 }
 
 #[test]
