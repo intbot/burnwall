@@ -141,10 +141,25 @@ fn build_ribbon(cc: &CcInput) -> Ribbon {
 /// Claude Code and inherits its environment, so the tool's `*_BASE_URL` tells us
 /// whether traffic is actually reaching the proxy. We key off the model's
 /// provider (Claude Code is Anthropic, but be correct if that ever changes).
+///
+/// When the env says Proxied we additionally **liveness-probe the proxy port**
+/// (U-C1): an already-open session keeps its env vars after a crash or
+/// `burnwall stop`, and a green ribbon over a dead port — every request failing
+/// with connection-refused — was the worst "Burnwall broke my setup" signal.
+/// The probe is a sub-millisecond loopback connect, paid once per render.
 fn routing_state(model_id: &str) -> ribbon::Routing {
     let provider = provider_of(model_id);
     match crate::cli::routing::current_routing(provider) {
-        crate::cli::routing::EnvRouting::Proxied => ribbon::Routing::Proxied,
+        crate::cli::routing::EnvRouting::Proxied => {
+            let var = crate::cli::routing::base_url_var_for_provider(provider);
+            match std::env::var(var)
+                .ok()
+                .and_then(|u| crate::cli::routing::proxy_alive_for_url(&u))
+            {
+                Some(false) => ribbon::Routing::ProxyDown,
+                _ => ribbon::Routing::Proxied,
+            }
+        }
         crate::cli::routing::EnvRouting::Direct => ribbon::Routing::Direct,
         crate::cli::routing::EnvRouting::Bypassed => ribbon::Routing::Bypassed,
     }
@@ -154,7 +169,12 @@ fn routing_state(model_id: &str) -> ribbon::Routing {
 /// surfaces). Defaults to `anthropic` — the Claude Code case.
 fn provider_of(model_id: &str) -> &'static str {
     let m = model_id.to_ascii_lowercase();
-    if m.contains("gpt") || m.starts_with("o1") || m.starts_with("o3") || m.contains("openai") {
+    if m.contains("gpt")
+        || m.starts_with("o1")
+        || m.starts_with("o3")
+        || m.starts_with("o4")
+        || m.contains("openai")
+    {
         "openai"
     } else if m.contains("gemini") || m.contains("google") {
         "google"
@@ -174,20 +194,55 @@ fn plan_limits() -> Option<ribbon::PlanLimits> {
     crate::plan::freshest(now, 12 * 3600).and_then(|s| s.to_ribbon_limits(now))
 }
 
-/// Claude Code reports *cumulative* session cost; cache the previous total per
-/// session and return this turn's delta. `None` when we have no prior reading
-/// (first turn of a session) so the ribbon shows session-only cost. Best-effort
-/// — any I/O error just yields `None`.
+/// Claude Code reports *cumulative* session cost, and re-renders the status
+/// line many times per turn (~300ms cadence while streaming). A naive
+/// "delta since last render" therefore showed only the last streaming
+/// increment — $0.05 of a $0.40 turn, or $0.00 after any idle re-render — the
+/// most-watched number, systematically wrong-low (U-H1).
+///
+/// Turn-aware delta instead: track `(baseline, last_seen, last_msg)` per
+/// session. While the total is moving (a turn is streaming), `msg` is the live
+/// delta from the baseline — the turn's cost so far. When the total stops
+/// moving (turn over), the final delta is locked in as `last_msg` and the
+/// baseline advances, so the ribbon keeps showing the *completed* turn's cost
+/// until the next turn starts. Best-effort — any I/O error yields `None`.
 fn session_msg_delta(session: Option<&str>, total: f64) -> Option<f64> {
     let session = session?;
     let dir = crate::storage::data_dir().ok()?.join("statusline");
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join(format!("{}.last", sanitize(session)));
-    let prev = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| s.trim().parse::<f64>().ok());
-    let _ = std::fs::write(&path, total.to_string());
-    prev.map(|p| (total - p).max(0.0))
+
+    let state = std::fs::read_to_string(&path).ok().and_then(|s| {
+        let mut it = s.split_whitespace().filter_map(|t| t.parse::<f64>().ok());
+        Some((it.next()?, it.next(), it.next()))
+    });
+
+    let (msg, baseline, last_msg) = match state {
+        // Legacy single-value file (just a total) or fresh triple.
+        Some((baseline, last_seen, last_msg)) => {
+            let last_seen = last_seen.unwrap_or(baseline);
+            let last_msg = last_msg.unwrap_or(0.0);
+            if total > last_seen + 1e-9 {
+                // Turn in progress: live cost-so-far from the baseline.
+                let live = (total - baseline).max(0.0);
+                (Some(live), baseline, live)
+            } else {
+                // Total stopped moving: the turn is over. Lock in its final
+                // cost and advance the baseline for the next turn.
+                let final_msg = if total > baseline + 1e-9 {
+                    (total - baseline).max(0.0)
+                } else {
+                    last_msg
+                };
+                (Some(final_msg), total, final_msg)
+            }
+        }
+        // First render of a session — no baseline yet.
+        None => (None, total, 0.0),
+    };
+
+    let _ = std::fs::write(&path, format!("{baseline} {total} {last_msg}"));
+    msg
 }
 
 /// Keep a session id safe as a filename component (it's normally a UUID, but be

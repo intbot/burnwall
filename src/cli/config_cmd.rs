@@ -175,6 +175,56 @@ fn doctor(path: &Path) -> anyhow::Result<()> {
         )?;
     }
 
+    // Per-shell routing matrix (L-H4): env-file state × rc-hook presence ×
+    // proxy liveness — the exact table a stranded "connection refused" user
+    // needs, which no single surface printed before. Names the precise
+    // missing link per shell rather than a generic "run enable-routing".
+    writeln!(out)?;
+    writeln!(out, "Routing matrix (per shell):")?;
+    let proxy_up = crate::cli::routing::proxy_port_alive(
+        cfg.proxy.port,
+        std::time::Duration::from_millis(120),
+    );
+    writeln!(
+        out,
+        "  proxy: {} (port {})",
+        if proxy_up { "🟢 listening" } else { "⚪ not running" },
+        cfg.proxy.port
+    )?;
+    for shell in crate::cli::init::Shell::ALL {
+        use crate::cli::routing::{env_file_state, rc_hook_present, EnvFileState};
+        let env = match env_file_state(shell) {
+            Some(EnvFileState::Active) => "active",
+            Some(EnvFileState::Paused) => "paused",
+            Some(EnvFileState::Disabled) => "disabled",
+            None => "absent",
+        };
+        let hook = rc_hook_present(shell);
+        let verdict = match (env, hook, proxy_up) {
+            ("active", true, true) => "🟢 routed".to_string(),
+            ("active", true, false) => {
+                "🟡 will route once the proxy starts (liveness-gated)".to_string()
+            }
+            // Diagnostic only — machine state, not config state, so it never
+            // flips the doctor's error/warning summary.
+            ("active", false, _) | ("paused", false, _) => format!(
+                "⚠️  env file present but no shell hook — add it with `burnwall enable-routing` (run from {})",
+                shell.label()
+            ),
+            ("paused", true, _) => "⏸  paused — `burnwall start` re-enables".to_string(),
+            ("disabled", _, _) => "⏹  explicitly disabled".to_string(),
+            _ => "—  not configured".to_string(),
+        };
+        writeln!(
+            out,
+            "  {:<11} env:{:<9} hook:{:<3}  {}",
+            shell.label(),
+            env,
+            if hook { "yes" } else { "no" },
+            verdict
+        )?;
+    }
+
     writeln!(out)?;
     if errors == 0 && warnings == 0 {
         writeln!(out, "✅ No problems found.")?;

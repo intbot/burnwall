@@ -49,6 +49,10 @@ pub enum Routing {
     /// Routed, but the `BURNWALL_BYPASS` kill switch makes the proxy a pure
     /// relay (checks off). Rendered as a softer caution.
     Bypassed,
+    /// Routed at the proxy, but the proxy port doesn't answer — every request
+    /// from this environment will fail with connection-refused. The loudest
+    /// warning of all: the user's tool is actively broken (U-C1).
+    ProxyDown,
     /// The surface has no environment context to judge routing. Renders nothing.
     Unknown,
 }
@@ -119,6 +123,13 @@ impl Ribbon {
             }
             Routing::Bypassed => {
                 let _ = write!(s, " · {}", warn_segment("⚠ bypass", color, Hue::Yellow));
+            }
+            Routing::ProxyDown => {
+                let _ = write!(
+                    s,
+                    " · {}",
+                    warn_segment("⛔ PROXY DOWN — run `burnwall start`", color, Hue::Red)
+                );
             }
             Routing::Proxied | Routing::Unknown => {}
         }
@@ -251,11 +262,21 @@ pub fn short_model(id: &str) -> String {
 /// Known model context-window sizes (tokens), matched by name prefix. Used only
 /// to *estimate* the gauge for tools that don't report it; an unknown model
 /// yields no estimate (the caller renders [`Ctx::Unknown`]).
+///
+/// First prefix match wins, so generation-specific entries (Opus 4.6+ and
+/// Sonnet 4.6 moved to 1M windows) must precede their shorter family keys.
 const CONTEXT_WINDOWS: &[(&str, u64)] = &[
-    ("claude-opus-4", 200_000),
-    ("claude-sonnet-4", 200_000),
+    ("claude-fable-5", 1_000_000),
+    ("claude-mythos-5", 1_000_000),
+    ("claude-opus-4-8", 1_000_000),
+    ("claude-opus-4-7", 1_000_000),
+    ("claude-opus-4-6", 1_000_000),
+    ("claude-opus-4", 200_000), // 4.5 and earlier
+    ("claude-sonnet-4-6", 1_000_000),
+    ("claude-sonnet-4", 200_000), // 4.5 and earlier
     ("claude-haiku-4", 200_000),
     ("gpt-5", 400_000),
+    ("gemini-3", 1_000_000),
     ("gemini-2.5", 1_000_000),
     ("gemini-2.0", 1_000_000),
 ];
@@ -521,15 +542,29 @@ mod tests {
 
     #[test]
     fn ctx_estimate_trusts_known_window_and_flags_overflow() {
-        // Within a known window → Estimate.
-        match ctx_estimate("claude-sonnet-4-6", 44_000) {
+        // Within a known window → Estimate (haiku-4.5's window is 200k).
+        match ctx_estimate("claude-haiku-4-5", 44_000) {
             Ctx::Estimate(p) => assert!((p - 22.0).abs() < 0.5),
             other => panic!("expected Estimate, got {other:?}"),
         }
         // Prompt exceeds the assumed window (extended mode) → Unknown, not a wrong %.
-        assert_eq!(ctx_estimate("claude-sonnet-4-6", 512_000), Ctx::Unknown);
+        assert_eq!(ctx_estimate("claude-haiku-4-5", 512_000), Ctx::Unknown);
         // Unknown model → Unknown.
         assert_eq!(ctx_estimate("who-knows-1", 1000), Ctx::Unknown);
+    }
+
+    #[test]
+    fn ctx_windows_track_the_1m_generation() {
+        // Opus 4.6+ / Sonnet 4.6 / Fable 5 run 1M windows; the pre-4.6
+        // generation stays at 200k. The generation-specific prefix must win
+        // over the shorter family key.
+        assert_eq!(context_window_for("claude-fable-5"), Some(1_000_000));
+        assert_eq!(context_window_for("claude-fable-5[1m]"), Some(1_000_000));
+        assert_eq!(context_window_for("claude-opus-4-8"), Some(1_000_000));
+        assert_eq!(context_window_for("claude-sonnet-4-6"), Some(1_000_000));
+        assert_eq!(context_window_for("claude-sonnet-4-5-20250929"), Some(200_000));
+        assert_eq!(context_window_for("claude-opus-4-5-20251101"), Some(200_000));
+        assert_eq!(context_window_for("gemini-3.1-pro-preview"), Some(1_000_000));
     }
 
     #[test]

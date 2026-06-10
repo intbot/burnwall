@@ -6,6 +6,8 @@
 export interface StatusJson {
   total_cost_usd?: number;
   combined_total_usd?: number;
+  proxy_running?: boolean;
+  env_routing?: string;
   blocked_requests?: number;
   security_events?: number;
   budget?: { daily_limit_usd?: number; spent_today_usd?: number };
@@ -62,6 +64,9 @@ export interface StatusSummary {
   plan: PlanSummary | null;
   /** Per-tool coverage; empty when no supported tools are installed. */
   coverage: CoverageItem[];
+  /** True when the env routes to the proxy but the proxy process is not
+   * running — every request from that environment will fail (U-C1). */
+  proxyDown: boolean;
 }
 
 /** "time until" label for a reset countdown: `45m`, `2h28m`, `2d7h`, `now`. */
@@ -98,7 +103,9 @@ function planSummary(s: StatusJson): PlanSummary | null {
       primaryResetInSecs: primary.reset_in_secs,
       secondaryLabel: secondary ? secondary.label : null,
       secondaryPct: secondary ? secondary.utilization * 100 : null,
-      throttled: prov.status !== "allowed",
+      // Only positively-throttling statuses — Anthropic emits warning-grade
+      // intermediates (`allowed_warning`) while requests still succeed (U-H4).
+      throttled: ["throttled", "rejected", "blocked", "rate_limited"].includes(prov.status),
     };
     if (!best || cand.primaryPct > best.primaryPct) {
       best = cand;
@@ -108,7 +115,10 @@ function planSummary(s: StatusJson): PlanSummary | null {
 }
 
 export function summarize(s: StatusJson): StatusSummary {
-  const costToday = s.combined_total_usd ?? s.total_cost_usd ?? 0;
+  // Headline figure: the proxied total. `combined_total_usd` is now deduped
+  // server-side (X4), but proxied spend is the number Burnwall can vouch for;
+  // the combined figure is detail for the panel, not the bar.
+  const costToday = s.total_cost_usd ?? s.combined_total_usd ?? 0;
 
   let cacheRead = 0;
   let promptTotal = 0;
@@ -140,12 +150,18 @@ export function summarize(s: StatusJson): StatusSummary {
     budgetPercent,
     plan: planSummary(s),
     coverage,
+    proxyDown: s.env_routing === "proxied" && s.proxy_running === false,
   };
 }
 
 /** One-line status-bar label (VS Code `$(icon)` codicons allowed). On a
  * subscription, dollars are notional, so the binding limit window leads instead. */
 export function statusBarText(s: StatusSummary): string {
+  // Routed at a dead proxy beats every other message: the user's tools are
+  // actively failing with connection-refused right now (U-C1).
+  if (s.proxyDown) {
+    return "$(error) Burnwall proxy DOWN — run `burnwall start`";
+  }
   const bypassed = s.coverage.filter((c) => c.state === "bypasses");
   const bypassPart =
     bypassed.length > 0
@@ -205,14 +221,22 @@ export function tooltip(s: StatusSummary): string {
     s.cacheHitRate !== null
       ? `Cache hit rate: ${Math.round(s.cacheHitRate * 100)}%`
       : `Cache hit rate: n/a`;
+  // On a flat-rate plan the dollar figure is notional (API-equivalent), not a
+  // bill — label it so a subscriber doesn't read it as money owed.
+  const costLine = s.plan
+    ? `Cost: $${s.costToday.toFixed(2)} (notional — flat-rate plan)`
+    : `Cost: $${s.costToday.toFixed(2)}`;
   const lines = [
     "Burnwall — today",
-    `Cost: $${s.costToday.toFixed(2)}`,
+    costLine,
     budgetLine,
     cacheLine,
     `Blocked requests: ${s.blocked}`,
     `Security events: ${s.securityEvents}`,
   ];
+  if (s.proxyDown) {
+    lines.splice(1, 0, "⛔ PROXY DOWN — tools routed here will fail to connect. Run `burnwall start`.");
+  }
   if (s.plan) {
     const p = s.plan;
     lines.push(

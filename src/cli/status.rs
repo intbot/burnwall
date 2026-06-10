@@ -180,17 +180,69 @@ fn write_coverage(
     Ok(())
 }
 
+/// Cross-tool "today" without double counting (X4). A tool routed through the
+/// proxy is recorded twice — once in the proxy DB and once in its own session
+/// log — so summing the two buckets read ~2× reality for the recommended
+/// setup. We exclude a log row when its tool's provider demonstrably had
+/// proxied traffic today (claude-code → anthropic, codex → openai); tools with
+/// ambiguous providers (aider, opencode) stay included, which can only
+/// over-count, never hide spend. True per-turn dedup needs message-id matching
+/// and is tracked separately.
+#[cfg(feature = "logscrape")]
+fn combined_today(
+    today_cost: f64,
+    log_rows: &[crate::logscrape::ScrapeBreakdown],
+    breakdown: &[ModelBreakdown],
+) -> f64 {
+    let proxied_provider = |p: &str| breakdown.iter().any(|b| b.provider == p && b.cost > 0.0);
+    let unproxied_logs: f64 = log_rows
+        .iter()
+        .filter(|r| match r.tool {
+            "claude-code" => !proxied_provider("anthropic"),
+            "codex" => !proxied_provider("openai"),
+            _ => true,
+        })
+        .map(|r| r.cost)
+        .sum();
+    today_cost + unproxied_logs
+}
+
 /// Routing readout for the shell `burnwall status` runs in: is the AI tool you'd
 /// launch here actually pointed at the proxy? Catches the "proxy up but traffic
 /// goes direct" gap that leaves a user unprotected without any error.
 fn write_routing(w: &mut impl Write, sty: &Styler) -> std::io::Result<()> {
     use crate::cli::routing::{current_routing, EnvRouting};
     match current_routing("anthropic") {
-        EnvRouting::Proxied => writeln!(
-            w,
-            "   {} this shell points Anthropic traffic at the proxy.",
-            sty.green("🟢 Routed —")
-        ),
+        EnvRouting::Proxied => {
+            // Routed per the env — but cross-check the proxy is actually
+            // answering (U-C1): "routed at a dead port" means every AI tool in
+            // this shell fails with connection-refused, and a green line here
+            // would half-reassure the user into blaming the provider.
+            let alive = std::env::var("ANTHROPIC_BASE_URL")
+                .ok()
+                .and_then(|u| crate::cli::routing::proxy_alive_for_url(&u));
+            if alive == Some(false) {
+                writeln!(
+                    w,
+                    "   {} this shell routes to the proxy, but nothing answers on that port.",
+                    sty.red("⛔ Routed to a DEAD proxy —")
+                )?;
+                writeln!(
+                    w,
+                    "      Every AI tool launched from this shell will fail to connect."
+                )?;
+                return writeln!(
+                    w,
+                    "      Fix:  {}   (or `burnwall stop` to pause routing and go direct)",
+                    sty.bold("burnwall start")
+                );
+            }
+            writeln!(
+                w,
+                "   {} this shell points Anthropic traffic at the proxy.",
+                sty.green("🟢 Routed —")
+            )
+        }
         EnvRouting::Direct => {
             writeln!(
                 w,
@@ -284,7 +336,7 @@ fn write_table(
 
     #[cfg(feature = "logscrape")]
     if let Some(rows) = log_scrape {
-        writeln!(w, "   Tracked via log files (not proxied)")?;
+        writeln!(w, "   Tracked via local session logs")?;
         if rows.is_empty() {
             writeln!(w, "   (no Claude Code or Codex activity today)")?;
         } else {
@@ -309,11 +361,21 @@ fn write_table(
             writeln!(w, "   {}", "─".repeat(63))?;
             writeln!(w, "   Log-file subtotal: ${:.2}", log_subtotal)?;
             writeln!(w)?;
-            writeln!(
-                w,
-                "   Combined today (proxied + log files): ${:.2}",
-                today_cost + log_subtotal
-            )?;
+            // X4: a proxied tool's traffic shows up in BOTH buckets (a proxy DB
+            // row and a session-log row), so a naive proxied+logs sum read ~2×
+            // reality for exactly the recommended setup. Exclude the log rows
+            // of tools whose provider demonstrably flowed through the proxy
+            // today; the remainder is the genuinely unproxied add-on.
+            let combined = combined_today(today_cost, rows, breakdown);
+            if (combined - (today_cost + log_subtotal)).abs() > 0.005 {
+                writeln!(
+                    w,
+                    "   Combined today: ${:.2}  (proxied + unproxied logs; overlapping tool logs excluded)",
+                    combined
+                )?;
+            } else {
+                writeln!(w, "   Combined today (proxied + log files): ${:.2}", combined)?;
+            }
         }
         writeln!(w)?;
     }
@@ -434,31 +496,27 @@ fn write_json(
     use serde_json::json;
     let bcfg = budget.config();
 
-    // `log_scrape` JSON + subtotal — `null` / 0.0 when the feature is off or
-    // scraping is disabled; otherwise the per-tool/model rows plus subtotal.
+    // `log_scrape` JSON — `null` when the feature is off or scraping is
+    // disabled; otherwise the per-tool/model rows plus subtotal.
     #[cfg(feature = "logscrape")]
-    let (log_scrape_json, log_subtotal) = {
-        let subtotal = log_scrape.map(logscrape::subtotal).unwrap_or(0.0);
-        let rows_json = log_scrape.map(|rows| {
-            json!({
-                "rows": rows.iter().map(|r| json!({
-                    "tool": r.tool,
-                    "model": r.model,
-                    "cost_usd": r.cost,
-                    "turns": r.turns,
-                    "input_tokens": r.usage.input_tokens,
-                    "cache_creation_tokens": r.usage.cache_creation_tokens,
-                    "cache_read_tokens": r.usage.cache_read_tokens,
-                    "output_tokens": r.usage.output_tokens,
-                    "cache_hit_rate": r.cache_hit_rate(),
-                })).collect::<Vec<_>>(),
-                "subtotal_usd": logscrape::subtotal(rows),
-            })
-        });
-        (rows_json, subtotal)
-    };
+    let log_scrape_json = log_scrape.map(|rows| {
+        json!({
+            "rows": rows.iter().map(|r| json!({
+                "tool": r.tool,
+                "model": r.model,
+                "cost_usd": r.cost,
+                "turns": r.turns,
+                "input_tokens": r.usage.input_tokens,
+                "cache_creation_tokens": r.usage.cache_creation_tokens,
+                "cache_read_tokens": r.usage.cache_read_tokens,
+                "output_tokens": r.usage.output_tokens,
+                "cache_hit_rate": r.cache_hit_rate(),
+            })).collect::<Vec<_>>(),
+            "subtotal_usd": logscrape::subtotal(rows),
+        })
+    });
     #[cfg(not(feature = "logscrape"))]
-    let (log_scrape_json, log_subtotal) = (Option::<serde_json::Value>::None, 0.0_f64);
+    let log_scrape_json = Option::<serde_json::Value>::None;
 
     // Subscription-plan limit headroom, per provider, for the status bar / IDE
     // extension. `null` when no fresh snapshot exists (API user, or the proxy
@@ -496,10 +554,24 @@ fn write_json(
         crate::cli::routing::EnvRouting::Direct => "direct",
         crate::cli::routing::EnvRouting::Bypassed => "bypassed",
     };
+    // Liveness, not just a PID file: lets the extension flag "routed but the
+    // proxy is dead" (U-C1) instead of showing green over connection-refused.
+    let proxy_running = super::daemon::running_pid().ok().flatten().is_some();
+
+    // De-duplicated cross-tool total (X4): excludes log rows of tools whose
+    // provider flowed through the proxy today, so proxied Claude Code isn't
+    // counted twice in the headline figure.
+    #[cfg(feature = "logscrape")]
+    let combined_total = log_scrape
+        .map(|rows| combined_today(today_cost, rows, breakdown))
+        .unwrap_or(today_cost);
+    #[cfg(not(feature = "logscrape"))]
+    let combined_total = today_cost;
 
     let value = json!({
         "date": date,
         "env_routing": env_routing,
+        "proxy_running": proxy_running,
         "total_cost_usd": today_cost,
         "total_requests": total_requests,
         "blocked_requests": blocked,
@@ -530,7 +602,7 @@ fn write_json(
         // `null` when log scraping is disabled or compiled out; otherwise the
         // per-tool/model rows plus their subtotal. Read-only — not the proxy DB.
         "log_scrape": log_scrape_json,
-        "combined_total_usd": today_cost + log_subtotal,
+        "combined_total_usd": combined_total,
         // Per-provider subscription limit headroom; `null` for API-only usage.
         "plan": plan_json,
         // Per-tool coverage: which installed tools route through the proxy,

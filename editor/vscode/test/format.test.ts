@@ -18,9 +18,12 @@ test("summarize computes cost, blocked, cache hit rate, and budget %", () => {
   assert.equal(Math.round(s.budgetPercent ?? 0), 35);
 });
 
-test("combined_total_usd is preferred over total_cost_usd", () => {
+test("the bar headlines the proxied total, not the combined figure (X4/U-H3)", () => {
+  // The proxied number is what Burnwall can vouch for; combined (proxied +
+  // unproxied logs) is panel detail, and previously double-counted proxied
+  // Claude Code into the headline.
   const s = summarize({ total_cost_usd: 1, combined_total_usd: 5 });
-  assert.equal(s.costToday, 5);
+  assert.equal(s.costToday, 1);
 });
 
 test("no tokens -> null cache hit rate; no limit -> null budget %", () => {
@@ -97,6 +100,42 @@ test("subscription plan: throttled flag surfaces", () => {
     },
   });
   assert.ok(statusBarText(s).includes("throttled"));
+});
+
+test("warning-grade plan status is NOT throttled (U-H4)", () => {
+  const s = summarize({
+    plan: {
+      providers: [
+        {
+          provider: "anthropic",
+          status: "allowed_warning",
+          windows: [{ label: "5h", utilization: 0.85, reset_in_secs: 600 }],
+        },
+      ],
+    },
+  });
+  assert.equal(s.plan?.throttled, false);
+  assert.ok(!statusBarText(s).includes("throttled"));
+});
+
+test("routed at a dead proxy beats all other status (U-C1)", () => {
+  const s = summarize({
+    total_cost_usd: 2,
+    env_routing: "proxied",
+    proxy_running: false,
+  });
+  assert.equal(s.proxyDown, true);
+  assert.ok(statusBarText(s).includes("DOWN"));
+  assert.ok(tooltip(s).includes("PROXY DOWN"));
+});
+
+test("proxy running while routed is not flagged down", () => {
+  const s = summarize({
+    total_cost_usd: 2,
+    env_routing: "proxied",
+    proxy_running: true,
+  });
+  assert.equal(s.proxyDown, false);
 });
 
 test("coverage: a bypassing tool warns in the status bar and tooltip", () => {

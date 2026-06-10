@@ -142,6 +142,11 @@ pub async fn spawn_background(args: &StartArgs) -> anyhow::Result<()> {
                     resolved_port(args)
                 ));
             }
+            // Name the log file so a later crash is diagnosable (L-H2) —
+            // before this, a dead daemon left nothing to look at.
+            if let Some(log) = resolved_child_log_path() {
+                println!("   Logs:     {}", log.display());
+            }
             println!("   Check it with `burnwall status`; stop it with `burnwall stop`.");
             return Ok(());
         }
@@ -163,10 +168,18 @@ pub async fn spawn_background(args: &StartArgs) -> anyhow::Result<()> {
 }
 
 /// Rebuild the `start` argument list for the child, dropping `--daemon`.
-/// The child always gets `--no-routing`: the launcher handles routing (and
-/// its messaging) after readiness, and `burnwall stop` handles the pause.
+/// The child gets `--no-routing` (the launcher handles the resume and its
+/// messaging after readiness) plus `--pause-routing-on-exit` so a *gracefully*
+/// exiting daemon still pauses routing itself — `burnwall stop` covers the
+/// normal path, but a child that shuts down without `stop` (SIGTERM from the
+/// OS, session logout) must not strand Active env files (L-C1). Hard kills get
+/// no cleanup anywhere — the liveness-gated env files cover that case.
 fn child_args(args: &StartArgs) -> Vec<String> {
-    let mut out = vec!["start".to_string(), "--no-routing".to_string()];
+    let mut out = vec![
+        "start".to_string(),
+        "--no-routing".to_string(),
+        "--pause-routing-on-exit".to_string(),
+    ];
     if let Some(port) = args.port {
         out.push("--port".to_string());
         out.push(port.to_string());
@@ -185,6 +198,15 @@ fn child_args(args: &StartArgs) -> Vec<String> {
         out.push("--rewrite-anthropic-cache".to_string());
     }
     out
+}
+
+/// The log file the daemon child will write — same config resolution the
+/// child itself performs.
+fn resolved_child_log_path() -> Option<std::path::PathBuf> {
+    let cfg = crate::config::default_path()
+        .ok()
+        .and_then(|p| crate::config::load_or_default(&p).ok())?;
+    super::start::resolved_log_path(&cfg.logging)
 }
 
 /// The port the child will serve on: the explicit flag, else the configured
@@ -357,14 +379,55 @@ fn append_arg_quoted(cmd: &mut Vec<u16>, arg: &std::ffi::OsStr) {
     }
 }
 
-/// Is a process with this PID currently alive?
+/// Is a process with this PID currently alive **and actually burnwall**?
+///
+/// PID files have an inherent reuse hazard (L-H1): after a reboot or crash the
+/// stale file's PID is frequently reassigned to an unrelated process. Without
+/// an identity check, autostart would bail "already running" against a random
+/// process (so the proxy never starts while env files claim routing), and
+/// `burnwall stop` could hard-kill an innocent process — the user's browser or
+/// IDE. A PID that exists but isn't burnwall is treated as *stale*.
 #[cfg(unix)]
 pub fn process_is_alive(pid: u32) -> bool {
     // kill(pid, 0) sends no signal — it just reports whether the process
     // exists and is signalable. EPERM means it exists but is owned by
-    // someone else, which still counts as "alive".
+    // someone else (and so is certainly not our daemon).
     let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    ret == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    if ret != 0 {
+        return false;
+    }
+    process_is_burnwall(pid)
+}
+
+/// Identity check via the process image name. Fail-open: if the platform
+/// lookup fails (permissions, exotic kernel), assume it IS burnwall — wrongly
+/// treating a live daemon as stale would double-start, which is worse than the
+/// rare false "already running".
+#[cfg(unix)]
+fn process_is_burnwall(pid: u32) -> bool {
+    // Linux: /proc/<pid>/exe symlink. macOS: no /proc — fall back to `ps`.
+    #[cfg(target_os = "linux")]
+    {
+        match std::fs::read_link(format!("/proc/{pid}/exe")) {
+            Ok(p) => p
+                .file_name()
+                .map(|n| n.to_string_lossy().contains("burnwall"))
+                .unwrap_or(true),
+            Err(_) => true,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        match std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "comm="])
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                String::from_utf8_lossy(&out.stdout).contains("burnwall")
+            }
+            _ => true,
+        }
+    }
 }
 
 /// Ask the process to terminate. Unix sends SIGTERM, which the proxy
@@ -380,12 +443,14 @@ pub fn terminate_process(pid: u32) -> anyhow::Result<()> {
     }
 }
 
-/// Is a process with this PID currently alive?
+/// Is a process with this PID currently alive **and actually burnwall**?
+/// See the Unix variant for why the identity check matters (PID reuse, L-H1).
 #[cfg(windows)]
 pub fn process_is_alive(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW,
+        PROCESS_QUERY_LIMITED_INFORMATION,
     };
     // A process that has fully exited reports an exit code other than
     // STILL_ACTIVE (259). A process that genuinely exits *with* 259 would be
@@ -398,8 +463,23 @@ pub fn process_is_alive(pid: u32) -> bool {
         }
         let mut exit_code: u32 = 0;
         let queried = GetExitCodeProcess(handle, &mut exit_code);
+        if queried == 0 || exit_code != STILL_ACTIVE {
+            CloseHandle(handle);
+            return false;
+        }
+        // Identity check (L-H1): the PID is live, but is it burnwall? A reused
+        // PID belonging to another program must read as stale — otherwise
+        // autostart bails against a random process and `stop` could kill it.
+        // Fail-open on lookup failure (assume burnwall) — see the Unix variant.
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut len);
         CloseHandle(handle);
-        queried != 0 && exit_code == STILL_ACTIVE
+        if ok == 0 {
+            return true;
+        }
+        let image = String::from_utf16_lossy(&buf[..len as usize]).to_ascii_lowercase();
+        image.contains("burnwall")
     }
 }
 

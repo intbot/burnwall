@@ -69,7 +69,12 @@ pub fn run_cmd(args: UpgradeArgs) -> Result<()> {
     //    failed or --no-restart — pause routing so shells aren't left pointed
     //    at a dead port.
     if was_running && !args.no_restart {
-        match std::process::Command::new(&exe)
+        // Resolve the binary fresh rather than reusing the captured `exe`: on
+        // Windows that path was renamed to `.old`, and the freshly-installed
+        // binary lives at the canonical install dir / on PATH (L-C3). Prefer
+        // the canonical dir, then PATH, then the original path.
+        let restart = restart_binary(&exe);
+        match std::process::Command::new(&restart)
             .args(["start", "--daemon"])
             .status()
         {
@@ -97,6 +102,27 @@ pub fn sweep_stale_artifact() {
         let old = exe.with_extension("exe.old");
         let _ = std::fs::remove_file(old);
     }
+}
+
+/// Pick the binary to invoke for the post-upgrade restart. The freshly
+/// installed binary lives at the canonical install dir (`~/.burnwall/bin`,
+/// matching `install-path`); on Windows the previously-running `exe` was just
+/// renamed to `.old`, so reusing it would fail. Order: canonical dir → bare
+/// `burnwall` (PATH-resolved) → the original path as a last resort.
+fn restart_binary(original_exe: &std::path::Path) -> std::path::PathBuf {
+    let bin_name = if cfg!(windows) { "burnwall.exe" } else { "burnwall" };
+    if let Some(home) = dirs::home_dir() {
+        let canonical = home.join(".burnwall").join("bin").join(bin_name);
+        if canonical.exists() {
+            return canonical;
+        }
+    }
+    // If the original path still has a real binary (non-Windows, or install dir
+    // differs), prefer it; otherwise fall back to PATH resolution.
+    if original_exe.exists() {
+        return original_exe.to_path_buf();
+    }
+    std::path::PathBuf::from("burnwall")
 }
 
 fn installer_url() -> String {

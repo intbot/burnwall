@@ -20,6 +20,14 @@ ci = "github"
 #   npm              -> an npm package using the esbuild optionalDependencies layout
 #   msi              -> a native Windows installer
 installers = ["shell", "powershell", "homebrew", "npm", "msi"]
+# Install to the SAME directory the hand-written README installer (install.ps1
+# / install.sh) uses and persists on PATH (L-C3). Without this, cargo-dist
+# defaults to $CARGO_HOME/bin, so `burnwall upgrade` (which runs the dist
+# installer) wrote the new binary to a *different* dir than the running one —
+# leaving the restart pointed at the old path, a second PATH entry, and an
+# autostart Run-key aimed at a now-stale exe. One canonical dir removes the
+# whole class.
+install-path = "~/.burnwall/bin"
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 # Where the Homebrew formula is published (the existing tap repo).

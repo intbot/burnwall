@@ -235,24 +235,69 @@ pub fn manual_unset_hint(shell: Shell) -> &'static str {
     }
 }
 
-/// Lines that set the proxy env vars for the given shell.
+/// Lines that set the proxy env vars for the given shell — **liveness-gated**
+/// (L-C1): the exports only happen if the proxy port actually answers at the
+/// moment the shell starts. This is the structural fix for the dead-proxy
+/// trap: a crash, `kill`, or reboot can never run any cleanup, so without the
+/// gate every new shell would export a base URL pointing at a dead port and
+/// every AI tool would fail with connection-refused until the user figured out
+/// `burnwall start`. With the gate, a shell opened against a dead proxy
+/// silently goes DIRECT (unprotected, but *working*) and the next `start`
+/// covers new shells again.
+///
+/// Probe cost: a loopback TCP connect is sub-millisecond when the proxy is
+/// listening and fails immediately (RST) when nothing is bound — there's no
+/// human-perceptible shell-startup cost.
 pub fn export_lines(shell: Shell, proxy_url: &str) -> Vec<String> {
     let anthropic = format!("{}/anthropic", proxy_url);
     let openai = format!("{}/openai", proxy_url);
+    let port = proxy_url_port(proxy_url);
     match shell {
-        Shell::Zsh | Shell::Bash => vec![
-            format!("export ANTHROPIC_BASE_URL=\"{}\"", anthropic),
-            format!("export OPENAI_BASE_URL=\"{}\"", openai),
-        ],
+        Shell::Zsh | Shell::Bash => vec![format!(
+            "if (exec 3<>/dev/tcp/127.0.0.1/{port}) 2>/dev/null; then exec 3>&-; export ANTHROPIC_BASE_URL=\"{anthropic}\"; export OPENAI_BASE_URL=\"{openai}\"; fi"
+        )],
         Shell::Fish => vec![
-            format!("set -gx ANTHROPIC_BASE_URL \"{}\"", anthropic),
-            format!("set -gx OPENAI_BASE_URL \"{}\"", openai),
+            // fish has no /dev/tcp; probe via bash when available (it is on any
+            // dev box that also has fish), otherwise export ungated.
+            format!(
+                "if not command -q bash; or bash -c 'exec 3<>/dev/tcp/127.0.0.1/{port}' 2>/dev/null; set -gx ANTHROPIC_BASE_URL \"{anthropic}\"; set -gx OPENAI_BASE_URL \"{openai}\"; end"
+            ),
         ],
-        Shell::Powershell => vec![
-            format!("$env:ANTHROPIC_BASE_URL = \"{}\"", anthropic),
-            format!("$env:OPENAI_BASE_URL = \"{}\"", openai),
-        ],
+        Shell::Powershell => vec![format!(
+            "try {{ $__bw = [Net.Sockets.TcpClient]::new('127.0.0.1', {port}); $__bw.Dispose(); $env:ANTHROPIC_BASE_URL = \"{anthropic}\"; $env:OPENAI_BASE_URL = \"{openai}\" }} catch {{}}"
+        )],
     }
+}
+
+/// Extract the port from a proxy URL (`http://localhost:4100` → 4100), falling
+/// back to the default proxy port.
+fn proxy_url_port(proxy_url: &str) -> u16 {
+    let after_scheme = proxy_url.split("://").nth(1).unwrap_or(proxy_url);
+    let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    authority
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(4100)
+}
+
+/// Quick TCP liveness probe of the local proxy port (used by status surfaces
+/// to distinguish "routed and protected" from "routed at a dead port").
+pub fn proxy_port_alive(port: u16, timeout: std::time::Duration) -> bool {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    std::net::TcpStream::connect_timeout(&addr, timeout).is_ok()
+}
+
+/// Liveness-probe the proxy that `base_url` points at. `None` if the URL isn't
+/// loopback (nothing local to probe).
+pub fn proxy_alive_for_url(base_url: &str) -> Option<bool> {
+    if !url_is_loopback(base_url) {
+        return None;
+    }
+    Some(proxy_port_alive(
+        proxy_url_port(base_url),
+        std::time::Duration::from_millis(80),
+    ))
 }
 
 /// Lines that unset the proxy env vars for the given shell. Used by
@@ -420,11 +465,60 @@ pub fn env_file_present(shell: Shell) -> bool {
     env_file_path(shell).map(|p| p.exists()).unwrap_or(false)
 }
 
+/// The PowerShell `CurrentUserAllHosts` profile paths burnwall manages. Both
+/// editions are covered on Windows — Windows PowerShell 5.1 reads
+/// `Documents\WindowsPowerShell\profile.ps1` and PowerShell 7+ reads
+/// `Documents\PowerShell\profile.ps1` — because either can be the user's daily
+/// shell. `dirs::document_dir()` resolves known-folder redirection (OneDrive).
+/// PowerShell *was* the one shell never auto-edited, which made persistent
+/// routing on the default Windows shell a silent dead end (L-C2).
+pub fn powershell_profile_paths() -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        let Some(docs) = dirs::document_dir() else {
+            return Vec::new();
+        };
+        vec![
+            docs.join("WindowsPowerShell").join("profile.ps1"),
+            docs.join("PowerShell").join("profile.ps1"),
+        ]
+    }
+    #[cfg(not(windows))]
+    {
+        let Some(home) = dirs::home_dir() else {
+            return Vec::new();
+        };
+        vec![home.join(".config").join("powershell").join("profile.ps1")]
+    }
+}
+
+/// Bash *login-shell* profile files, in bash's own lookup order. Git Bash
+/// terminals and macOS Terminal run login shells, which read the first of
+/// these that exists and only read `.bashrc` if that file chains to it — so a
+/// hook placed solely in `.bashrc` can silently never execute (L-H3).
+fn bash_profile_paths() -> Vec<PathBuf> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    vec![
+        home.join(".bash_profile"),
+        home.join(".bash_login"),
+        home.join(".profile"),
+    ]
+}
+
 /// True if this shell's rc file carries our source-hook marker — i.e. the user
 /// previously wired this shell up. The strongest signal that a shell is
 /// "configured", and the one that disambiguates bash vs zsh (which share a
-/// single `env.sh`).
+/// single `env.sh`). PowerShell checks its managed profile paths.
 pub fn rc_hook_present(shell: Shell) -> bool {
+    if shell == Shell::Powershell {
+        return powershell_profile_paths().iter().any(|p| {
+            std::fs::read_to_string(p)
+                .map(|c| c.contains(RC_MARKER))
+                .unwrap_or(false)
+        });
+    }
     shell
         .rc_path()
         .and_then(|rc| std::fs::read_to_string(rc).ok())
@@ -438,17 +532,14 @@ pub fn routing_active(shell: Shell) -> bool {
     env_file_state(shell) == Some(EnvFileState::Active)
 }
 
-/// Append the rc-source line to the user's shell rc, if not already there.
-/// Returns `true` if the file was modified.
-pub fn install_rc_hook(shell: Shell, env_path: &Path) -> Result<bool> {
-    let rc = shell
-        .rc_path()
-        .ok_or_else(|| anyhow::anyhow!("no rc file for shell {}", shell.label()))?;
-    let existing = std::fs::read_to_string(&rc).unwrap_or_default();
+/// Append the marker-carrying `line` to `path` if it isn't already there,
+/// creating parent dirs. Returns `true` if the file was modified.
+fn append_hook_line(path: &Path, line: &str) -> Result<bool> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
     if existing.contains(RC_MARKER) {
         return Ok(false);
     }
-    if let Some(parent) = rc.parent() {
+    if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
@@ -456,20 +547,68 @@ pub fn install_rc_hook(shell: Shell, env_path: &Path) -> Result<bool> {
     if !content.is_empty() && !content.ends_with('\n') {
         content.push('\n');
     }
-    content.push_str(&rc_source_line(shell, env_path));
+    content.push_str(line);
     content.push('\n');
-    std::fs::write(&rc, content).with_context(|| format!("writing {}", rc.display()))?;
+    std::fs::write(path, content).with_context(|| format!("writing {}", path.display()))?;
     Ok(true)
 }
 
-/// Remove the rc-source line (the one carrying [`RC_MARKER`]) from the user's
-/// shell rc. Used by `uninstall`. Returns `true` if a line was removed. Missing
-/// rc file or no marker line → `false` (nothing to do).
-pub fn remove_rc_hook(shell: Shell) -> Result<bool> {
-    let Some(rc) = shell.rc_path() else {
-        return Ok(false);
-    };
-    let existing = match std::fs::read_to_string(&rc) {
+/// Append the rc-source line to the user's shell rc, if not already there.
+/// Returns `true` if any file was modified.
+///
+/// PowerShell: writes the managed `CurrentUserAllHosts` profile(s) — every
+/// edition whose profile dir already exists, or the first (Windows PowerShell)
+/// one when none does (L-C2). The dot-source line is `Test-Path`-guarded, so a
+/// machine with script-execution disabled merely no-ops.
+///
+/// Bash: also chains into the first existing login-profile file
+/// (`.bash_profile` / `.bash_login` / `.profile`) when that file doesn't read
+/// `.bashrc` — Git Bash and macOS terminals run *login* shells, which never
+/// see a hook that lives only in `.bashrc` (L-H3).
+pub fn install_rc_hook(shell: Shell, env_path: &Path) -> Result<bool> {
+    if shell == Shell::Powershell {
+        let line = rc_source_line(shell, env_path);
+        let paths = powershell_profile_paths();
+        if paths.is_empty() {
+            anyhow::bail!("could not locate a PowerShell profile directory");
+        }
+        let mut targets: Vec<&PathBuf> = paths
+            .iter()
+            .filter(|p| p.parent().map(|d| d.exists()).unwrap_or(false))
+            .collect();
+        if targets.is_empty() {
+            targets.push(&paths[0]);
+        }
+        let mut changed = false;
+        for p in targets {
+            changed |= append_hook_line(p, &line)?;
+        }
+        return Ok(changed);
+    }
+
+    let rc = shell
+        .rc_path()
+        .ok_or_else(|| anyhow::anyhow!("no rc file for shell {}", shell.label()))?;
+    let mut changed = append_hook_line(&rc, &rc_source_line(shell, env_path))?;
+
+    if shell == Shell::Bash {
+        // Login-shell chaining (L-H3): if a profile file exists and neither
+        // sources .bashrc nor carries our hook, login shells would never run
+        // the hook above — add it to the first such file in bash's own order.
+        if let Some(profile) = bash_profile_paths().iter().find(|p| p.exists()) {
+            let contents = std::fs::read_to_string(profile).unwrap_or_default();
+            if !contents.contains(".bashrc") && !contents.contains(RC_MARKER) {
+                changed |= append_hook_line(profile, &rc_source_line(shell, env_path))?;
+            }
+        }
+    }
+    Ok(changed)
+}
+
+/// Strip marker-carrying lines from one file. `false` when the file is missing
+/// or carries no marker.
+fn remove_hook_lines(path: &Path) -> Result<bool> {
+    let existing = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(_) => return Ok(false),
     };
@@ -484,8 +623,33 @@ pub fn remove_rc_hook(shell: Shell) -> Result<bool> {
     if !out.is_empty() {
         out.push('\n');
     }
-    std::fs::write(&rc, out).with_context(|| format!("writing {}", rc.display()))?;
+    std::fs::write(path, out).with_context(|| format!("writing {}", path.display()))?;
     Ok(true)
+}
+
+/// Remove the rc-source line (the one carrying [`RC_MARKER`]) from the user's
+/// shell rc. Used by `uninstall`. Returns `true` if a line was removed. Missing
+/// rc file or no marker line → `false` (nothing to do). Cleans every file
+/// [`install_rc_hook`] can write: the PowerShell profiles, and for bash the
+/// login-profile files alongside `.bashrc`.
+pub fn remove_rc_hook(shell: Shell) -> Result<bool> {
+    if shell == Shell::Powershell {
+        let mut removed = false;
+        for p in powershell_profile_paths() {
+            removed |= remove_hook_lines(&p)?;
+        }
+        return Ok(removed);
+    }
+    let Some(rc) = shell.rc_path() else {
+        return Ok(false);
+    };
+    let mut removed = remove_hook_lines(&rc)?;
+    if shell == Shell::Bash {
+        for p in bash_profile_paths() {
+            removed |= remove_hook_lines(&p)?;
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -493,26 +657,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn export_lines_posix() {
+    fn export_lines_posix_are_liveness_gated() {
         let lines = export_lines(Shell::Zsh, "http://localhost:4100");
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].starts_with("export ANTHROPIC_BASE_URL="));
-        assert!(lines[0].contains("http://localhost:4100/anthropic"));
-        assert!(lines[1].starts_with("export OPENAI_BASE_URL="));
-        assert!(lines[1].contains("http://localhost:4100/openai"));
+        let joined = lines.join("\n");
+        // L-C1: exports must be gated on a live proxy port so a shell opened
+        // after a crash/reboot goes DIRECT instead of pointing at a dead port.
+        assert!(joined.contains("/dev/tcp/127.0.0.1/4100"), "{joined}");
+        assert!(joined.contains("export ANTHROPIC_BASE_URL=\"http://localhost:4100/anthropic\""));
+        assert!(joined.contains("export OPENAI_BASE_URL=\"http://localhost:4100/openai\""));
     }
 
     #[test]
-    fn export_lines_powershell() {
+    fn export_lines_powershell_are_liveness_gated() {
         let lines = export_lines(Shell::Powershell, "http://localhost:4100");
-        assert!(lines[0].starts_with("$env:ANTHROPIC_BASE_URL ="));
-        assert!(lines[1].starts_with("$env:OPENAI_BASE_URL ="));
+        let joined = lines.join("\n");
+        assert!(joined.contains("TcpClient"), "{joined}");
+        assert!(joined.contains("$env:ANTHROPIC_BASE_URL ="));
+        assert!(joined.contains("$env:OPENAI_BASE_URL ="));
+        assert!(joined.contains("catch"), "probe failure must be swallowed: {joined}");
     }
 
     #[test]
-    fn export_lines_fish() {
+    fn export_lines_fish_are_liveness_gated() {
         let lines = export_lines(Shell::Fish, "http://localhost:4100");
-        assert!(lines[0].starts_with("set -gx ANTHROPIC_BASE_URL"));
+        let joined = lines.join("\n");
+        assert!(joined.contains("set -gx ANTHROPIC_BASE_URL"));
+        assert!(joined.contains("/dev/tcp/127.0.0.1/4100"), "{joined}");
+    }
+
+    #[test]
+    fn proxy_url_port_parses_common_shapes() {
+        assert_eq!(proxy_url_port("http://localhost:4100"), 4100);
+        assert_eq!(proxy_url_port("http://127.0.0.1:5000/x"), 5000);
+        assert_eq!(proxy_url_port("localhost"), 4100); // fallback
+    }
+
+    #[test]
+    fn dead_port_probe_reports_not_alive() {
+        // Port 1 on loopback is essentially never bound; the probe must come
+        // back fast and false rather than hanging.
+        let started = std::time::Instant::now();
+        assert!(!proxy_port_alive(1, std::time::Duration::from_millis(200)));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[test]

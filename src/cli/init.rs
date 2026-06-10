@@ -206,6 +206,77 @@ pub fn binary_in_path_var(name: &str, path_var: &std::ffi::OsStr) -> bool {
     false
 }
 
+/// Locate a Git-for-Windows `bash.exe` by finding `git.exe` on the given
+/// PATH-formatted value and probing the Git install tree around it.
+///
+/// Keyed off `git.exe` rather than `bash.exe` deliberately: WSL also ships a
+/// `bash.exe` (in System32), but WSL has its own home and filesystem, so a
+/// hook written to the Windows `~/.bashrc` would never reach it. Git Bash
+/// keeps `HOME` at `%USERPROFILE%` — exactly where our rc hook lands.
+pub fn git_bash_from_path_var(path_var: &std::ffi::OsStr) -> Option<PathBuf> {
+    for dir in env::split_paths(path_var) {
+        if !dir.join("git.exe").is_file() {
+            continue;
+        }
+        // git.exe lives in `<install>\cmd`, `<install>\bin`, or
+        // `<install>\mingw64\bin`; bash.exe in `<install>\bin` or
+        // `<install>\usr\bin`. Probing two ancestors covers all three.
+        let ancestors = [dir.parent(), dir.parent().and_then(Path::parent)];
+        for root in ancestors.into_iter().flatten() {
+            for cand in [
+                root.join("bin").join("bash.exe"),
+                root.join("usr").join("bin").join("bash.exe"),
+            ] {
+                if cand.is_file() {
+                    return Some(cand);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Where this shell's source hook lands, for human-readable output.
+/// PowerShell hooks live in the managed `CurrentUserAllHosts` profile(s)
+/// rather than a classic rc file (L-C2).
+fn hook_target_label(shell: Shell) -> String {
+    if shell == Shell::Powershell {
+        let paths = super::routing::powershell_profile_paths();
+        if paths.is_empty() {
+            return "the PowerShell profile".to_string();
+        }
+        return paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(" and ");
+    }
+    shell
+        .rc_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| format!("the {} profile", shell.label()))
+}
+
+/// Find Git Bash on this machine: PATH first, then the standard installer
+/// locations (Git for Windows can be installed without PATH integration).
+pub fn git_bash_path() -> Option<PathBuf> {
+    if let Some(p) = git_bash_from_path_var(&env::var_os("PATH").unwrap_or_default()) {
+        return Some(p);
+    }
+    let roots = [
+        env::var_os("ProgramFiles").map(|p| PathBuf::from(p).join("Git")),
+        env::var_os("ProgramFiles(x86)").map(|p| PathBuf::from(p).join("Git")),
+        env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("Programs").join("Git")),
+    ];
+    for root in roots.into_iter().flatten() {
+        let cand = root.join("bin").join("bash.exe");
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
+    None
+}
+
 const MARKER: &str = "# Added by burnwall init";
 
 /// Append `lines` to `rc_path`, separated from existing content with a
@@ -300,13 +371,25 @@ pub fn run_cmd(args: InitArgs) -> anyhow::Result<()> {
         for line in super::routing::export_lines(s, &args.proxy_url) {
             writeln!(out, "               {}", line)?;
         }
-        if let Some(rc) = s.rc_path() {
-            writeln!(out, "             append source line to {}", rc.display())?;
-        } else {
-            writeln!(out, "             (no rc file for {} — manual step needed)", s.label())?;
-        }
+        writeln!(out, "             append source line to {}", hook_target_label(s))?;
         if args.apply {
-            let env_path = super::routing::write_env_file(s, &args.proxy_url)?;
+            // Preflight (M1): writing an Active env file with no proxy serving
+            // means every new terminal exports a dead-port URL — the user's
+            // first contact with Burnwall becomes "it broke my AI tool". When
+            // the proxy isn't up yet, write the *paused* stub instead; `start`
+            // flips it Active automatically once the port is actually bound.
+            let proxy_up = super::routing::proxy_alive_for_url(&args.proxy_url).unwrap_or(false);
+            let env_path = if proxy_up {
+                super::routing::write_env_file(s, &args.proxy_url)?
+            } else {
+                let path = super::routing::env_file_path(s)
+                    .ok_or_else(|| anyhow::anyhow!("locating env file path"))?;
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&path, super::routing::env_file_paused(s))?;
+                path
+            };
             let hook_added = match super::routing::install_rc_hook(s, &env_path) {
                 Ok(b) => b,
                 Err(e) => {
@@ -314,17 +397,64 @@ pub fn run_cmd(args: InitArgs) -> anyhow::Result<()> {
                     false
                 }
             };
-            writeln!(out, "   ✓ env file written: {}", env_path.display())?;
+            if proxy_up {
+                writeln!(out, "   ✓ env file written: {}", env_path.display())?;
+            } else {
+                writeln!(
+                    out,
+                    "   ✓ env file written (paused): {} — routing activates when you run `burnwall start`",
+                    env_path.display()
+                )?;
+            }
             if hook_added {
-                if let Some(rc) = s.rc_path() {
-                    writeln!(out, "   ✓ rc hook added to {}", rc.display())?;
-                }
-            } else if let Some(rc) = s.rc_path() {
-                writeln!(out, "   • rc hook already present in {}", rc.display())?;
+                writeln!(out, "   ✓ rc hook added to {}", hook_target_label(s))?;
+            } else {
+                writeln!(out, "   • rc hook already present in {}", hook_target_label(s))?;
             }
         }
     } else {
         writeln!(out, "   (shell not detected — set ANTHROPIC_BASE_URL / OPENAI_BASE_URL manually)")?;
+    }
+
+    // Git Bash on Windows: init run from a PowerShell terminal detects
+    // PowerShell, but Git Bash commonly coexists and shares the same Windows
+    // home — and an unhooked bash session silently goes direct to the
+    // provider. Detect it and offer to wire it up in the same pass.
+    if cfg!(windows)
+        && shell == Some(Shell::Powershell)
+        && !super::routing::rc_hook_present(Shell::Bash)
+        && git_bash_path().is_some()
+    {
+        let rc_label = Shell::Bash
+            .rc_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "~/.bashrc".to_string());
+        writeln!(out)?;
+        writeln!(out, "   Git Bash detected — bash sessions are not routed yet.")?;
+        if !args.apply {
+            let env_file = super::routing::env_file_path(Shell::Bash)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<config>".to_string());
+            writeln!(out, "   {action_label}: write env file ({env_file})")?;
+            writeln!(out, "             append source line to {rc_label}")?;
+        } else {
+            let hook_bash =
+                args.yes || prompt_yes_no(&mut out, "   Also enable routing for Git Bash?")?;
+            if hook_bash {
+                let env_path = super::routing::write_env_file(Shell::Bash, &args.proxy_url)?;
+                writeln!(out, "   ✓ env file written: {}", env_path.display())?;
+                match super::routing::install_rc_hook(Shell::Bash, &env_path) {
+                    Ok(true) => writeln!(out, "   ✓ rc hook added to {rc_label}")?,
+                    Ok(false) => writeln!(out, "   • rc hook already present in {rc_label}")?,
+                    Err(e) => writeln!(out, "   ⚠  rc hook skipped: {}", e)?,
+                }
+            } else {
+                writeln!(
+                    out,
+                    "   • skipped (run `burnwall enable-routing` from Git Bash to add it later)"
+                )?;
+            }
+        }
     }
     writeln!(out)?;
 
@@ -393,10 +523,17 @@ pub fn run_cmd(args: InitArgs) -> anyhow::Result<()> {
         writeln!(out)?;
     }
 
-    // 3. Next steps.
+    // 3. Next steps. Starting the proxy comes FIRST: routing only activates
+    // once the port is bound, so it is the step everything else hangs on.
     writeln!(out, "▶ Next steps")?;
     if args.apply {
-        writeln!(out, "   • New shells will source the env file automatically.")?;
+        if !want_service {
+            writeln!(out, "   • Start the proxy:  burnwall start --daemon")?;
+        }
+        writeln!(
+            out,
+            "   • New shells then source the env file automatically (routing engages only while the proxy is up)."
+        )?;
         writeln!(out, "   • Apply to *this* shell now without restarting:")?;
         match shell {
             Some(Shell::Powershell) => {
@@ -405,9 +542,6 @@ pub fn run_cmd(args: InitArgs) -> anyhow::Result<()> {
             _ => {
                 writeln!(out, "       eval \"$(burnwall enable-routing)\"")?;
             }
-        }
-        if !want_service {
-            writeln!(out, "   • Start the proxy:  burnwall start --daemon")?;
         }
         writeln!(out, "   • Kill switch (instant bypass):  export BURNWALL_BYPASS=1")?;
     } else {
@@ -436,4 +570,64 @@ fn prompt_yes_no<W: Write>(out: &mut W, question: &str) -> anyhow::Result<bool> 
     }
     let answer = line.trim().to_ascii_lowercase();
     Ok(answer.is_empty() || answer == "y" || answer == "yes")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn touch(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "").unwrap();
+    }
+
+    #[test]
+    fn git_bash_found_next_to_git_exe() {
+        // Standard Git-for-Windows layout: git.exe in cmd\, bash.exe in bin\.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Git");
+        touch(&root.join("cmd").join("git.exe"));
+        touch(&root.join("bin").join("bash.exe"));
+        let path_var = env::join_paths([root.join("cmd")]).unwrap();
+        assert_eq!(
+            git_bash_from_path_var(&path_var),
+            Some(root.join("bin").join("bash.exe"))
+        );
+    }
+
+    #[test]
+    fn git_bash_found_from_mingw64_bin() {
+        // PATH carries mingw64\bin; bash.exe is two levels up under usr\bin.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Git");
+        touch(&root.join("mingw64").join("bin").join("git.exe"));
+        touch(&root.join("usr").join("bin").join("bash.exe"));
+        let path_var = env::join_paths([root.join("mingw64").join("bin")]).unwrap();
+        assert_eq!(
+            git_bash_from_path_var(&path_var),
+            Some(root.join("usr").join("bin").join("bash.exe"))
+        );
+    }
+
+    #[test]
+    fn wsl_style_bash_without_git_is_not_git_bash() {
+        // WSL ships System32\bash.exe with no git.exe beside it. WSL has its
+        // own home, so hooking the Windows ~/.bashrc would do nothing — the
+        // detector must not count it.
+        let tmp = tempfile::tempdir().unwrap();
+        let sys32 = tmp.path().join("System32");
+        touch(&sys32.join("bash.exe"));
+        let path_var = env::join_paths([sys32]).unwrap();
+        assert_eq!(git_bash_from_path_var(&path_var), None);
+    }
+
+    #[test]
+    fn git_without_bash_is_not_git_bash() {
+        // MinGit / scm-only installs have git.exe but no bash.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Git");
+        touch(&root.join("cmd").join("git.exe"));
+        let path_var = env::join_paths([root.join("cmd")]).unwrap();
+        assert_eq!(git_bash_from_path_var(&path_var), None);
+    }
 }

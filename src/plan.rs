@@ -67,9 +67,15 @@ impl PlanSnapshot {
     }
 
     /// Map to the renderer's [`crate::ribbon::PlanLimits`] (binding window as
-    /// primary, next as secondary). `None` if there are no windows.
+    /// primary, next as secondary). `None` if there are no windows, or when the
+    /// binding window's own reset time has passed — the snapshot says it has
+    /// expired, so showing yesterday's 92% as live headroom is worse than
+    /// showing nothing (U-M7).
     pub fn to_ribbon_limits(&self, now: i64) -> Option<crate::ribbon::PlanLimits> {
         let primary = self.windows.first()?;
+        if primary.reset <= now {
+            return None;
+        }
         Some(crate::ribbon::PlanLimits {
             primary_label: primary.label.clone(),
             primary_pct: (primary.utilization * 100.0).clamp(0.0, 100.0),
@@ -78,7 +84,14 @@ impl PlanSnapshot {
                 .windows
                 .get(1)
                 .map(|w| (w.label.clone(), (w.utilization * 100.0).clamp(0.0, 100.0))),
-            throttled: self.status != "allowed",
+            // Only a positively-throttling status renders the ⛔ chip. Anthropic
+            // emits warning-grade intermediates (e.g. `allowed_warning`) near
+            // the limit while requests still succeed — "anything ≠ allowed"
+            // showed a false THROTTLED at ~80% utilization (U-H4).
+            throttled: matches!(
+                self.status.as_str(),
+                "throttled" | "rejected" | "blocked" | "rate_limited"
+            ),
         })
     }
 }
@@ -252,6 +265,37 @@ mod tests {
         assert!((rl.primary_pct - 11.0).abs() < 1e-9);
         assert_eq!(rl.secondary, Some(("7d".to_string(), 10.0)));
         assert!(!rl.throttled);
+    }
+
+    #[test]
+    fn warning_grade_status_is_not_throttled() {
+        // U-H4: Anthropic emits intermediates like `allowed_warning` near the
+        // limit while requests still succeed — must not render ⛔ throttled.
+        let mut h = unified();
+        h.insert(
+            "anthropic-ratelimit-unified-status",
+            hyper::header::HeaderValue::from_static("allowed_warning"),
+        );
+        let snap = parse_limits("anthropic", &h, 1780951905).unwrap();
+        let rl = snap.to_ribbon_limits(1780951905).unwrap();
+        assert!(!rl.throttled, "warning-grade status must not show throttled");
+
+        let mut h = unified();
+        h.insert(
+            "anthropic-ratelimit-unified-status",
+            hyper::header::HeaderValue::from_static("rejected"),
+        );
+        let snap = parse_limits("anthropic", &h, 1780951905).unwrap();
+        assert!(snap.to_ribbon_limits(1780951905).unwrap().throttled);
+    }
+
+    #[test]
+    fn expired_window_yields_no_ribbon_limits() {
+        // U-M7: once the binding window's reset has passed, the reading is
+        // self-describedly expired — show nothing, not yesterday's 92%.
+        let snap = parse_limits("anthropic", &unified(), 1780951905).unwrap();
+        let after_reset = 1780960800 + 60;
+        assert!(snap.to_ribbon_limits(after_reset).is_none());
     }
 
     #[test]

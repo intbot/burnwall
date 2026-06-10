@@ -96,10 +96,23 @@ fn title_frame(db: &Storage) -> String {
     format!("\x1b]0;{}\x07", ribbon_from_db(db).render(false))
 }
 
-/// Render the current frame to a string (pure given the DB snapshot) — the
-/// one-line ribbon or the multi-line dashboard.
+/// Render the current frame to a string — the one-line ribbon or the
+/// multi-line dashboard.
 fn render_frame(db: &Storage, args: &WatchArgs) -> String {
-    let ribbon = ribbon_from_db(db);
+    render_frame_with_plan(db, args, live_plan())
+}
+
+/// [`render_frame`] with the subscription-plan segment supplied by the
+/// caller — pure given the DB snapshot and the plan. Split out so tests stay
+/// hermetic: the live lookup reads the real data dir, and a fresh
+/// `plan_limits.json` on the host (any subscriber's machine) swaps the
+/// ribbon's dollar segment for plan headroom and changes the output.
+fn render_frame_with_plan(
+    db: &Storage,
+    args: &WatchArgs,
+    plan: Option<ribbon::PlanLimits>,
+) -> String {
+    let ribbon = ribbon_with_plan(db, plan);
     let color = !args.no_color;
     if args.oneline {
         format!("{}\n", ribbon.render(color))
@@ -108,10 +121,24 @@ fn render_frame(db: &Storage, args: &WatchArgs) -> String {
     }
 }
 
+/// Subscription headroom from the freshest proxy-captured snapshot — the
+/// universal surface for CLIs without their own status bar (run `watch` in a
+/// side pane).
+fn live_plan() -> Option<ribbon::PlanLimits> {
+    let now = chrono::Utc::now().timestamp();
+    crate::plan::freshest(now, 12 * 3600).and_then(|s| s.to_ribbon_limits(now))
+}
+
 /// Build the cross-tool ribbon from the proxy database. The originating tool
 /// isn't recoverable from proxied HTTP (every tool hits the same provider
 /// route), so `tool` and `sess` are left unset; `today` is the cross-tool total.
 fn ribbon_from_db(db: &Storage) -> Ribbon {
+    ribbon_with_plan(db, live_plan())
+}
+
+/// [`ribbon_from_db`] with the plan segment injected (see
+/// [`render_frame_with_plan`] for why).
+fn ribbon_with_plan(db: &Storage, plan: Option<ribbon::PlanLimits>) -> Ribbon {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let today_usd = db.total_cost_for_date(&today).unwrap_or(0.0);
     let blocks = db
@@ -121,16 +148,30 @@ fn ribbon_from_db(db: &Storage) -> Ribbon {
 
     let last = db.most_recent_request().ok().flatten();
     let (model, up, down, msg_usd, ctx) = match last {
+        // A last-request row older than an hour is history, not "live": render
+        // the model with an idle annotation and drop the per-message cost and
+        // ctx gauge, so Monday's pane doesn't present Friday's dead session as
+        // a current turn (U-M4).
         Some(r) => {
-            let prompt = r.input_tokens + r.cache_creation_tokens + r.cache_read_tokens;
-            let ctx = ribbon::ctx_estimate(&r.model, prompt);
-            (
-                ribbon::short_model(&r.model),
-                prompt,
-                r.output_tokens,
-                Some(r.cost_usd),
-                ctx,
-            )
+            let age_secs = (chrono::Utc::now() - r.timestamp).num_seconds().max(0);
+            if age_secs > 3600 {
+                let label = format!(
+                    "{} (idle {})",
+                    ribbon::short_model(&r.model),
+                    human_age(age_secs)
+                );
+                (label, 0, 0, None, Ctx::Hidden)
+            } else {
+                let prompt = r.input_tokens + r.cache_creation_tokens + r.cache_read_tokens;
+                let ctx = ribbon::ctx_estimate(&r.model, prompt);
+                (
+                    ribbon::short_model(&r.model),
+                    prompt,
+                    r.output_tokens,
+                    Some(r.cost_usd),
+                    ctx,
+                )
+            }
         }
         None => ("—".to_string(), 0, 0, None, Ctx::Hidden),
     };
@@ -144,12 +185,7 @@ fn ribbon_from_db(db: &Storage) -> Ribbon {
         sess_usd: None, // the aggregate view has no session concept
         today_usd: Some(today_usd),
         blocks_today: blocks,
-        // Subscription headroom (freshest provider) — the universal surface for
-        // CLIs without their own status bar (run `watch` in a side pane).
-        plan: {
-            let now = chrono::Utc::now().timestamp();
-            crate::plan::freshest(now, 12 * 3600).and_then(|s| s.to_ribbon_limits(now))
-        },
+        plan,
         // The aggregate DB view spans every tool; there's no single tool
         // environment to judge routing from, so stay silent here. Per-tool
         // coverage is shown in the dashboard's `coverage:` block instead.
@@ -202,6 +238,25 @@ fn mtime(path: &std::path::PathBuf) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
+/// Compact human age for the idle annotation: "5h", "2d4h", "3w".
+fn human_age(secs: i64) -> String {
+    let (m, h, d) = (secs / 60, secs / 3600, secs / 86_400);
+    if d >= 14 {
+        format!("{}w", d / 7)
+    } else if d >= 1 {
+        let rem_h = h - d * 24;
+        if rem_h > 0 {
+            format!("{d}d{rem_h}h")
+        } else {
+            format!("{d}d")
+        }
+    } else if h >= 1 {
+        format!("{h}h")
+    } else {
+        format!("{}m", m.max(1))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,15 +279,16 @@ mod tests {
     #[test]
     fn ribbon_from_db_uses_last_request_and_estimates_ctx() {
         let db = db_with_request();
-        let r = ribbon_from_db(&db);
+        let r = ribbon_with_plan(&db, None);
         assert_eq!(r.model, "sonnet-4.6");
         assert_eq!(r.up, 13_000); // input + cache_creation + cache_read
         assert_eq!(r.down, 615);
         assert_eq!(r.msg_usd, Some(0.05));
         assert_eq!(r.sess_usd, None); // no session concept in the aggregate view
-        // 13k / 200k ≈ 6.5% → an Estimate (marked ~ at render time).
+        // 13k / 1M ≈ 1.3% (Sonnet 4.6 runs a 1M window) → an Estimate
+        // (marked ~ at render time).
         match r.ctx {
-            Ctx::Estimate(p) => assert!(p > 6.0 && p < 7.0),
+            Ctx::Estimate(p) => assert!(p > 1.0 && p < 2.0),
             other => panic!("expected Estimate, got {other:?}"),
         }
     }
@@ -240,7 +296,7 @@ mod tests {
     #[test]
     fn ribbon_from_empty_db_is_safe() {
         let db = Storage::open_in_memory().unwrap();
-        let r = ribbon_from_db(&db);
+        let r = ribbon_with_plan(&db, None);
         assert_eq!(r.model, "—");
         assert_eq!(r.msg_usd, None);
         assert_eq!(r.ctx, Ctx::Hidden);
@@ -258,7 +314,7 @@ mod tests {
             no_color: true,
             title: false,
         };
-        let frame = render_frame(&db, &args);
+        let frame = render_frame_with_plan(&db, &args, None);
         assert!(frame.contains("🔥 burnwall · sonnet-4.6"));
         assert!(frame.contains("$0.05 msg"));
     }
@@ -273,7 +329,7 @@ mod tests {
             no_color: true,
             title: false,
         };
-        let frame = render_frame(&db, &args);
+        let frame = render_frame_with_plan(&db, &args, None);
         assert!(frame.contains("burnwall · live"));
         assert!(frame.contains("today by model:"));
         assert!(frame.contains("anthropic/sonnet-4.6"));

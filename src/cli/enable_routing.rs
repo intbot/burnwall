@@ -84,27 +84,25 @@ pub async fn run_cmd(args: EnableRoutingArgs) -> Result<()> {
     let mut writes: Vec<ShellWrite> = Vec::new();
     for shell in targets {
         let env_path = routing::write_env_file(shell, &args.proxy_url)?;
-        let hook = if shell.rc_path().is_some() {
-            match routing::install_rc_hook(shell, &env_path) {
-                Ok(b) => Some(b),
-                Err(e) => {
-                    // A real I/O failure on a shell that *does* have an rc file.
-                    if !eval_mode {
-                        let est = Styler::stderr();
-                        eprintln!(
-                            "{}",
-                            est.yellow(&format!(
-                                "burnwall: could not install rc hook for {} ({e}). \
-                                 The env file is written but won't auto-load.",
-                                shell.label()
-                            ))
-                        );
-                    }
-                    Some(false)
+        // Every shell gets a persistent hook now — including PowerShell, whose
+        // CurrentUserAllHosts profile(s) install_rc_hook manages (L-C2: the
+        // default Windows shell used to be a silent dead end here).
+        let hook = match routing::install_rc_hook(shell, &env_path) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                if !eval_mode {
+                    let est = Styler::stderr();
+                    eprintln!(
+                        "{}",
+                        est.yellow(&format!(
+                            "burnwall: could not install rc hook for {} ({e}). \
+                             The env file is written but won't auto-load.",
+                            shell.label()
+                        ))
+                    );
                 }
+                Some(false)
             }
-        } else {
-            None // PowerShell: we don't auto-edit the profile (by design).
         };
         writes.push(ShellWrite {
             shell,
@@ -135,21 +133,33 @@ pub async fn run_cmd(args: EnableRoutingArgs) -> Result<()> {
                 sty.bold(&tag),
                 sty.blue(&w.env_path.display().to_string())
             )?;
-            match (w.hook, w.shell.rc_path()) {
-                (Some(true), Some(rc)) => writeln!(
+            let hook_label = if w.shell == crate::cli::init::Shell::Powershell {
+                routing::powershell_profile_paths()
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            } else {
+                w.shell
+                    .rc_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| w.shell.label().to_string())
+            };
+            match w.hook {
+                Some(true) => writeln!(
                     out,
                     "       rc hook:   {} (sourced on new shells)",
-                    sty.blue(&rc.display().to_string())
+                    sty.blue(&hook_label)
                 )?,
-                (Some(false), Some(rc)) => writeln!(
+                Some(false) => writeln!(
                     out,
                     "       rc hook:   {} (already present — left unchanged)",
-                    sty.blue(&rc.display().to_string())
+                    sty.blue(&hook_label)
                 )?,
-                _ => writeln!(
+                None => writeln!(
                     out,
                     "       rc hook:   {}",
-                    sty.yellow("PowerShell profile not auto-edited — use the eval line below")
+                    sty.yellow("not installed — use the eval line below for this session")
                 )?,
             }
         }
