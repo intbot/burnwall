@@ -284,6 +284,24 @@ fn lint_flags_empty_pack_and_missing_id() {
         .any(|x| x.code == "missing-id"));
 }
 
+// ── M-M6 — pack id is used as a filename; reject traversal attempts ─────────
+
+#[test]
+fn pack_id_validation_blocks_path_traversal() {
+    use burnwall::cli::rules::validate_pack_id;
+    // Registry alphabet passes.
+    assert!(validate_pack_id("django").is_ok());
+    assert!(validate_pack_id("data-science_2").is_ok());
+    // Anything that could escape the rules dir (or surprise the FS) fails.
+    assert!(validate_pack_id("..\\..\\x").is_err());
+    assert!(validate_pack_id("../escape").is_err());
+    assert!(validate_pack_id("a/b").is_err());
+    assert!(validate_pack_id("a.b").is_err());
+    assert!(validate_pack_id("UPPER").is_err());
+    assert!(validate_pack_id("").is_err());
+    assert!(validate_pack_id("nul:").is_err());
+}
+
 #[test]
 fn lint_clean_pack_passes_with_only_warnings() {
     use burnwall::security::packs;

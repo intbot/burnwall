@@ -449,7 +449,10 @@ async fn denied_command_in_tool_arguments_is_blocked() {
 
     let sec = storage.security_events_for_date(&today()).unwrap();
     assert_eq!(sec.len(), 1);
-    assert_eq!(sec[0].event_type, "command_blocked");
+    // `rm -rf /` is now caught by the shape-aware destructive detector rather
+    // than the literal deny list (S-C2 dropped the `rm` literals so scoped
+    // deletes like `rm -rf /tmp/x` aren't false-flagged).
+    assert_eq!(sec[0].event_type, "destructive_blocked");
     assert_eq!(sec[0].provider.as_deref(), Some("mcp"));
 }
 
@@ -477,8 +480,11 @@ async fn secret_pattern_in_tool_arguments_is_blocked() {
             "jsonrpc": "2.0",
             "method": "tools/call",
             "params": {
+                // A realistic (non-example) AWS key id — the canonical
+                // `AKIAIOSFODNN7EXAMPLE` is now exempted as a documentation key
+                // (S-C3), so use one that isn't.
                 "name": "upload",
-                "arguments": {"body": "AKIAIOSFODNN7EXAMPLE"},
+                "arguments": {"body": "AKIAIOSFODNN7REALKEY"},
             },
             "id": 13,
         }))
@@ -490,6 +496,48 @@ async fn secret_pattern_in_tool_arguments_is_blocked() {
     let sec = storage.security_events_for_date(&today()).unwrap();
     assert_eq!(sec.len(), 1);
     assert_eq!(sec[0].event_type, "secret_detected");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prose_mentioning_denied_command_is_not_blocked() {
+    // M-C1: the MCP path must be prose-safe. A non-tools/call method, or
+    // free-text arguments that merely *mention* a denied command, must forward
+    // — not 403. Here a memory-note tool stores text containing "rm -rf /".
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .mount(&upstream)
+        .await;
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = WatchState::single_upstream(
+        upstream.uri(),
+        reqwest::Client::new(),
+        storage.clone(),
+        Arc::new(SecurityEngine::with_defaults()),
+    );
+    let addr = spawn_watcher(state).await;
+
+    // A prose note that mentions a dangerous command — the tool is a note
+    // store, the text is data, so this must pass through.
+    let resp = client()
+        .post(format!("http://{}/mcp/rpc", addr))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+                "name": "create_memory",
+                "arguments": {"text": "Reminder: never run `rm -rf /` on the prod server."},
+            },
+            "id": 21,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "prose mention must not be blocked");
+
+    let sec = storage.security_events_for_date(&today()).unwrap();
+    assert!(sec.is_empty(), "no security event for a prose mention");
 }
 
 // ─────────────────── Approval workflow / enforce mode (v0.6.5) ───────────────────
@@ -588,6 +636,236 @@ async fn enforce_mode_forwards_an_approved_tool() {
     assert_eq!(storage.mcp_events_for_date(&today()).unwrap().len(), 1);
     let sec = storage.security_events_for_date(&today()).unwrap();
     assert!(sec.iter().all(|e| e.event_type != "mcp_tool_unapproved"));
+}
+
+// ─────────────────── M-C2: JSON-RPC error shape on 403 ───────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enforce_mode_block_is_a_jsonrpc_error_naming_the_remedy() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&upstream)
+        .await;
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = enforce_state(upstream.uri(), storage.clone());
+    let addr = spawn_watcher(state).await;
+
+    let resp = client()
+        .post(format!("http://{}/mcp", addr))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "read_file", "arguments": {"path": "ok.txt"}},
+            "id": 42,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    // The body must be a proper JSON-RPC error object — id echoed, code set,
+    // message naming the exact remediation command — so MCP clients render it
+    // instead of a generic transport failure.
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["jsonrpc"], "2.0");
+    assert_eq!(body["id"], 42, "request id must be echoed as-is");
+    assert_eq!(body["error"]["code"], -32000);
+    let msg = body["error"]["message"].as_str().unwrap();
+    assert!(
+        msg.contains("tool 'read_file' on 'default' awaits approval"),
+        "got: {msg}"
+    );
+    assert!(
+        msg.contains("burnwall mcp approve default"),
+        "message must name the remediation command, got: {msg}"
+    );
+    // Legacy discriminator preserved for existing consumers of the 403 body.
+    assert_eq!(body["error"]["type"], "approval_required");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_denied_block_is_a_jsonrpc_error_with_string_id_echo() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&upstream)
+        .await;
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = WatchState {
+        upstream: upstream.uri(),
+        servers: Vec::new(),
+        require_approval: false,
+        http_client: reqwest::Client::new(),
+        storage: storage.clone(),
+        security: Arc::new(SecurityEngine::with_defaults()),
+        auto_approve: Vec::new(),
+        auto_deny: vec!["default/evil_*".to_string()],
+    };
+    let addr = spawn_watcher(state).await;
+
+    let resp = client()
+        .post(format!("http://{}/mcp", addr))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "evil_exec", "arguments": {}},
+            "id": "abc-1",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["jsonrpc"], "2.0");
+    assert_eq!(body["id"], "abc-1", "string ids must echo as strings");
+    assert_eq!(body["error"]["code"], -32000);
+    assert_eq!(body["error"]["type"], "auto_denied");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("auto_deny"));
+}
+
+// ─────────────────── M-C2: description-only change keeps approval ───────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn description_only_change_warns_but_keeps_approval() {
+    fn reply(description: &str, schema: serde_json::Value) -> serde_json::Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"tools": [
+                {"name": "drift_probe", "description": description, "inputSchema": schema}
+            ]}
+        })
+    }
+    let schema_v1 = json!({"type": "object"});
+    let schema_v2 = json!({"type": "object", "properties": {"force": {"type": "boolean"}}});
+
+    let upstream = MockServer::start().await;
+    // Three calls in order: original, description-only change, schema change.
+    for (i, body) in [
+        reply("Reads files. v1.0.0", schema_v1.clone()),
+        reply("Reads files. v1.0.1 — typo fixes", schema_v1.clone()),
+        reply("Reads files. v1.0.1 — typo fixes", schema_v2.clone()),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .up_to_n_times(1)
+            .with_priority((i + 1) as u8)
+            .mount(&upstream)
+            .await;
+    }
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = WatchState::single_upstream(
+        upstream.uri(),
+        reqwest::Client::new(),
+        storage.clone(),
+        Arc::new(SecurityEngine::with_defaults()),
+    );
+    let addr = spawn_watcher(state).await;
+    let list = || async {
+        let r = client()
+            .post(format!("http://{}/mcp", addr))
+            .json(&tools_list_request())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let _ = r.bytes().await;
+    };
+
+    // First sighting, then the user approves the tool.
+    list().await;
+    assert!(storage.approve_mcp_tool("default", "drift_probe").unwrap());
+
+    // A description-only change (routine version bump) is recorded as a
+    // change event but must NOT revoke approval.
+    list().await;
+    assert_eq!(
+        storage
+            .mcp_tool_trust_state("default", "drift_probe")
+            .unwrap()
+            .as_deref(),
+        Some("approved"),
+        "description-only change must not re-pend an approved tool"
+    );
+    let after_desc = storage.security_events_for_date(&today()).unwrap();
+    assert_eq!(
+        after_desc
+            .iter()
+            .filter(|e| e.event_type == "mcp_tool_changed")
+            .count(),
+        1,
+        "description drift should still be recorded; got {after_desc:?}"
+    );
+
+    // A schema change is the real rug-pull signal: approval resets to pending.
+    list().await;
+    assert_eq!(
+        storage
+            .mcp_tool_trust_state("default", "drift_probe")
+            .unwrap()
+            .as_deref(),
+        Some("pending"),
+        "a schema change must force re-approval"
+    );
+}
+
+// ─────────────────── M-H2: query string never persisted ───────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upstream_query_string_is_forwarded_but_never_persisted() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(wiremock::matchers::query_param("api_key", "sekret123"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = WatchState::single_upstream(
+        upstream.uri(),
+        reqwest::Client::new(),
+        storage.clone(),
+        Arc::new(SecurityEngine::with_defaults()),
+    );
+    let addr = spawn_watcher(state).await;
+
+    let resp = client()
+        .post(format!("http://{}/rpc?api_key=sekret123", addr))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "ping", "arguments": {}},
+            "id": 1,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // The query reached the upstream (mock matched), but the persisted event
+    // must hold the stripped URI — credentials never hit disk.
+    let events = storage.mcp_events_for_date(&today()).unwrap();
+    assert_eq!(events.len(), 1);
+    let stored = events[0].upstream_uri.as_deref().unwrap();
+    assert!(
+        !stored.contains('?') && !stored.contains("sekret123"),
+        "query string must be stripped from the persisted URI, got {stored}"
+    );
+    assert!(stored.ends_with("/rpc"), "got {stored}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

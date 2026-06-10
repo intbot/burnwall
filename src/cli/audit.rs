@@ -30,6 +30,10 @@ pub enum AuditCommand {
     Seal,
     /// Verify the receipt chain — hashes, signatures, and live source rows.
     Verify,
+    /// Deliberately start a new chain segment under the current key after the
+    /// previous audit key was lost or replaced. Archives the old segment's
+    /// public key and chain head, then lets `seal` resume.
+    Rekey,
     /// Export the audit receipts.
     Export(ExportArgs),
     /// Export a CycloneDX AI Bill of Materials for the window.
@@ -103,6 +107,30 @@ pub fn run_cmd(args: AuditArgs) -> anyhow::Result<()> {
                     anyhow::bail!("audit verification failed");
                 }
             }
+        }
+        AuditCommand::Rekey => {
+            let chain = AuditChain::open_default().context("opening audit key")?;
+            let report = chain.rekey(&storage)?;
+            writeln!(out, "🔑 Started a new audit chain segment.")?;
+            writeln!(
+                out,
+                "   Closed segment: {} receipt{} signed by {} (head {})",
+                report.receipts,
+                plural(report.receipts),
+                report.old_key.as_deref().unwrap_or("an unknown key"),
+                report
+                    .chain_head
+                    .as_deref()
+                    .map(|h| &h[..h.len().min(8)])
+                    .unwrap_or("genesis"),
+            )?;
+            writeln!(out, "   Segment record: {}", report.archive.display())?;
+            writeln!(out, "   New public key: {}", report.new_key)?;
+            writeln!(
+                out,
+                "   Receipts sealed before the rekey verify only against the archived key; \
+                 `burnwall audit seal` can now resume."
+            )?;
         }
         AuditCommand::Export(a) => {
             let receipts = storage.all_receipts()?;

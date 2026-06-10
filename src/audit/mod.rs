@@ -22,7 +22,7 @@
 pub mod aibom;
 pub mod sarif;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ed25519_dalek::{Signature, Signer, SigningKey};
 use sha2::{Digest as _, Sha256};
@@ -43,6 +43,11 @@ pub enum AuditError {
     Storage(#[from] crate::storage::StorageError),
     #[error("audit signing key is malformed (expected 32 bytes, found {0})")]
     BadKey(usize),
+    #[error(
+        "audit key changed or lost — existing chain was signed by {old_key}…; new receipts \
+         would fork it. Run `burnwall audit rekey` to start a new chain segment."
+    )]
+    KeyChanged { old_key: String },
 }
 
 pub type Result<T> = std::result::Result<T, AuditError>;
@@ -50,6 +55,14 @@ pub type Result<T> = std::result::Result<T, AuditError>;
 /// Holds the local Ed25519 signing key and seals/verifies receipts.
 pub struct AuditChain {
     key: SigningKey,
+    /// True when `open()` had to generate a fresh keypair because the key file
+    /// was missing. Combined with the chain-pubkey sidecar this lets `seal`
+    /// refuse to silently fork a chain whose original key was lost (M-H1).
+    regenerated: bool,
+    /// Sidecar recording the hex public key the existing chain was signed
+    /// with (`<key file stem>.pub`, next to the key). Written on first seal;
+    /// compared on every later seal.
+    chain_pub_path: PathBuf,
 }
 
 impl AuditChain {
@@ -61,6 +74,7 @@ impl AuditChain {
 
     /// Load (or, if absent, generate) the signing key at `path`.
     pub fn open(path: &Path) -> Result<Self> {
+        let mut regenerated = false;
         let key = if path.exists() {
             let bytes = std::fs::read(path)?;
             let seed: [u8; 32] = bytes
@@ -75,9 +89,130 @@ impl AuditChain {
             }
             std::fs::write(path, key.to_bytes())?;
             set_key_perms(path)?;
+            regenerated = true;
             key
         };
-        Ok(Self { key })
+        Ok(Self {
+            key,
+            regenerated,
+            chain_pub_path: path.with_extension("pub"),
+        })
+    }
+
+    /// The chain public key recorded by an earlier seal, if any.
+    fn stored_chain_pubkey(&self) -> Option<String> {
+        std::fs::read_to_string(&self.chain_pub_path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Record the current key as the chain's public key.
+    fn record_chain_pubkey(&self) -> Result<()> {
+        std::fs::write(&self.chain_pub_path, self.public_key_hex())?;
+        Ok(())
+    }
+
+    /// M-H1 guard: refuse to extend an existing chain with a key that is not
+    /// the one the chain was signed with. Without this, a lost key file would
+    /// silently regenerate and every receipt sealed from then on would make
+    /// `verify` report the whole chain TAMPERED.
+    fn guard_key_continuity(&self, storage: &Storage) -> Result<()> {
+        let current = self.public_key_hex();
+        let stored = self.stored_chain_pubkey();
+        if storage.last_receipt_hash()?.is_some() {
+            match &stored {
+                Some(stored) if *stored != current => {
+                    return Err(AuditError::KeyChanged {
+                        old_key: stored.chars().take(8).collect(),
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    // Legacy chain sealed before the sidecar existed. If the
+                    // key file went missing (regenerated) the fresh key cannot
+                    // have signed the existing tail — check the tail signature
+                    // rather than trusting our luck.
+                    if self.regenerated && !self.tail_signature_matches(storage)? {
+                        return Err(AuditError::KeyChanged {
+                            old_key: "an unknown key".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+        // Continuity holds (or the chain is empty): pin the key the next
+        // receipts will be signed with, so a future key loss is detectable.
+        if stored.as_deref() != Some(current.as_str()) {
+            self.record_chain_pubkey()?;
+        }
+        Ok(())
+    }
+
+    /// Does the chain tail's Ed25519 signature verify under the current key?
+    /// `true` for an empty chain.
+    fn tail_signature_matches(&self, storage: &Storage) -> Result<bool> {
+        let tail: Option<(String, String)> = storage.with_conn(|conn| {
+            use rusqlite::OptionalExtension as _;
+            Ok(conn
+                .query_row(
+                    "SELECT hash, signature FROM audit_receipts ORDER BY seq DESC LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?)
+        })?;
+        let Some((hash, signature)) = tail else {
+            return Ok(true);
+        };
+        Ok(decode_hex(&signature)
+            .and_then(|b| Signature::from_slice(&b).ok())
+            .map(|sig| {
+                self.key
+                    .verifying_key()
+                    .verify_strict(hash.as_bytes(), &sig)
+                    .is_ok()
+            })
+            .unwrap_or(false))
+    }
+
+    /// Deliberately start a new chain segment under the current key after the
+    /// previous key was lost or replaced (`burnwall audit rekey`). Archives the
+    /// closing segment (old public key, chain head, receipt count) next to the
+    /// sidecar, then records the current key so `seal` can resume.
+    pub fn rekey(&self, storage: &Storage) -> Result<RekeyReport> {
+        let old_key = self.stored_chain_pubkey();
+        let chain_head = storage.last_receipt_hash()?;
+        let receipts: u64 = storage.with_conn(|conn| {
+            Ok(conn.query_row("SELECT COUNT(*) FROM audit_receipts", [], |row| row.get(0))?)
+        })?;
+
+        // Append-only archive of closed segments — the external record of
+        // where each key's coverage ends, so an auditor can still verify the
+        // old segment against the old public key.
+        let archive = self.chain_pub_path.with_file_name("audit_chain_segments.log");
+        let line = format!(
+            "{} closed-segment pubkey={} head={} receipts={}\n",
+            chrono::Utc::now().to_rfc3339(),
+            old_key.as_deref().unwrap_or("unknown"),
+            chain_head.as_deref().unwrap_or(GENESIS_HASH),
+            receipts,
+        );
+        use std::io::Write as _;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&archive)?
+            .write_all(line.as_bytes())?;
+
+        self.record_chain_pubkey()?;
+        Ok(RekeyReport {
+            old_key,
+            new_key: self.public_key_hex(),
+            chain_head,
+            receipts,
+            archive,
+        })
     }
 
     /// The verifying (public) key, hex-encoded. Safe to publish — it lets a
@@ -96,10 +231,11 @@ impl AuditChain {
     /// Seal every not-yet-sealed request + security event into the chain, in
     /// chronological order. Idempotent: rows already sealed are skipped (the
     /// `audit_receipts.UNIQUE(source, source_id)` constraint backs this).
+    ///
+    /// Refuses outright when the local key is not the one the existing chain
+    /// was signed with (M-H1) — see [`AuditError::KeyChanged`].
     pub fn seal(&self, storage: &Storage) -> Result<SealReport> {
-        let mut prev = storage
-            .last_receipt_hash()?
-            .unwrap_or_else(|| GENESIS_HASH.to_string());
+        self.guard_key_continuity(storage)?;
 
         let mut pending: Vec<Pending> = Vec::new();
         for r in storage.unsealed_requests()? {
@@ -117,28 +253,86 @@ impl AuditChain {
                 .then_with(|| a.source_id().cmp(&b.source_id()))
         });
 
+        // M-M3: read-the-tail + append must be one atomic unit. Two concurrent
+        // `seal` runs (e.g. a cron'd seal racing `audit pack`) could otherwise
+        // both read the same tail hash and append receipts with the same
+        // `prev_hash` — a fork that `verify` would flag forever. An IMMEDIATE
+        // transaction takes the SQLite write lock up front; the loser waits
+        // (busy_timeout) and then re-reads the new tail, skipping any rows the
+        // winner already sealed.
+        let sealed = storage.with_conn(|conn| {
+            conn.execute_batch("BEGIN IMMEDIATE")?;
+            match self.seal_in_txn(conn, &pending) {
+                Ok(sealed) => {
+                    conn.execute_batch("COMMIT")?;
+                    Ok(sealed)
+                }
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(e)
+                }
+            }
+        })?;
+        Ok(SealReport { sealed })
+    }
+
+    /// The seal loop body, run while holding the SQLite write lock. Uses the
+    /// raw connection (not the `Storage` helpers, which would re-lock).
+    fn seal_in_txn(
+        &self,
+        conn: &rusqlite::Connection,
+        pending: &[Pending],
+    ) -> crate::storage::Result<u64> {
+        use rusqlite::OptionalExtension as _;
+        let mut prev: String = conn
+            .query_row(
+                "SELECT hash FROM audit_receipts ORDER BY seq DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or_else(|| GENESIS_HASH.to_string());
+
         let mut sealed = 0u64;
-        for p in &pending {
+        for p in pending {
+            // A concurrent sealer may have sealed this row between our pending
+            // scan and taking the write lock — skip it instead of forking.
+            let already: Option<i64> = conn
+                .query_row(
+                    "SELECT 1 FROM audit_receipts WHERE source = ?1 AND source_id = ?2",
+                    rusqlite::params![p.source(), p.source_id()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if already.is_some() {
+                continue;
+            }
             let content_hash = sha256_hex(p.canonical().as_bytes());
             let hash = link_hash(&prev, &content_hash);
             let signature = hex(&self.key.sign(hash.as_bytes()).to_bytes());
-            storage.insert_receipt(
-                p.source(),
-                p.source_id(),
-                &p.timestamp().to_rfc3339(),
-                p.action(),
-                p.provider(),
-                p.model(),
-                p.detail().as_deref(),
-                &content_hash,
-                &prev,
-                &hash,
-                &signature,
+            conn.execute(
+                "INSERT INTO audit_receipts
+                    (source, source_id, timestamp, action, provider, model, detail,
+                     content_hash, prev_hash, hash, signature)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                rusqlite::params![
+                    p.source(),
+                    p.source_id(),
+                    p.timestamp().to_rfc3339(),
+                    p.action(),
+                    p.provider(),
+                    p.model(),
+                    p.detail(),
+                    content_hash,
+                    prev,
+                    hash,
+                    signature
+                ],
             )?;
             prev = hash;
             sealed += 1;
         }
-        Ok(SealReport { sealed })
+        Ok(sealed)
     }
 
     /// Re-walk the chain: check each hash link, re-derive each `content_hash`
@@ -223,6 +417,21 @@ impl AuditChain {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SealReport {
     pub sealed: u64,
+}
+
+/// Outcome of an `audit rekey` run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RekeyReport {
+    /// Public key the closed segment was recorded under, if known.
+    pub old_key: Option<String>,
+    /// Public key new receipts will be signed with.
+    pub new_key: String,
+    /// Hash of the last receipt in the closed segment (the segment boundary).
+    pub chain_head: Option<String>,
+    /// Receipts in the closed segment.
+    pub receipts: u64,
+    /// Where the closed segment was archived.
+    pub archive: PathBuf,
 }
 
 /// Outcome of a `verify` run.

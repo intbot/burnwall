@@ -334,11 +334,28 @@ fn test(pack_ref: &str, file: &Path) -> anyhow::Result<()> {
 
 // ── add / revoke (third-party, TOFU) ───────────────────────────────────────
 
+/// M-M6: a pack id becomes a file name under the rules dir, so an id like
+/// `..\..\x` would escape it. Reject anything but the registry id alphabet
+/// before the id is ever joined to a path.
+pub fn validate_pack_id(id: &str) -> anyhow::Result<()> {
+    let ok = !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
+    if !ok {
+        anyhow::bail!(
+            "invalid pack id '{id}' — ids may only contain lowercase letters, digits, '-' and '_'"
+        );
+    }
+    Ok(())
+}
+
 fn add(src: &Path, yes: bool) -> anyhow::Result<()> {
     let content =
         std::fs::read_to_string(src).with_context(|| format!("reading {}", src.display()))?;
     let pack =
         packs::RulePack::parse(&content).context("file did not parse as a valid rule pack")?;
+    validate_pack_id(&pack.id)?;
     let hash = packs::content_hash(content.as_bytes());
 
     let store = Storage::open_default().context("opening storage")?;
@@ -366,6 +383,7 @@ fn add(src: &Path, yes: bool) -> anyhow::Result<()> {
 }
 
 fn revoke(name: &str) -> anyhow::Result<()> {
+    validate_pack_id(name)?;
     let store = Storage::open_default().context("opening storage")?;
     let pin_removed = store.revoke_rule_pack(name)?;
     let dest = storage::data_dir()
@@ -634,13 +652,19 @@ fn fetch(url: &str, sig_url: Option<&str>, extra: &[String], yes: bool) -> anyho
     let content = String::from_utf8(pack_bytes).context("pack is not valid UTF-8")?;
     let pack = packs::RulePack::parse(&content)
         .context("fetched file did not parse as a valid rule pack")?;
+    validate_pack_id(&pack.id)?;
     let hash = packs::content_hash(content.as_bytes());
+
+    // M-M7: compare against the prior TOFU pin so a re-fetch that CHANGED the
+    // pack is flagged in the summary instead of looking like a fresh install.
+    let store = Storage::open_default().context("opening storage")?;
+    let prior = store.rule_pack_approved_hash(&pack.id)?;
 
     println!(
         "📥 Fetched '{}' v{} — signature verified (publisher '{}').",
         pack.id, pack.version, signer
     );
-    print_add_summary(&pack, None, &hash);
+    print_add_summary(&pack, prior.as_deref(), &hash);
 
     if !yes && !prompt_yes()? {
         println!("Aborted — '{}' not installed.", pack.id);
@@ -653,7 +677,6 @@ fn fetch(url: &str, sig_url: Option<&str>, extra: &[String], yes: bool) -> anyho
     std::fs::create_dir_all(&dir).context("creating rules dir")?;
     let dest = dir.join(format!("{}.toml", pack.id));
     std::fs::write(&dest, content.as_bytes()).context("installing pack file")?;
-    let store = Storage::open_default().context("opening storage")?;
     store.approve_rule_pack(&pack.id, &dest.to_string_lossy(), &hash)?;
     println!(
         "✅ Installed '{}' (publisher '{}'). It applies on the next `burnwall start`.",

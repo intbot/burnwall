@@ -34,6 +34,18 @@ pub fn build(events: &[SecurityEvent]) -> Value {
                 "ruleId": e.event_type,
                 "level": "error",
                 "message": {"text": format!("Burnwall blocked a {} attempt: {}", e.event_type, e.details)},
+                // GitHub code scanning rejects results without a location
+                // (M-M4). Security events have no source file, so emit a
+                // synthetic per-event URI; `region` is required alongside it
+                // by the upload validator.
+                "locations": [{
+                    "physicalLocation": {
+                        "artifactLocation": {
+                            "uri": format!("burnwall://security-events/{}", e.id.unwrap_or(0)),
+                        },
+                        "region": {"startLine": 1},
+                    }
+                }],
                 "properties": {
                     "provider": e.provider,
                     "model": e.model,
