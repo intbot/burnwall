@@ -24,7 +24,7 @@
 /// Date the embedded rate card was last edited, `YYYY-MM-DD`. Bump
 /// whenever you change [`KNOWN_MODELS`]. The status command warns the user
 /// if this date is more than 30 days behind today.
-pub const PRICING_LAST_UPDATED: &str = "2026-05-27";
+pub const PRICING_LAST_UPDATED: &str = "2026-06-09";
 
 /// USD per million tokens, broken out by token type.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -36,7 +36,28 @@ pub struct ModelPricing {
 }
 
 pub const KNOWN_MODELS: &[(&str, ModelPricing)] = &[
-    // ─────────── Anthropic (as of May 2026) ───────────
+    // ─────────── Anthropic (as of June 2026) ───────────
+    // Fable 5 (released 2026-06-09): the tier above Opus. 1M context at these
+    // flat rates. Cache rates follow the standard Anthropic multipliers
+    // (write 1.25× input for the 5-minute TTL, read 0.1× input).
+    (
+        "claude-fable-5",
+        ModelPricing {
+            input_per_mtok: 10.00,
+            cache_write_per_mtok: 12.50,
+            cache_read_per_mtok: 1.00,
+            output_per_mtok: 50.00,
+        },
+    ),
+    (
+        "claude-opus-4-8",
+        ModelPricing {
+            input_per_mtok: 5.00,
+            cache_write_per_mtok: 6.25,
+            cache_read_per_mtok: 0.50,
+            output_per_mtok: 25.00,
+        },
+    ),
     (
         "claude-opus-4-7",
         ModelPricing {
@@ -165,9 +186,11 @@ pub fn get_pricing_with<'a>(
 }
 
 /// Find the entry whose key equals `model` or is a prefix of it followed by
-/// `-` (date-suffix tolerance). Generic over `&str`/`String` keys so the same
-/// logic serves both the `const` card and a loaded override table. Callers must
-/// order the table longest-key-first for correct disambiguation.
+/// `-` (date-suffix tolerance: `claude-sonnet-4-6-20250514`) or `[` (variant
+/// tags: Claude Code requests the 1M-context tier as `claude-fable-5[1m]`).
+/// Generic over `&str`/`String` keys so the same logic serves both the
+/// `const` card and a loaded override table. Callers must order the table
+/// longest-key-first for correct disambiguation.
 fn match_prefix<'a, K: AsRef<str>>(
     model: &str,
     table: &'a [(K, ModelPricing)],
@@ -178,7 +201,7 @@ fn match_prefix<'a, K: AsRef<str>>(
             return Some(pricing);
         }
         if let Some(rest) = model.strip_prefix(key) {
-            if rest.starts_with('-') {
+            if rest.starts_with('-') || rest.starts_with('[') {
                 return Some(pricing);
             }
         }
