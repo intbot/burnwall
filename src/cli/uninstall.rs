@@ -93,8 +93,9 @@ pub fn run_cmd(args: UninstallArgs) -> Result<()> {
             continue;
         }
         touched_any = true;
-        match super::routing::clear_env_file(*shell) {
-            Ok(p) => writeln!(out, "   ✓ {} env file emptied: {}", shell.label(), p.display())?,
+        match super::routing::delete_env_file(*shell) {
+            Ok(true) => writeln!(out, "   ✓ {} env file removed", shell.label())?,
+            Ok(false) => writeln!(out, "   • {} no env file present", shell.label())?,
             Err(e) => writeln!(out, "   • {} env file: {e}", shell.label())?,
         }
         match super::routing::remove_rc_hook(*shell) {
@@ -105,6 +106,20 @@ pub fn run_cmd(args: UninstallArgs) -> Result<()> {
     }
     if !touched_any {
         writeln!(out, "   • nothing of ours found in any shell")?;
+    } else {
+        // Env vars are inherited at shell startup — no uninstaller can pull
+        // them back out of terminals that are already open.
+        writeln!(
+            out,
+            "   ⚠  Terminals already open keep ANTHROPIC_BASE_URL / OPENAI_BASE_URL"
+        )?;
+        writeln!(
+            out,
+            "      until restarted — AI tools there will fail to connect. Or run:"
+        )?;
+        if let Some(cur) = Shell::detect() {
+            writeln!(out, "        {}", super::routing::manual_unset_hint(cur))?;
+        }
     }
 
     // 5. Data directory (--purge) and the binary.

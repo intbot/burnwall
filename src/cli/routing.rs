@@ -302,6 +302,23 @@ pub fn write_env_file(shell: Shell, proxy_url: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Delete the env file outright. Used by `uninstall`, where the rc hook is
+/// removed in the same pass — a leftover stub would (a) be residue on a
+/// machine the user asked to clean and (b) keep counting the shell as
+/// "configured" forever. The rc hook line is `Test-Path`-guarded, so even a
+/// hook that survives (PowerShell profiles are never auto-edited) sources
+/// nothing. Returns `true` if a file existed and was removed.
+pub fn delete_env_file(shell: Shell) -> Result<bool> {
+    let Some(path) = env_file_path(shell) else {
+        return Ok(false);
+    };
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e).with_context(|| format!("removing {}", path.display())),
+    }
+}
+
 /// Replace the env file with the empty banner. Used by `disable-routing`
 /// for the persistent state; the current shell's env is dropped separately
 /// via eval output.
