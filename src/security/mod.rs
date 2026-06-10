@@ -61,6 +61,32 @@ impl ViolationKind {
     }
 }
 
+/// Where in the request body the matching leaf sat. Decisive for the
+/// false-positive judgment (S-C3): a hit "in the current tool call" is an
+/// action the model is taking now; a hit "in earlier conversation history" is
+/// almost always the model quoting/discussing something. The block message
+/// surfaces this so the user can tell the two apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchLocation {
+    /// In the current in-flight tool call's arguments.
+    ToolCall,
+    /// In earlier conversation history (a prior turn the client resent).
+    History,
+    /// Elsewhere in the request body (system prompt, chat text, tool defs,
+    /// or non-shell tool content like a file being written).
+    Body,
+}
+
+impl MatchLocation {
+    pub fn describe(&self) -> &'static str {
+        match self {
+            MatchLocation::ToolCall => "in the current tool call",
+            MatchLocation::History => "in earlier conversation history",
+            MatchLocation::Body => "in the request body",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Violation {
     pub kind: ViolationKind,
@@ -68,6 +94,8 @@ pub struct Violation {
     /// secret pattern name) — NOT the matched value, which can contain the
     /// secret itself.
     pub matched: String,
+    /// Where the matching leaf sat in the payload.
+    pub location: MatchLocation,
 }
 
 impl Violation {
@@ -141,6 +169,14 @@ impl SecurityEngine {
         scanner::scan_request(&json, &self.rules)
     }
 
+    /// Scan an MCP JSON-RPC body. Like [`scan_request`] but for the JSON-RPC
+    /// envelope: only `tools/call` `params.arguments` get command-shaped checks;
+    /// the rest is prose (data checks only). See [`scanner::scan_mcp`].
+    pub fn scan_mcp(&self, body: &[u8]) -> Option<Violation> {
+        let json = self.parse_for_scan(body)?;
+        scanner::scan_mcp(&json, &self.rules)
+    }
+
     fn parse_for_scan(&self, body: &[u8]) -> Option<serde_json::Value> {
         // Master switch — `security.enabled = false` forwards without scanning.
         if !self.rules.enabled {
@@ -151,6 +187,29 @@ impl SecurityEngine {
         // the fail-open path. Real clients never emit a BOM; this is
         // defense-in-depth.
         let body = body.strip_prefix(b"\xef\xbb\xbf").unwrap_or(body);
-        serde_json::from_slice(body).ok()
+        match serde_json::from_slice(body) {
+            Ok(v) => Some(v),
+            Err(_) => {
+                // Fail-open, but NOT silently (S-M9): a body the scanner can't
+                // parse is a body it can't inspect. An empty body is a normal
+                // GET; a non-empty unparseable one (e.g. an encoding we don't
+                // handle) is the kind of blind spot that hid the cost-tracking
+                // outage. Count it and warn periodically rather than never.
+                if !body.is_empty() {
+                    let n = UNSCANNED_BODIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if n == 1 || n.is_multiple_of(100) {
+                        tracing::warn!(
+                            "security scan skipped: request body #{n} is not parseable JSON ({} bytes) — forwarded unscanned",
+                            body.len()
+                        );
+                    }
+                }
+                None
+            }
+        }
     }
 }
+
+/// Count of request bodies the scanner could not parse (and therefore could not
+/// inspect). Process-local; surfaced in the periodic warn above.
+pub static UNSCANNED_BODIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

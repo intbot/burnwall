@@ -61,10 +61,18 @@ impl SecretPattern {
 pub static PATTERNS: LazyLock<Vec<SecretPattern>> = LazyLock::new(|| {
     vec![
         SecretPattern::builtin("AWS access key ID", r"\bAKIA[0-9A-Z]{16}\b"),
+        // STS temporary access keys (S-M12).
+        SecretPattern::builtin("AWS temporary access key ID", r"\bASIA[0-9A-Z]{16}\b"),
         SecretPattern::builtin("private key header", r"-----BEGIN [A-Z ]+PRIVATE KEY-----"),
-        SecretPattern::builtin("GitHub personal access token", r"\bghp_[A-Za-z0-9]{36}\b"),
+        // ghp_ (classic), gho_/ghu_/ghs_/ghr_ (OAuth/user/server/refresh) — one
+        // pattern covers all variants (S-M12).
+        SecretPattern::builtin("GitHub token", r"\bgh[pousr]_[A-Za-z0-9]{36}\b"),
+        // Modern OpenAI project keys use `sk-proj-…` with hyphens/underscores,
+        // which the 48-alnum-run pattern misses (S-M12).
+        SecretPattern::builtin("OpenAI project key", r"\bsk-proj-[A-Za-z0-9_-]{20,}\b"),
         SecretPattern::builtin("OpenAI API key", r"\bsk-[A-Za-z0-9]{48}\b"),
         SecretPattern::builtin("Anthropic API key", r"\bsk-ant-[A-Za-z0-9_-]{36,}\b"),
+        SecretPattern::builtin("GitLab personal access token", r"\bglpat-[A-Za-z0-9_-]{20,}\b"),
         SecretPattern::builtin("Slack token", r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b"),
         // Added v0.6. All keep a distinctive prefix + length so the false-
         // positive rate stays low; deliberately NO generic-entropy or JWT
@@ -87,15 +95,34 @@ pub static PATTERNS: LazyLock<Vec<SecretPattern>> = LazyLock::new(|| {
     ]
 });
 
-/// Name of the first **built-in** pattern that matches `value`, or `None`.
+/// Well-known documentation / example credentials that vendors publish for
+/// tutorials and that constantly appear in READMEs, fixtures, and SDK docs.
+/// Flagging them was a top false-positive: an agent reading a file containing
+/// AWS's canonical `AKIAIOSFODNN7EXAMPLE` would 403 every later request in the
+/// session (S-C3). A match whose text is exactly one of these is not a secret.
+const EXAMPLE_SECRETS: &[&str] = &[
+    "AKIAIOSFODNN7EXAMPLE", // AWS docs access key id
+    "ASIAIOSFODNN7EXAMPLE", // AWS docs STS key id
+];
+
+fn is_example_secret(matched: &str) -> bool {
+    EXAMPLE_SECRETS.iter().any(|e| e.eq_ignore_ascii_case(matched))
+}
+
+/// Name of the first **built-in** pattern that matches `value` with a match
+/// that is not a known documentation/example credential, or `None`.
 pub fn first_match(value: &str) -> Option<&'static str> {
-    PATTERNS.iter().find(|p| p.regex.is_match(value)).map(|p| {
-        // Built-ins are always borrowed; this is the &'static name.
-        match &p.name {
-            Cow::Borrowed(s) => *s,
-            Cow::Owned(_) => unreachable!("built-in patterns carry borrowed names"),
+    for p in PATTERNS.iter() {
+        // Any non-example match counts; scan all matches so a real key elsewhere
+        // in the leaf isn't masked by a leading example.
+        if p.regex.find_iter(value).any(|m| !is_example_secret(m.as_str())) {
+            return match &p.name {
+                Cow::Borrowed(s) => Some(*s),
+                Cow::Owned(_) => unreachable!("built-in patterns carry borrowed names"),
+            };
         }
-    })
+    }
+    None
 }
 
 /// Name of the first pattern in `patterns` that matches `value`, or `None`.

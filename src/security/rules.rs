@@ -77,14 +77,20 @@ pub const DEFAULT_DENY_PATHS: &[&str] = &[
     "/etc/shadow",
 ];
 
-pub const DEFAULT_DENY_COMMANDS: &[&str] = &["rm -rf /", "rm -rf ~", "chmod 777", ":(){ :|:& };:"];
+// `rm -rf /` and `rm -rf ~` are deliberately NOT listed here: substring
+// matching made `rm -rf /tmp/build-cache` and `rm -rf ~/.cache/pip` — everyday
+// cleanup — read as the catastrophic literal (S-C2). The shape-aware
+// `super::destructive` detector (always on for tool args) owns recursive-force
+// deletes and only fires on broad/expandable targets, so scoped deletes pass.
+pub const DEFAULT_DENY_COMMANDS: &[&str] = &["chmod 777", ":(){ :|:& };:"];
 
-pub const NETWORK_MOUNT_NEEDLES: &[&str] = &[
-    "/Volumes/",
-    r"\\", // Windows UNC prefix (two backslashes)
-    "smb://",
-    "nfs://",
-];
+// Substring needles for genuine network-mount URI schemes. The Windows UNC
+// prefix (`\\`) is matched separately by [`is_unc_mount`] (a bare-substring
+// `\\` fired on every JSON-escaped Windows path — S-C1). `/Volumes/` was
+// dropped (S-H7): it is where macOS mounts local USB drives, DMGs, and Time
+// Machine, not specifically network shares, so a repo on an external SSD had
+// every tool call blocked.
+pub const NETWORK_MOUNT_NEEDLES: &[&str] = &["smb://", "nfs://", "cifs://", "afp://"];
 
 /// Does `value` reference a denied path?
 ///
@@ -124,12 +130,67 @@ fn collapse_ws(s: &str) -> String {
 }
 
 pub fn mount_matches(value: &str) -> bool {
-    // Case-fold only — do NOT unify separators here, or the UNC `\\` needle
-    // would collide with `//` in ordinary URLs (e.g. `https://...`).
     let hay = value.to_ascii_lowercase();
     NETWORK_MOUNT_NEEDLES
         .iter()
-        .any(|needle| hay.contains(&needle.to_ascii_lowercase()))
+        .any(|needle| hay.contains(needle))
+        || is_unc_mount(value)
+}
+
+/// True when `value` contains a Windows **UNC network-share root** — `\\` at a
+/// token boundary followed by a hostname-ish character. This deliberately does
+/// NOT match a bare `\\` substring: JSON-escaped Windows paths decode to a leaf
+/// like `C:\\Users\\me` (and OpenAI/Codex tool arguments are a JSON-encoded
+/// string, so `{"path":"C:\\\\Users"}` decodes to `C:\\Users`), which contains
+/// `\\` mid-token — not a network mount (S-C1). Local device namespaces
+/// (`\\?\`, `\\.\`) and WSL (`\\wsl$`, `\\wsl.localhost`) are whitelisted: they
+/// are local, not network.
+pub fn is_unc_mount(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'\\' && bytes[i + 1] == b'\\' {
+            let at_boundary = i == 0
+                || matches!(
+                    bytes[i - 1],
+                    b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\'' | b'=' | b'(' | b',' | b':'
+                );
+            // `:` allows `path:\\server\share`-style prefixes but the doubled
+            // backslash in a drive path (`C:\\Users`) has the `\\` preceded by
+            // `:`? No — there it's `C` `:` `\` `\`, so the byte before `\\` is
+            // `:`. Guard that: a single drive letter + colon before `\\` is a
+            // local drive path, not UNC.
+            let drive_path = i >= 2 && bytes[i - 1] == b':' && (bytes[i - 2] as char).is_ascii_alphabetic();
+            if at_boundary && !drive_path {
+                let rest = &value[i + 2..];
+                let rest_lower = rest.to_ascii_lowercase();
+                let local = rest.starts_with('?')
+                    || rest.starts_with('.')
+                    || rest_lower.starts_with("wsl$")
+                    || rest_lower.starts_with("wsl.localhost");
+                let hostnameish = rest
+                    .chars()
+                    .next()
+                    .map(|c| c.is_ascii_alphanumeric())
+                    .unwrap_or(false);
+                if !local && hostnameish {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Drop empty / whitespace-only rules. A blank deny rule makes `contains("")`
+/// true for every leaf, blocking 100% of traffic (S-H8); filter it at ruleset
+/// construction so a hand-edited config or installed pack can't brick the proxy.
+pub fn non_empty_rules<I: IntoIterator<Item = String>>(rules: I) -> Vec<String> {
+    rules
+        .into_iter()
+        .filter(|r| !r.trim().is_empty())
+        .collect()
 }
 
 /// Lowercase and unify path separators (`\` → `/`) for case- and
@@ -182,11 +243,42 @@ mod tests {
     }
 
     #[test]
-    fn mount_matches_case_insensitive_without_url_false_positive() {
-        assert!(mount_matches("/VOLUMES/backup/secrets"));
-        assert!(mount_matches("\\\\server\\share"));
+    fn mount_matches_real_network_schemes_and_unc_only() {
+        assert!(mount_matches("\\\\server\\share")); // genuine UNC root
         assert!(mount_matches("SMB://host/share"));
+        assert!(mount_matches("nfs://host/export"));
         // A plain https URL must not be flagged as a UNC mount.
         assert!(!mount_matches("https://api.anthropic.com/v1/messages"));
+        // /Volumes/ is local on macOS (USB/DMG/Time Machine) — no longer flagged.
+        assert!(!mount_matches("/Volumes/T7/code/project"));
+    }
+
+    #[test]
+    fn unc_match_ignores_escaped_windows_paths() {
+        // S-C1: the regression that blocked every Codex tool call and every
+        // file write containing a Windows path.
+        // A drive path with a doubled (JSON-escaped) backslash is NOT a mount.
+        assert!(!is_unc_mount(r"C:\\Users\\me\\project"));
+        assert!(!is_unc_mount(r#"{"path":"C:\\Users\\me"}"#));
+        // Local device namespaces and WSL are local, not network.
+        assert!(!is_unc_mount(r"\\?\C:\very\long\path"));
+        assert!(!is_unc_mount(r"\\.\PhysicalDrive0"));
+        assert!(!is_unc_mount(r"\\wsl$\Ubuntu\home\me"));
+        assert!(!is_unc_mount(r"\\wsl.localhost\Ubuntu\home"));
+        // A genuine UNC share root IS a mount.
+        assert!(is_unc_mount(r"\\fileserver\share\secret"));
+        assert!(is_unc_mount(r#"{"path":"\\fileserver\share"}"#));
+    }
+
+    #[test]
+    fn non_empty_rules_drops_blanks() {
+        // S-H8: a blank deny rule would match every leaf.
+        let filtered = non_empty_rules(vec![
+            "rm -rf /".to_string(),
+            "".to_string(),
+            "   ".to_string(),
+            "chmod 777".to_string(),
+        ]);
+        assert_eq!(filtered, vec!["rm -rf /".to_string(), "chmod 777".to_string()]);
     }
 }

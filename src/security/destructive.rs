@@ -87,10 +87,20 @@ fn contains_flag(lower: &str, flag: char) -> bool {
     false
 }
 
-/// Split a command line into tokens on whitespace and shell separators.
+/// Split a command line into tokens on whitespace, shell separators, and JSON
+/// punctuation. The JSON delimiters (`"' {}:,`) matter because tool-call
+/// arguments often arrive as a JSON-encoded string, so the command appears as
+/// `{"command":"rm -rf /"}` — without splitting on the quote/brace the `rm`
+/// token would be `{"command":"rm` and the recursive-delete check would miss
+/// it (the gap exposed when the literal `rm -rf /` deny rule was dropped, S-C2).
+/// We deliberately do NOT split on `/` so path targets stay intact (`./build`
+/// must remain one token so a scoped delete isn't flagged).
 fn tokens(lower: &str) -> impl Iterator<Item = &str> {
     lower
-        .split(|c: char| c.is_whitespace() || c == ';' || c == '|' || c == '&')
+        .split(|c: char| {
+            c.is_whitespace()
+                || matches!(c, ';' | '|' | '&' | '"' | '\'' | '{' | '}' | ':' | ',' | '(' | ')')
+        })
         .filter(|t| !t.is_empty())
 }
 

@@ -97,10 +97,19 @@ fn does_not_match_unrelated_directory_with_ssh_in_name() {
 
 #[test]
 fn matches_rm_rf_root() {
+    // S-C2: `rm -rf /` is now caught by the shape-aware destructive detector,
+    // not the literal deny list (which dropped the `rm` literals so scoped
+    // deletes like `rm -rf /tmp/x` aren't false-flagged).
     let body = br#"{"x": "rm -rf / --no-preserve-root"}"#;
     let v = engine().scan(body).expect("violation");
-    assert_eq!(v.kind, ViolationKind::Command);
-    assert_eq!(v.matched, "rm -rf /");
+    assert_eq!(v.kind, ViolationKind::Destructive);
+}
+
+#[test]
+fn scoped_rm_is_not_blocked() {
+    // The everyday-cleanup case that the substring rule used to false-block.
+    let body = br#"{"x": "rm -rf /tmp/build-cache"}"#;
+    assert!(engine().scan(body).is_none());
 }
 
 #[test]
@@ -124,11 +133,12 @@ fn safe_commands_pass() {
 // ──────────────────────────── Mount rules ────────────────────────────
 
 #[test]
-fn blocks_macos_volumes() {
+fn volumes_is_local_not_blocked() {
+    // S-H7: /Volumes/ is where macOS mounts local USB drives, DMGs, and Time
+    // Machine — not specifically network shares. A repo on an external SSD
+    // must not have every tool call blocked.
     let body = br#"{"x": "cp file /Volumes/external/backup"}"#;
-    let v = engine().scan(body).expect("violation");
-    assert_eq!(v.kind, ViolationKind::Mount);
-    assert_eq!(v.matched, "/Volumes/");
+    assert!(engine().scan(body).is_none());
 }
 
 #[test]
@@ -154,7 +164,7 @@ fn mount_blocking_can_be_disabled() {
         ..Ruleset::default()
     };
     let engine = SecurityEngine::new(rules);
-    let body = br#"{"x": "ls /Volumes/disk"}"#;
+    let body = br#"{"x": "mount smb://fileserver/share"}"#;
     assert!(engine.scan(body).is_none());
 }
 
@@ -162,11 +172,20 @@ fn mount_blocking_can_be_disabled() {
 
 #[test]
 fn detects_aws_access_key_id() {
-    // Fake but pattern-matching key.
-    let body = br#"{"x": "export AWS_KEY=AKIAIOSFODNN7EXAMPLE"}"#;
+    // Fake but pattern-matching key (NOT the canonical docs `…EXAMPLE`, which
+    // is now exempted under S-C3).
+    let body = br#"{"x": "export AWS_KEY=AKIAIOSFODNN7REALKEY"}"#;
     let v = engine().scan(body).expect("violation");
     assert_eq!(v.kind, ViolationKind::Secret);
     assert_eq!(v.matched, "AWS access key ID");
+}
+
+#[test]
+fn aws_example_key_is_exempt() {
+    // S-C3: the canonical AWS docs key must not 403 a session that merely read
+    // a file containing it.
+    let body = br#"{"x": "export AWS_KEY=AKIAIOSFODNN7EXAMPLE"}"#;
+    assert!(engine().scan(body).is_none());
 }
 
 #[test]
@@ -183,7 +202,7 @@ fn detects_github_pat() {
     let body = br#"{"x": "GITHUB_TOKEN=ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"}"#;
     let v = engine().scan(body).expect("violation");
     assert_eq!(v.kind, ViolationKind::Secret);
-    assert_eq!(v.matched, "GitHub personal access token");
+    assert_eq!(v.matched, "GitHub token");
 }
 
 #[test]
@@ -282,7 +301,9 @@ fn allow_path_exempts_path_but_not_command() {
     let engine = SecurityEngine::new(rules);
     let body = br#"{"x": "cat ~/.aws/creds && rm -rf /"}"#;
     let v = engine.scan(body).expect("violation");
-    assert_eq!(v.kind, ViolationKind::Command);
+    // The path is exempt, but `rm -rf /` is still caught (now by the
+    // destructive shape detector — S-C2).
+    assert_eq!(v.kind, ViolationKind::Destructive);
 }
 
 #[test]
@@ -294,7 +315,7 @@ fn allow_path_exempts_path_but_not_secret() {
         ..Ruleset::default()
     };
     let engine = SecurityEngine::new(rules);
-    let body = br#"{"x": "dump ~/.aws/creds AKIAIOSFODNN7EXAMPLE"}"#;
+    let body = br#"{"x": "dump ~/.aws/creds AKIAIOSFODNN7REALKEY"}"#;
     let v = engine.scan(body).expect("violation");
     assert_eq!(v.kind, ViolationKind::Secret);
 }
@@ -561,7 +582,8 @@ fn request_scan_blocks_legacy_function_call_arguments() {
     let body = br#"{"messages":[{"role":"assistant","function_call":{
         "name":"bash","arguments":"{\"command\":\"rm -rf / --no-preserve-root\"}"}}]}"#;
     let v = engine().scan_request(body).expect("violation");
-    assert_eq!(v.kind, ViolationKind::Command);
+    // `rm -rf /` is now a destructive-shape match (S-C2).
+    assert_eq!(v.kind, ViolationKind::Destructive);
 }
 
 #[test]
@@ -585,7 +607,7 @@ fn request_scan_still_detects_secrets_in_prose() {
     // Data checks stay global: a credential in chat text is exfiltration-
     // relevant no matter where it sits.
     let body = br#"{"messages":[{"role":"user",
-        "content":"my key is AKIAIOSFODNN7EXAMPLE, is that safe to commit?"}]}"#;
+        "content":"my key is AKIAIOSFODNN7REALKEY, is that safe to commit?"}]}"#;
     let v = engine().scan_request(body).expect("violation");
     assert_eq!(v.kind, ViolationKind::Secret);
 }
@@ -744,7 +766,7 @@ fn request_scan_secrets_still_caught_in_history() {
         {"role":"assistant","content":[
             {"type":"tool_use","id":"t1","name":"bash","input":{"command":"cat notes.txt"}}]},
         {"role":"user","content":[
-            {"type":"tool_result","tool_use_id":"t1","content":"key=AKIAIOSFODNN7EXAMPLE"}]},
+            {"type":"tool_result","tool_use_id":"t1","content":"key=AKIAIOSFODNN7REALKEY"}]},
         {"role":"user","content":"summarize that"},
         {"role":"assistant","content":[{"type":"text","text":"It contains a key."}]}
     ]}"#;
