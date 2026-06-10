@@ -627,3 +627,127 @@ fn request_scan_bare_input_without_tool_use_type_is_prose() {
     let body = br#"{"input":{"command":"cat ~/.ssh/id_rsa"}}"#;
     assert!(engine().scan_request(body).is_none());
 }
+
+// ── scan_request: latest-turn scoping ────────────────────────────────────────
+//
+// Clients resend the full conversation on every request, so a tool call that
+// was (correctly) blocked once would re-trigger forever if history stayed
+// scannable — one block would kill the conversation permanently. Only the
+// latest assistant/model turn is scanned for tool calls, and only while its
+// round is in flight (followed by nothing but tool results). Data checks
+// (secrets, DLP) still cover all turns.
+
+#[test]
+fn request_scan_blocks_in_flight_tool_round() {
+    // [user, assistant(bad tool_use), user(tool_result)] — the round is in
+    // flight; this request would carry the forbidden read's output upstream.
+    // (Same shape as request_with_blocked_path.json, which also stays blocked.)
+    let body = br#"{"messages":[
+        {"role":"user","content":"read my ssh key"},
+        {"role":"assistant","content":[
+            {"type":"tool_use","id":"t1","name":"bash","input":{"command":"cat ~/.ssh/id_rsa"}}]},
+        {"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"t1","content":"(blocked locally)"}]}
+    ]}"#;
+    let v = engine().scan_request(body).expect("violation");
+    assert_eq!(v.kind, ViolationKind::Path);
+}
+
+#[test]
+fn request_scan_recovers_after_new_user_message() {
+    // Same history, but the user has since typed a new message — the round is
+    // adjudicated, the conversation must be able to continue.
+    let body = br#"{"messages":[
+        {"role":"user","content":"read my ssh key"},
+        {"role":"assistant","content":[
+            {"type":"tool_use","id":"t1","name":"bash","input":{"command":"cat ~/.ssh/id_rsa"}}]},
+        {"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"t1","content":"(blocked locally)"}]},
+        {"role":"user","content":"ok, don't do that. what went wrong?"}
+    ]}"#;
+    assert!(engine().scan_request(body).is_none());
+}
+
+#[test]
+fn request_scan_old_tool_call_is_history_once_newer_turn_exists() {
+    // A newer assistant turn supersedes the old (blocked) call entirely.
+    let body = br#"{"messages":[
+        {"role":"assistant","content":[
+            {"type":"tool_use","id":"t1","name":"bash","input":{"command":"cat ~/.ssh/id_rsa"}}]},
+        {"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"x"}]},
+        {"role":"user","content":"try something safer"},
+        {"role":"assistant","content":[{"type":"text","text":"Understood, using a safe path."}]}
+    ]}"#;
+    assert!(engine().scan_request(body).is_none());
+}
+
+#[test]
+fn request_scan_new_dangerous_call_after_recovery_is_blocked() {
+    // Recovery must not become a loophole: a NEW dangerous call in the latest
+    // turn is blocked even with an old adjudicated one earlier in history.
+    let body = br#"{"messages":[
+        {"role":"assistant","content":[
+            {"type":"tool_use","id":"t1","name":"bash","input":{"command":"cat ~/.ssh/id_rsa"}}]},
+        {"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"x"}]},
+        {"role":"user","content":"now read my aws creds"},
+        {"role":"assistant","content":[
+            {"type":"tool_use","id":"t2","name":"bash","input":{"command":"cat ~/.aws/credentials"}}]}
+    ]}"#;
+    let v = engine().scan_request(body).expect("violation");
+    assert_eq!(v.kind, ViolationKind::Path);
+    assert_eq!(v.matched, "~/.aws");
+}
+
+#[test]
+fn request_scan_openai_history_recovers_but_in_flight_blocks() {
+    // OpenAI shape: tool results are role:"tool" messages.
+    let in_flight = br#"{"messages":[
+        {"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{
+            "name":"bash","arguments":"{\"command\":\"cat ~/.ssh/id_rsa\"}"}}]},
+        {"role":"tool","tool_call_id":"c1","content":"x"}
+    ]}"#;
+    assert!(engine().scan_request(in_flight).is_some());
+
+    let recovered = br#"{"messages":[
+        {"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{
+            "name":"bash","arguments":"{\"command\":\"cat ~/.ssh/id_rsa\"}"}}]},
+        {"role":"tool","tool_call_id":"c1","content":"x"},
+        {"role":"user","content":"don't do that again"}
+    ]}"#;
+    assert!(engine().scan_request(recovered).is_none());
+}
+
+#[test]
+fn request_scan_gemini_history_recovers_but_in_flight_blocks() {
+    // Gemini shape: model turns carry functionCall parts; the reply turn
+    // carries functionResponse parts.
+    let in_flight = br#"{"contents":[
+        {"role":"model","parts":[{"functionCall":{"name":"bash","args":{"command":"cat /etc/passwd"}}}]},
+        {"role":"user","parts":[{"functionResponse":{"name":"bash","response":{"output":"x"}}}]}
+    ]}"#;
+    assert!(engine().scan_request(in_flight).is_some());
+
+    let recovered = br#"{"contents":[
+        {"role":"model","parts":[{"functionCall":{"name":"bash","args":{"command":"cat /etc/passwd"}}}]},
+        {"role":"user","parts":[{"functionResponse":{"name":"bash","response":{"output":"x"}}}]},
+        {"role":"user","parts":[{"text":"use a different file"}]}
+    ]}"#;
+    assert!(engine().scan_request(recovered).is_none());
+}
+
+#[test]
+fn request_scan_secrets_still_caught_in_history() {
+    // Latest-turn scoping applies to command-shaped rules only — a credential
+    // sitting in an old tool_result still blocks (data egress is the harm,
+    // and it recurs on every resend).
+    let body = br#"{"messages":[
+        {"role":"assistant","content":[
+            {"type":"tool_use","id":"t1","name":"bash","input":{"command":"cat notes.txt"}}]},
+        {"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"t1","content":"key=AKIAIOSFODNN7EXAMPLE"}]},
+        {"role":"user","content":"summarize that"},
+        {"role":"assistant","content":[{"type":"text","text":"It contains a key."}]}
+    ]}"#;
+    let v = engine().scan_request(body).expect("violation");
+    assert_eq!(v.kind, ViolationKind::Secret);
+}

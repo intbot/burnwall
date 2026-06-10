@@ -11,9 +11,11 @@
 //!   checks (denied paths, denied commands, network mounts, destructive
 //!   commands, exfil techniques) run only inside **tool-call argument**
 //!   subtrees — an Anthropic `tool_use.input`, an OpenAI `tool_calls` /
-//!   `function_call`, a Gemini `functionCall`. Data-shaped checks (secrets,
-//!   DLP) still run on every string leaf: a credential or card number is
-//!   worth blocking wherever it sits in the payload.
+//!   `function_call`, a Gemini `functionCall` — and, within a conversation,
+//!   only in the **latest turn's in-flight tool round** (see
+//!   [`walk_turn_array`]). Data-shaped checks (secrets, DLP) still run on
+//!   every string leaf: a credential or card number is worth blocking
+//!   wherever it sits in the payload.
 //!
 //! The split exists because an LLM request carries far more than tool calls:
 //! system prompts, chat history, tool *definitions*, tool results. Those can
@@ -35,8 +37,12 @@ enum Scope {
     /// Inside a tool-call argument subtree → full check set.
     ToolArgs,
     /// Anywhere else (system prompt, chat text, tool definitions, tool
-    /// results) → data checks only (secrets, DLP).
+    /// results) → data checks only (secrets, DLP). Tool-call shapes found
+    /// here promote their subtree to [`Scope::ToolArgs`].
     Prose,
+    /// An already-adjudicated conversation turn → data checks only, and
+    /// tool-call shapes do NOT promote. See [`walk_turn_array`].
+    History,
 }
 
 /// Scan every string leaf with the full check set.
@@ -53,10 +59,24 @@ fn walk(value: &Value, rules: &Ruleset, scope: Scope) -> Option<Violation> {
     match value {
         Value::Object(map) => {
             for (k, v) in map {
-                let child_scope = if scope == Scope::ToolArgs || holds_tool_args(k, map) {
-                    Scope::ToolArgs
-                } else {
-                    Scope::Prose
+                // Conversation turn arrays get latest-turn scoping; see
+                // walk_turn_array. Only from Prose — under ToolArgs (full
+                // scan) everything stays strict, and under History nothing
+                // re-promotes.
+                if scope == Scope::Prose && (k == "messages" || k == "contents") {
+                    if let Value::Array(turns) = v {
+                        if turns.iter().any(|t| t.get("role").is_some()) {
+                            if let Some(violation) = walk_turn_array(turns, rules) {
+                                return Some(violation);
+                            }
+                            continue;
+                        }
+                    }
+                }
+                let child_scope = match scope {
+                    Scope::ToolArgs => Scope::ToolArgs,
+                    Scope::Prose if holds_tool_args(k, map) => Scope::ToolArgs,
+                    other => other,
                 };
                 if let Some(violation) = walk(v, rules, child_scope) {
                     return Some(violation);
@@ -74,6 +94,70 @@ fn walk(value: &Value, rules: &Ruleset, scope: Scope) -> Option<Violation> {
         }
         Value::String(s) => check_string(s, rules, scope),
         _ => None,
+    }
+}
+
+/// Walk a conversation turn array (`messages` / `contents`) with
+/// **latest-turn scoping**: only the most recent assistant/model turn can
+/// carry an *actionable* tool call, and only while its round is still in
+/// flight (followed by nothing but tool results). Everything earlier was the
+/// latest turn of some previous request and was adjudicated then — re-scanning
+/// it would make one (correctly) blocked tool call poison the conversation
+/// forever, since clients resend the full history on every request. With this
+/// rule a block is a speed bump, not a death sentence: the user's next
+/// message ends the round, and data checks (secrets, DLP) still cover the
+/// whole history.
+fn walk_turn_array(turns: &[Value], rules: &Ruleset) -> Option<Violation> {
+    let last_actor = turns.iter().rposition(is_actor_turn);
+    let in_flight = match last_actor {
+        // An empty tail means the round just started; a tail of tool results
+        // means the client echoed the calls back with their outputs — the
+        // moment those outputs would leave the machine.
+        Some(i) => turns[i + 1..].iter().all(is_tool_result_turn),
+        None => false,
+    };
+    for (idx, turn) in turns.iter().enumerate() {
+        let scope = if in_flight && Some(idx) == last_actor {
+            Scope::Prose // promotion active — its tool calls get the full set
+        } else {
+            Scope::History
+        };
+        if let Some(violation) = walk(turn, rules, scope) {
+            return Some(violation);
+        }
+    }
+    None
+}
+
+/// A turn authored by the model: Anthropic/OpenAI `assistant`, Gemini `model`.
+fn is_actor_turn(turn: &Value) -> bool {
+    matches!(
+        turn.get("role").and_then(Value::as_str),
+        Some("assistant") | Some("model")
+    )
+}
+
+/// A turn that only carries tool execution results back to the model:
+/// OpenAI's `role: "tool"`, an Anthropic user message containing
+/// `tool_result` blocks, a Gemini turn whose parts carry `functionResponse`.
+/// (Anthropic/Gemini clients may attach extra text alongside the results —
+/// reminders, environment notes — so one result block is enough to qualify.)
+fn is_tool_result_turn(turn: &Value) -> bool {
+    match turn.get("role").and_then(Value::as_str) {
+        Some("tool") => true,
+        Some("user") | Some("function") => {
+            let blocks = turn
+                .get("content")
+                .or_else(|| turn.get("parts"))
+                .and_then(Value::as_array);
+            blocks.is_some_and(|blocks| {
+                blocks.iter().any(|b| {
+                    b.get("type").and_then(Value::as_str) == Some("tool_result")
+                        || b.get("functionResponse").is_some()
+                })
+            })
+        }
+        _ => false,
     }
 }
 

@@ -152,6 +152,8 @@ The security engine scans the JSON request body before forwarding. It does NOT n
 
 The scanner does a deep traversal of the JSON looking for string values that match deny patterns. On the LLM proxy path it is **context-aware**: command-shaped rules (denied paths, denied commands, network mounts, destructive commands, exfil techniques) apply only inside tool-call argument subtrees — Anthropic `tool_use.input`, OpenAI `tool_calls` / `function_call` arguments, Gemini `functionCall`. Prose (the system prompt, chat text, tool definitions, tool results) can legitimately *mention* `~/.ssh` or `rm -rf` — project docs describing a deny list, a conversation about backups — and must not be blocked for it. Data-shaped rules (secret detection, DLP) still apply to **every** string leaf, since a credential or card number is worth blocking wherever it sits in the payload.
 
+Within a conversation, command-shaped rules are further scoped to the **latest assistant turn's in-flight tool round** (the trailing assistant message followed only by tool results). Clients resend the full history on every request, so scanning older turns would make one correctly-blocked call re-trigger the 403 forever. The request that carries the dangerous call and its output is blocked — that is the moment the forbidden read's content would leave the machine — but once the user sends a new message the round is adjudicated and the conversation recovers.
+
 MCP `tools/call` bodies keep the strict whole-body semantics: there, the entire payload *is* a tool invocation, so any string value containing a denied path or command triggers a block.
 
 ### Pattern Matching Strategy:
