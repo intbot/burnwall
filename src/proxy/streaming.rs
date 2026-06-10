@@ -10,9 +10,13 @@
 //!    `on_complete` with the accumulated chunks so the caller can parse
 //!    usage data and write storage rows.
 //!
-//! If the client disconnects mid-stream, the channel send fails; we keep
-//! reading from upstream and still fire `on_complete` so cost tracking
-//! reflects what the upstream actually delivered.
+//! If the client disconnects mid-stream (e.g. the user presses Esc in their
+//! AI tool), the channel send fails. We then **stop** reading and drop the
+//! upstream stream so the provider stops generating — otherwise we'd bill the
+//! full response for output nobody will read, and a stalled tail could leak the
+//! task forever (P-C2). `on_complete` still fires with the bytes collected so
+//! far and an `aborted` flag, so a partial response is recorded rather than
+//! silently lost.
 
 use std::convert::Infallible;
 use std::pin::Pin;
@@ -62,26 +66,32 @@ where
 pub fn tee_stream<S, F>(stream: S, on_complete: F) -> ChannelStream
 where
     S: Stream<Item = reqwest::Result<Bytes>> + Send + 'static,
-    F: FnOnce(Vec<Bytes>) + Send + 'static,
+    F: FnOnce(Vec<Bytes>, bool) + Send + 'static,
 {
     let (tx, rx) = unbounded_channel();
     tokio::spawn(async move {
         let mut collected: Vec<Bytes> = Vec::new();
         let mut stream = Box::pin(stream);
-        let mut client_alive = true;
+        let mut aborted = false;
         while let Some(item) = stream.next().await {
             if let Ok(ref b) = item {
                 collected.push(b.clone());
             }
-            if client_alive && tx.send(item).is_err() {
-                // Client closed — stop forwarding, but keep draining so we
-                // still call on_complete with the full accumulated body.
-                client_alive = false;
+            if tx.send(item).is_err() {
+                // Client hung up. Stop reading and drop the upstream stream so
+                // the connection aborts and the provider stops generating —
+                // billing for output nobody reads, and leaking a task on a
+                // stalled tail, are both worse than a partial cost record.
+                aborted = true;
+                break;
             }
         }
+        // Drop the upstream stream promptly (before the blocking parse) so the
+        // socket closes on a client abort.
+        drop(stream);
         // Run the usage parse + storage writes on the blocking pool so the
         // synchronous SQLite I/O never stalls an async worker thread.
-        let _ = tokio::task::spawn_blocking(move || on_complete(collected)).await;
+        let _ = tokio::task::spawn_blocking(move || on_complete(collected, aborted)).await;
     });
     ChannelStream(rx)
 }

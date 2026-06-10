@@ -137,79 +137,152 @@ pub async fn handle(
             tracing::error!("blocked-request insert failed: {}", e);
         }
 
-        let msg = format!("Burnwall blocked: {}", violation.message());
-        return Ok(error_response(
-            StatusCode::FORBIDDEN,
+        let what = format!("{} ({}).", violation.message(), violation.location.describe());
+        return Ok(block::build(
+            provider,
             "security_blocked",
-            &msg,
+            StatusCode::FORBIDDEN,
+            &what,
+            block::SECURITY_REMEDIES,
+            None,
         ));
     }
 
     // ─── budget check ───
-    match state.budget.check() {
-        BudgetStatus::Exceeded { spent, limit } => {
-            warn!("💰 BUDGET EXCEEDED: ${:.2}/${:.2}", spent, limit);
-            let record = RequestRecord::blocked(provider, &model, "budget_exceeded", None);
-            if let Err(e) = state.storage.insert_request(&record) {
-                tracing::error!("blocked-request insert failed: {}", e);
+    // Plan-aware (B-H4): a subscription request (OAuth bearer, no API key) is
+    // not metered per token, so the dollar cap is notional — we track and warn
+    // but do not 429-block it unless `budget.enforce_on_plan` is set. Metered
+    // API-key traffic is always enforced.
+    let metered = auth_kind(&parts.headers, provider) == AuthKind::Metered;
+    let enforce_dollar_cap = metered || state.budget.config().enforce_on_plan;
+
+    // Monthly cap first (the hard backstop), then daily.
+    for (status, label) in [
+        (state.budget.check_monthly(), "monthly"),
+        (state.budget.check(), "daily"),
+    ] {
+        match status {
+            BudgetStatus::Exceeded { spent, limit } => {
+                if enforce_dollar_cap {
+                    warn!("💰 {} BUDGET EXCEEDED: ${:.2}/${:.2}", label, spent, limit);
+                    let kind = if label == "monthly" {
+                        "monthly_budget_exceeded"
+                    } else {
+                        "budget_exceeded"
+                    };
+                    let record = RequestRecord::blocked(provider, &model, kind, None);
+                    if let Err(e) = state.storage.insert_request(&record) {
+                        tracing::error!("blocked-request insert failed: {}", e);
+                    }
+                    let reset = if label == "monthly" {
+                        "the 1st of next month"
+                    } else {
+                        "local midnight"
+                    };
+                    let what = format!(
+                        "Your {label} budget of ${:.2} is used up (${:.2} spent). It resets at {reset}.",
+                        limit, spent
+                    );
+                    return Ok(block::build(
+                        provider,
+                        kind,
+                        StatusCode::TOO_MANY_REQUESTS,
+                        &what,
+                        block::BUDGET_REMEDIES,
+                        Some(block::seconds_until_local_midnight()),
+                    ));
+                } else {
+                    // Subscription traffic: notional dollars, plan is the real
+                    // limit. Warn once-ish, never block.
+                    warn!(
+                        "💰 {} notional spend ${:.2} over ${:.2} cap — plan traffic, not blocking (set budget.enforce_on_plan=true to enforce)",
+                        label, spent, limit
+                    );
+                }
             }
-            let msg = format!(
-                "Daily budget of ${:.2} exceeded (${:.2} spent)",
-                limit, spent
-            );
-            return Ok(error_response(
-                StatusCode::TOO_MANY_REQUESTS,
-                "budget_exceeded",
-                &msg,
-            ));
+            BudgetStatus::Warn {
+                spent,
+                limit,
+                percent,
+            } => {
+                warn!(
+                    "⚠️ {} budget {}% used (${:.2}/${:.2})",
+                    label, percent, spent, limit
+                );
+            }
+            BudgetStatus::Ok => {}
         }
-        BudgetStatus::Warn {
-            spent,
-            limit,
-            percent,
-        } => {
-            warn!("⚠️ Budget {}% used (${:.2}/${:.2})", percent, spent, limit);
-        }
-        BudgetStatus::Ok => {}
     }
 
     // ─── per-session / swarm budget ceiling (opt-in via x-burnwall-session) ───
+    // Same plan-aware gate as the daily/monthly caps: an explicit per-session
+    // cap is still enforced on metered traffic, but a notional cap on plan
+    // traffic only warns unless the user opted in.
     if let Some(sid) = &session_id {
         if let BudgetStatus::Exceeded { spent, limit } = state.budget.check_session(sid) {
-            warn!("💰 SESSION BUDGET EXCEEDED: ${:.2}/${:.2}", spent, limit);
-            let record =
-                RequestRecord::blocked(provider, &model, "session_budget_exceeded", Some(sid.clone()));
-            if let Err(e) = state.storage.insert_request(&record) {
-                tracing::error!("blocked-request insert failed: {}", e);
+            if enforce_dollar_cap {
+                warn!("💰 SESSION BUDGET EXCEEDED: ${:.2}/${:.2}", spent, limit);
+                let record =
+                    RequestRecord::blocked(provider, &model, "session_budget_exceeded", Some(sid.clone()));
+                if let Err(e) = state.storage.insert_request(&record) {
+                    tracing::error!("blocked-request insert failed: {}", e);
+                }
+                let what = format!(
+                    "This session/swarm hit its ${:.2} cap (${:.2} spent).",
+                    limit, spent
+                );
+                return Ok(block::build(
+                    provider,
+                    "session_budget_exceeded",
+                    StatusCode::TOO_MANY_REQUESTS,
+                    &what,
+                    block::SESSION_REMEDIES,
+                    None,
+                ));
+            } else {
+                warn!(
+                    "💰 session notional spend ${:.2} over ${:.2} cap — plan traffic, not blocking",
+                    spent, limit
+                );
             }
-            let msg = format!(
-                "Session budget of ${:.2} exceeded (${:.2} spent) — swarm/session cap hit",
-                limit, spent
-            );
-            return Ok(error_response(
-                StatusCode::TOO_MANY_REQUESTS,
-                "session_budget_exceeded",
-                &msg,
-            ));
         }
     }
 
     // ─── loop detection ───
-    let request_hash = state.loop_detector.hash(&body_bytes);
+    // Skip body-less / GET requests entirely (B-H1): a `GET /v1/models` cannot
+    // be a runaway agent loop worth blocking, and all empty bodies would
+    // otherwise collide into one bucket. `should_track` gates both the
+    // pre-forward peek and the on-2xx arrival recording.
+    let should_track_loop = parts.method != hyper::Method::GET && !body_bytes.is_empty();
+    let request_hash = state
+        .loop_detector
+        .hash(parts.method.as_str(), provider, &rest, &body_bytes);
     let request_hash_hex = format!("{:016x}", request_hash);
-    let verdict = state.loop_detector.check_request(request_hash);
-    if verdict.is_blocking() {
-        warn!("🔄 LOOP BLOCKED {}: {}", provider, verdict.message());
-        let mut record = RequestRecord::blocked(provider, &model, &verdict.message(), None);
-        record.request_hash = Some(request_hash_hex.clone());
-        if let Err(e) = state.storage.insert_request(&record) {
-            tracing::error!("blocked-request insert failed: {}", e);
+    if should_track_loop {
+        // Read-only peek — the arrival is recorded later by the tee, and only
+        // on a 2xx, so a blocked 429 (or a retry after an upstream failure)
+        // never feeds the window. This is the death-spiral fix (B-C2).
+        let verdict = state.loop_detector.check_request(request_hash);
+        if verdict.is_blocking() {
+            warn!("🔄 LOOP BLOCKED {}: {}", provider, verdict.message());
+            let mut record = RequestRecord::blocked(provider, &model, &verdict.message(), None);
+            record.request_hash = Some(request_hash_hex.clone());
+            if let Err(e) = state.storage.insert_request(&record) {
+                tracing::error!("blocked-request insert failed: {}", e);
+            }
+            let what = format!(
+                "{}. This usually means your tool retried an identical request; it clears automatically.",
+                verdict.message()
+            );
+            return Ok(block::build(
+                provider,
+                "loop_detected",
+                StatusCode::TOO_MANY_REQUESTS,
+                &what,
+                block::LOOP_REMEDIES,
+                verdict.retry_after_secs(),
+            ));
         }
-        return Ok(error_response(
-            StatusCode::TOO_MANY_REQUESTS,
-            "loop_detected",
-            &verdict.message(),
-        ));
     }
 
     // ─── cost-spiral enforcement (opt-in) ───
@@ -224,10 +297,14 @@ pub async fn handle(
         if let Err(e) = state.storage.insert_request(&record) {
             tracing::error!("blocked-request insert failed: {}", e);
         }
-        return Ok(error_response(
-            StatusCode::TOO_MANY_REQUESTS,
+        let what = format!("{}.", spiral.message());
+        return Ok(block::build(
+            provider,
             "cost_spiral",
-            &spiral.message(),
+            StatusCode::TOO_MANY_REQUESTS,
+            &what,
+            block::COST_SPIRAL_REMEDIES,
+            spiral.retry_after_secs(),
         ));
     }
 
@@ -240,6 +317,11 @@ pub async fn handle(
     // gate to provider=anthropic + path=/v1/messages (the only Anthropic
     // endpoint that accepts these markers).
     let messages_api = provider == "anthropic" && cache_injection::is_messages_path(&rest);
+    // Cache-savings projection (cache injection OFF): the estimate is an
+    // in-memory parse here, but the DB write is deferred to the tee callback
+    // (off the response path) instead of a synchronous pre-forward fsync that
+    // could stall the request behind a contended write — D-M5.
+    let mut cache_projection = None;
     let forward_body = if state.cache_injection && messages_api {
         let outcome = cache_injection::inject_if_eligible(&body_bytes);
         if outcome.modified {
@@ -250,16 +332,16 @@ pub async fn handle(
         if !state.cache_injection && messages_api {
             let projected = cache_injection::estimate_savings_usd(&body_bytes);
             if projected > 0.0 {
-                let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-                if let Err(e) = state.storage.record_cache_projection(&today, projected) {
-                    tracing::warn!("cache projection record failed: {}", e);
-                }
+                cache_projection = Some(projected);
             }
         }
         body_bytes
     };
 
     // ─── forward (with optional failover) + tee-parse ───
+    // Pass the loop hash so the tee can record the arrival on a 2xx (and only
+    // then). `None` when this request isn't loop-tracked (GET/body-less).
+    let loop_hash = should_track_loop.then_some(request_hash);
     match forwarding::forward(
         parts.method,
         &upstream_base,
@@ -269,6 +351,8 @@ pub async fn handle(
         &state,
         provider,
         request_hash_hex,
+        loop_hash,
+        cache_projection,
     )
     .await
     {
@@ -305,6 +389,160 @@ fn error_response(status: StatusCode, kind: &str, msg: &str) -> Response<ProxyBo
 
 fn escape_json(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Which credential kind a request carries — drives plan-aware budget
+/// enforcement (B-H4). We classify the *kind* only and never read or log the
+/// credential value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthKind {
+    /// Metered API key (`x-api-key`, or any bearer we can't identify as a
+    /// subscription) — real per-token dollars, so the dollar cap applies.
+    Metered,
+    /// Flat-rate subscription (Claude Pro/Max via an OAuth bearer) — not
+    /// metered per token, so the dollar figure is notional.
+    Subscription,
+}
+
+/// Classify the request's credential kind. Defaults to [`AuthKind::Metered`] so
+/// enforcement is only ever *relaxed* for a positively-identified subscription,
+/// never weakened for an unknown auth shape.
+fn auth_kind(headers: &hyper::HeaderMap, provider: &str) -> AuthKind {
+    // An API key is unambiguously metered.
+    if headers
+        .get("x-api-key")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+    {
+        return AuthKind::Metered;
+    }
+    // Anthropic OAuth tokens (Claude Code on a Pro/Max plan) start with
+    // `sk-ant-oat`. The API authenticates with `x-api-key`, so a bearer of this
+    // shape is a subscription. We inspect only the prefix; the token is never
+    // logged. OpenAI/Google bearers are API-metered, so they fall through to
+    // Metered.
+    if provider == "anthropic" {
+        if let Some(auth) = headers
+            .get(hyper::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+        {
+            let token = auth
+                .strip_prefix("Bearer ")
+                .or_else(|| auth.strip_prefix("bearer "))
+                .unwrap_or("");
+            if token.starts_with("sk-ant-oat") {
+                return AuthKind::Subscription;
+            }
+        }
+    }
+    AuthKind::Metered
+}
+
+/// Self-identifying, actionable block responses (W1-7). Every block Burnwall
+/// imposes tells the user: (1) that *Burnwall* did it, before the request left
+/// the machine; (2) what matched and where; (3) how to proceed if it's a false
+/// positive, escalating inspect → narrow → bypass → pause; and (4) how to
+/// report it. Limit blocks also carry a `Retry-After`. The JSON envelope
+/// matches the upstream provider's error shape (P-M2) so the AI tool renders a
+/// clean error instead of a raw blob.
+pub(crate) mod block {
+    use bytes::Bytes;
+    use hyper::{Response, StatusCode};
+    use serde_json::json;
+
+    use crate::proxy::{streaming, ProxyBody};
+
+    pub const SECURITY_REMEDIES: &[&str] = &[
+        "See exactly what was caught:  burnwall security",
+        "If it's wrong, adjust the rule in ~/.burnwall/config.toml (security.deny_paths / deny_commands), or disable a pack:  burnwall rules disable <pack>",
+        "Bypass Burnwall for this session — UNPROTECTED:  set BURNWALL_BYPASS=1 and restart your AI tool",
+        "Turn Burnwall off entirely — UNPROTECTED:  burnwall stop",
+    ];
+    pub const BUDGET_REMEDIES: &[&str] = &[
+        "See today's spend:  burnwall status",
+        "Raise or remove the cap:  burnwall config set budget.daily <usd>   (0 = unlimited)",
+        "On a flat-rate plan? The dollar cap is notional — plan traffic isn't blocked by default (budget.enforce_on_plan).",
+        "Bypass for this session — UNPROTECTED:  set BURNWALL_BYPASS=1 and restart your AI tool",
+    ];
+    pub const SESSION_REMEDIES: &[&str] = &[
+        "Raise or turn off the per-session cap:  burnwall config set budget.per_session <usd>   (0 = off)",
+        "Bypass for this session — UNPROTECTED:  set BURNWALL_BYPASS=1 and restart your AI tool",
+    ];
+    pub const LOOP_REMEDIES: &[&str] = &[
+        "This clears on its own once the retry window drains — usually a client resending an identical request.",
+        "Tune the threshold:  burnwall config set loop_detection.max_identical_requests <n>",
+        "Disable loop detection:  burnwall config set loop_detection.enabled false",
+        "Bypass for this session — UNPROTECTED:  set BURNWALL_BYPASS=1 and restart your AI tool",
+    ];
+    pub const COST_SPIRAL_REMEDIES: &[&str] = &[
+        "Raise the window cap:  burnwall config set loop_detection.max_cost_per_window <usd>",
+        "Disable spiral blocking:  burnwall config set loop_detection.cost_spiral_enforce false",
+        "Bypass for this session — UNPROTECTED:  set BURNWALL_BYPASS=1 and restart your AI tool",
+    ];
+
+    /// Seconds until the next local midnight — the daily budget reset time.
+    pub fn seconds_until_local_midnight() -> u64 {
+        use chrono::Timelike;
+        let secs_today = chrono::Local::now().num_seconds_from_midnight() as u64;
+        86_400u64.saturating_sub(secs_today).max(1)
+    }
+
+    /// Assemble the human-readable block message: self-identify, what/where,
+    /// escape hatches, report path.
+    fn message(what: &str, remedies: &[&str]) -> String {
+        let mut m = String::new();
+        m.push_str("🛡️  Burnwall blocked this request before it left your machine.\n");
+        m.push_str(what);
+        if !remedies.is_empty() {
+            m.push_str("\n\nIf this is a false positive, you can:");
+            for r in remedies {
+                m.push_str("\n  • ");
+                m.push_str(r);
+            }
+        }
+        m.push_str("\n\nReport a false positive (nothing leaves your machine):  burnwall report-bug");
+        m
+    }
+
+    /// Build the provider-correct JSON error response with the block message
+    /// and an optional `Retry-After` header.
+    pub fn build(
+        provider: &str,
+        kind: &str,
+        status: StatusCode,
+        what: &str,
+        remedies: &[&str],
+        retry_after_secs: Option<u64>,
+    ) -> Response<ProxyBody> {
+        let msg = message(what, remedies);
+        // Match each provider's native error envelope so the client SDK renders
+        // it as an error rather than failing to parse an unexpected shape.
+        let value = match provider {
+            "anthropic" => json!({"type": "error", "error": {"type": kind, "message": msg}}),
+            "google" => {
+                let gstatus = match status {
+                    StatusCode::TOO_MANY_REQUESTS => "RESOURCE_EXHAUSTED",
+                    StatusCode::FORBIDDEN => "PERMISSION_DENIED",
+                    _ => "FAILED_PRECONDITION",
+                };
+                json!({"error": {"code": status.as_u16(), "message": msg, "status": gstatus}})
+            }
+            _ => json!({"error": {"message": msg, "type": kind, "code": kind}}),
+        };
+        let body = serde_json::to_string(&value)
+            .unwrap_or_else(|_| r#"{"error":{"message":"Burnwall blocked this request."}}"#.to_string());
+
+        let mut builder = Response::builder()
+            .status(status)
+            .header("content-type", "application/json")
+            .header("x-burnwall-blocked", kind);
+        if let Some(secs) = retry_after_secs {
+            builder = builder.header("retry-after", secs.to_string());
+        }
+        builder
+            .body(streaming::full(Bytes::from(body)))
+            .expect("block::build: response builder failed")
+    }
 }
 
 /// Best-effort extraction of the `model` field from a request body. Used

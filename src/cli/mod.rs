@@ -27,6 +27,7 @@ pub mod metrics;
 pub mod pricing;
 #[cfg(feature = "observe")]
 pub mod report;
+pub mod report_bug;
 pub mod routing;
 pub mod rules;
 pub mod savings;
@@ -69,6 +70,8 @@ pub enum Command {
     Init(init::InitArgs),
     /// Inspect security events (blocked attempts).
     Security(security::SecurityArgs),
+    /// Write a sanitized, local bug report of recent blocks (nothing is sent).
+    ReportBug(report_bug::ReportBugArgs),
     /// Print a shell-completion script to stdout.
     Completions(completions::CompletionsArgs),
     /// Pass-through MCP HTTP proxy that logs tools/call invocations.
@@ -140,6 +143,7 @@ impl Cli {
             Command::Config(args) => config_cmd::run_cmd(args),
             Command::Init(args) => init::run_cmd(args),
             Command::Security(args) => security::run_cmd(args),
+            Command::ReportBug(args) => report_bug::run_cmd(args),
             Command::Completions(args) => completions::run_cmd(args),
             #[cfg(feature = "mcp")]
             Command::McpWatch(args) => mcp_watch::run_cmd(args).await,

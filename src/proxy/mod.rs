@@ -33,6 +33,32 @@ pub mod streaming;
 pub use resilience::Resilience;
 pub use streaming::{BoxError, ProxyBody};
 
+/// Build the upstream HTTP client with deadlines and TCP keepalive (P-C1). A
+/// bare `reqwest::Client::new()` has no connect timeout, no read timeout, and
+/// no keepalive, so a VPN flip / captive portal blackholes a request for the OS
+/// connect timeout (tens of seconds, freezing the user's tool), and a stalled
+/// stream after laptop sleep/wake blocks the tee task forever — the request is
+/// never recorded and the task plus its buffered body leak until restart.
+///
+/// - `connect_timeout`: fail fast to a clean 502 instead of a long hang.
+/// - `tcp_keepalive`: detect a silently-dead socket (no FIN/RST) so a stalled
+///   stream eventually errors instead of blocking forever.
+/// - `read_timeout` (per-read, NOT total `timeout`): reclaims a socket that has
+///   gone quiet, while still allowing arbitrarily long SSE streams — Anthropic
+///   sends periodic pings, so a live stream keeps resetting the per-read clock.
+///   A total `.timeout()` would wrongly kill long legitimate generations.
+pub fn build_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .tcp_keepalive(std::time::Duration::from_secs(60))
+        .read_timeout(std::time::Duration::from_secs(600))
+        .build()
+        .unwrap_or_else(|e| {
+            tracing::warn!("falling back to default HTTP client: {e}");
+            reqwest::Client::new()
+        })
+}
+
 /// Shared, immutable-from-the-handler-side state. Each component is `Arc`'d
 /// so the tee callback (which runs in a spawned task) can clone the parts
 /// it needs without copying the whole struct.
@@ -71,7 +97,7 @@ impl AppState {
             upstream_anthropic,
             upstream_openai,
             upstream_google: "https://generativelanguage.googleapis.com".to_string(),
-            http_client: reqwest::Client::new(),
+            http_client: build_http_client(),
             security: Arc::new(SecurityEngine::with_defaults()),
             budget: Arc::new(BudgetTracker::with_defaults()),
             loop_detector: Arc::new(LoopDetector::with_defaults()),

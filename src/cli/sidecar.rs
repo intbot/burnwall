@@ -60,6 +60,7 @@ pub async fn run_cmd(args: SidecarArgs) -> anyhow::Result<()> {
         upstream_google: "https://generativelanguage.googleapis.com".to_string(),
         rewrite_anthropic_cache: false,
         no_routing: true,
+        pause_routing_on_exit: false,
     })
     .await
 }

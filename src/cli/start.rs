@@ -44,6 +44,11 @@ pub struct StartArgs {
     /// up, and don't pause it when the proxy exits.
     #[arg(long)]
     pub no_routing: bool,
+    /// (internal) Pause routing when this process exits even under
+    /// `--no-routing`. Injected by the daemon launcher so a gracefully-exiting
+    /// background child doesn't strand Active env files at a dead port.
+    #[arg(long, hide = true)]
+    pub pause_routing_on_exit: bool,
 }
 
 pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
@@ -51,7 +56,20 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
         return daemon::spawn_background(&args).await;
     }
 
-    init_tracing();
+    let cfg_path = config::default_path()?;
+    let user_config = config::load_or_default(&cfg_path)
+        .with_context(|| format!("loading config from {}", cfg_path.display()))?;
+
+    // The daemon child (marked by --pause-routing-on-exit) runs with stdio
+    // detached, so stdout logging goes nowhere — a crashed daemon used to be
+    // undiagnosable, and `logging.file` was a dead config key (L-H2). Route
+    // its tracing to the configured log file; foreground keeps stdout.
+    let log_file = if args.pause_routing_on_exit {
+        resolved_log_path(&user_config.logging)
+    } else {
+        None
+    };
+    init_tracing(log_file, &user_config.logging.level);
 
     // Refuse to start a second proxy on top of a running one — `bind` below
     // is the real backstop, but this gives a clearer message in the common
@@ -61,10 +79,6 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
             "Burnwall is already running (PID {pid}). Use `burnwall stop` to stop it first."
         );
     }
-
-    let cfg_path = config::default_path()?;
-    let user_config = config::load_or_default(&cfg_path)
-        .with_context(|| format!("loading config from {}", cfg_path.display()))?;
 
     let storage = Arc::new(Storage::open_default().context("opening default storage")?);
 
@@ -117,6 +131,10 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
     budget
         .hydrate_for_date(&storage, &today)
         .context("hydrating today's spend")?;
+    let this_month = chrono::Local::now().format("%Y-%m").to_string();
+    budget
+        .hydrate_for_month(&storage, &this_month)
+        .context("hydrating this month's spend")?;
 
     let port = args.port.unwrap_or(user_config.proxy.port);
     let host_str = args
@@ -172,7 +190,7 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
         upstream_anthropic: args.upstream_anthropic.clone(),
         upstream_openai: args.upstream_openai.clone(),
         upstream_google: args.upstream_google.clone(),
-        http_client: reqwest::Client::new(),
+        http_client: crate::proxy::build_http_client(),
         security,
         budget,
         loop_detector,
@@ -207,7 +225,7 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
 
     let result = serve_with_shutdown(listener, Arc::new(state), daemon::shutdown_signal()).await;
     daemon::remove_pid_file().ok();
-    if !args.no_routing {
+    if !args.no_routing || args.pause_routing_on_exit {
         super::stop::pause_and_report();
     }
     result.context("proxy serve")?;
@@ -268,14 +286,52 @@ pub(crate) fn resume_and_report(proxy_url: &str) {
     }
 }
 
-fn init_tracing() {
+/// Resolve `logging.file` (with `~/` expansion) to a concrete path. Empty
+/// string disables file logging.
+pub(crate) fn resolved_log_path(logging: &crate::config::types::LoggingConfig) -> Option<std::path::PathBuf> {
+    let raw = logging.file.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
+        return dirs::home_dir().map(|h| h.join(rest));
+    }
+    Some(std::path::PathBuf::from(raw))
+}
+
+fn init_tracing(log_file: Option<std::path::PathBuf>, level: &str) {
     use tracing_subscriber::EnvFilter;
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info,hyper=warn,h2=warn")),
-        )
-        .try_init();
+    let filter = || {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            let lvl = if level.trim().is_empty() { "info" } else { level.trim() };
+            EnvFilter::new(format!("{lvl},hyper=warn,h2=warn"))
+        })
+    };
+    if let Some(path) = log_file {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Size cap without a rotation dep: shove an oversized log aside once
+        // at startup so the file can't grow unbounded across months of uptime.
+        const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
+        if std::fs::metadata(&path).map(|m| m.len() > MAX_LOG_BYTES).unwrap_or(false) {
+            let _ = std::fs::rename(&path, path.with_extension("log.old"));
+        }
+        match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(file) => {
+                let _ = tracing_subscriber::fmt()
+                    .with_env_filter(filter())
+                    .with_ansi(false)
+                    .with_writer(std::sync::Arc::new(file))
+                    .try_init();
+                return;
+            }
+            Err(e) => {
+                eprintln!("burnwall: could not open log file {}: {e} — logging to stdout", path.display());
+            }
+        }
+    }
+    let _ = tracing_subscriber::fmt().with_env_filter(filter()).try_init();
 }
 
 /// Apply approved third-party rule packs from `<data dir>/rules/*.toml`. Each

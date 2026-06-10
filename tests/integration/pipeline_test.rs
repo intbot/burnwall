@@ -164,8 +164,8 @@ async fn safe_openai_request_records_cost_with_cache() {
     assert_eq!(rows[0].input_tokens, 512);
     assert_eq!(rows[0].cache_read_tokens, 1536);
     assert_eq!(rows[0].output_tokens, 512);
-    // Cost: 512*1.25 + 1536*0.625 + 512*10.00, all / 1M = $0.00672
-    assert!((rows[0].cost_usd - 0.00672).abs() < 1e-6);
+    // Cost: 512*2.50 + 1536*0.25 + 512*15.00, all / 1M = $0.009344
+    assert!((rows[0].cost_usd - 0.009344).abs() < 1e-6);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -250,6 +250,7 @@ async fn budget_exceeded_returns_429_without_forwarding() {
         monthly_usd: 0.0,
         warn_percent: 80,
         per_session_usd: 0.0,
+        enforce_on_plan: false,
     }));
     budget.record(2.50); // already past the $1 cap
 
@@ -279,16 +280,83 @@ async fn budget_exceeded_returns_429_without_forwarding() {
     assert_eq!(resp.status(), 429);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["error"]["type"], "budget_exceeded");
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("Daily budget"));
+    // W1-7: the block message self-identifies as Burnwall and names the cap.
+    let msg = body["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("Burnwall"), "should self-identify: {msg}");
+    assert!(msg.contains("budget"), "should name the budget: {msg}");
 
     settle().await;
     let rows = storage.requests_for_date(&today()).unwrap();
     assert_eq!(rows.len(), 1);
     assert!(rows[0].blocked);
     assert_eq!(rows[0].block_reason.as_deref(), Some("budget_exceeded"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subscription_traffic_not_blocked_by_dollar_cap() {
+    // B-H4: a subscription request (Anthropic OAuth bearer, no API key) carries
+    // notional dollars — the daily cap must NOT 429 it (it's tracked + warned
+    // instead). The same over-budget tracker blocks a metered API-key request.
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg",
+            "model": "claude-fable-5",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        })))
+        .mount(&mock)
+        .await;
+
+    let budget = Arc::new(BudgetTracker::new(BudgetConfig {
+        daily_usd: 1.0,
+        monthly_usd: 0.0,
+        warn_percent: 80,
+        per_session_usd: 0.0,
+        enforce_on_plan: false, // default: plan traffic isn't dollar-capped
+    }));
+    budget.record(5.00); // well past the $1 cap
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = AppState {
+        upstream_anthropic: mock.uri(),
+        upstream_openai: "http://127.0.0.1:1".to_string(),
+        http_client: reqwest::Client::new(),
+        security: Arc::new(SecurityEngine::with_defaults()),
+        budget,
+        loop_detector: Arc::new(LoopDetector::with_defaults()),
+        storage: storage.clone(),
+        cache_injection: false,
+        upstream_google: "http://127.0.0.1:1".to_string(),
+        resilience: Default::default(),
+        otel: None,
+    };
+    let addr = spawn_proxy(state).await;
+
+    // Subscription bearer → forwarded despite being over the dollar cap.
+    let resp = client()
+        .post(format!("http://{}/anthropic/v1/messages", addr))
+        .header("authorization", "Bearer sk-ant-oat01-fake-oauth-token")
+        .json(&json!({"model": "claude-fable-5"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "subscription traffic must not be dollar-capped by default"
+    );
+    let _ = resp.bytes().await;
+
+    // Metered API key → blocked by the same over-budget tracker.
+    let resp = client()
+        .post(format!("http://{}/anthropic/v1/messages", addr))
+        .header("x-api-key", "sk-ant-api03-fake-metered-key")
+        .json(&json!({"model": "claude-fable-5"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 429, "metered traffic is dollar-capped");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -385,6 +453,7 @@ async fn budget_warning_does_not_block() {
         monthly_usd: 0.0,
         warn_percent: 80,
         per_session_usd: 0.0,
+        enforce_on_plan: false,
     }));
     budget.record(9.50);
 
@@ -426,15 +495,17 @@ async fn loop_detection_blocks_after_threshold_identical_requests() {
         .mount(&mock)
         .await;
 
-    // Detector tuned to block on the 3rd identical request within 60s.
+    // Detector tuned so that once 2 identical requests have *succeeded* (been
+    // recorded by the tee on a 2xx), the next identical request is blocked.
+    // Arrivals are recorded on the response path now (B-C2), so the test
+    // settles between requests to let each recording land before the next peek.
     let detector = Arc::new(burnwall::budget::LoopDetector::new(
         burnwall::budget::LoopConfig {
             enabled: true,
-            max_identical_requests: 3,
+            max_identical_requests: 2,
             window_seconds: 60,
             max_cost_per_window: 0.0, // disable cost-spiral for this test
             cost_spiral_enforce: false,
-            hash_prefix_bytes: 200,
         },
     ));
 
@@ -457,7 +528,8 @@ async fn loop_detection_blocks_after_threshold_identical_requests() {
     let body =
         json!({"model": "claude-haiku-4-5", "messages": [{"role": "user", "content": "hi"}]});
 
-    // First two: forwarded
+    // First two: forwarded. Settle after each so the tee records the arrival
+    // (on the 2xx) before the next request's pre-forward peek.
     for i in 1..=2 {
         let resp = client()
             .post(format!("http://{}/anthropic/v1/messages", addr))
@@ -467,6 +539,7 @@ async fn loop_detection_blocks_after_threshold_identical_requests() {
             .unwrap();
         assert_eq!(resp.status(), 200, "request {} should pass", i);
         let _ = resp.bytes().await; // drain
+        settle().await;
     }
 
     // Third identical: blocked
@@ -505,6 +578,69 @@ async fn loop_detection_blocks_after_threshold_identical_requests() {
     assert!(successful.iter().all(|r| r.request_hash.is_some()));
     // Identical bodies -> identical hashes.
     assert_eq!(successful[0].request_hash, successful[1].request_hash);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accept_encoding_is_not_forwarded_upstream() {
+    // Regression: when the client's `accept-encoding` (Claude Code sends
+    // `gzip, br, zstd`) reached the upstream, the response came back
+    // compressed and the tee couldn't parse usage from it — every successful
+    // request was silently invisible to cost tracking and coverage.
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg",
+            "model": "claude-haiku-4-5",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        })))
+        .mount(&mock)
+        .await;
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = AppState {
+        upstream_anthropic: mock.uri(),
+        upstream_openai: "http://127.0.0.1:1".to_string(),
+        http_client: reqwest::Client::new(),
+        security: Arc::new(SecurityEngine::with_defaults()),
+        budget: Arc::new(BudgetTracker::with_defaults()),
+        loop_detector: Arc::new(LoopDetector::with_defaults()),
+        storage: storage.clone(),
+        cache_injection: false,
+        upstream_google: "http://127.0.0.1:1".to_string(),
+        resilience: Default::default(),
+        otel: None,
+    };
+    let addr = spawn_proxy(state).await;
+
+    let resp = client()
+        .post(format!("http://{}/anthropic/v1/messages", addr))
+        .header("accept-encoding", "gzip, br, zstd")
+        .json(&json!({
+            "model": "claude-haiku-4-5",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let _ = resp.bytes().await;
+
+    settle().await;
+
+    let received = mock.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1);
+    assert!(
+        received[0].headers.get("accept-encoding").is_none(),
+        "accept-encoding must be stripped so the upstream replies in identity encoding"
+    );
+
+    // With a parseable (identity) body, the tee records the request.
+    let rows = storage.requests_for_date(&today()).unwrap();
+    assert_eq!(rows.len(), 1, "the forwarded request must be recorded");
+    assert!(!rows[0].blocked);
+    assert_eq!(rows[0].input_tokens, 10);
+    assert_eq!(rows[0].output_tokens, 5);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -598,7 +734,6 @@ async fn distinct_requests_dont_trip_loop_detector() {
                 window_seconds: 60,
                 max_cost_per_window: 0.0,
                 cost_spiral_enforce: false,
-                hash_prefix_bytes: 200,
             },
         )),
         storage: storage.clone(),
@@ -877,9 +1012,9 @@ async fn gemini_request_records_cost_and_latency() {
     assert_eq!(rows[0].output_tokens, 300); // 200 + 100 thoughts
     assert_eq!(rows[0].http_status, Some(200));
     assert!(rows[0].latency_ms.is_some(), "latency recorded");
-    // gemini-2.5-flash: 512*0.30 + 1536*0.075 + 300*2.50, /1M = 0.0010188
+    // gemini-2.5-flash: 512*0.30 + 1536*0.03 + 300*2.50, /1M = 0.00094968
     assert!(
-        (rows[0].cost_usd - 0.0010188).abs() < 1e-7,
+        (rows[0].cost_usd - 0.00094968).abs() < 1e-7,
         "got {}",
         rows[0].cost_usd
     );
