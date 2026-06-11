@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use burnwall::proxy::{serve, AppState};
+use burnwall::proxy::{AppState, serve};
 use bytes::Bytes;
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -80,7 +80,7 @@ async fn forwards_anthropic_post_with_body_and_auth_header() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn healthz_returns_ok_without_touching_upstream() {
-    // No upstream mock — the test asserts /healthz never reaches a backend.
+    // No upstream mock â€” the test asserts /healthz never reaches a backend.
     // We point both upstreams at an unreachable 127.0.0.1:1 to prove that
     // a successful response only comes from the proxy itself.
     let state = AppState::new(

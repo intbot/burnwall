@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use burnwall::budget::{BudgetTracker, LoopDetector};
-use burnwall::proxy::{serve, AppState};
+use burnwall::proxy::{AppState, serve};
 use burnwall::security::SecurityEngine;
 use burnwall::storage::Storage;
 use serde_json::json;
@@ -52,6 +52,7 @@ fn state_for(upstream: String, storage: Arc<Storage>, client: reqwest::Client) -
         resilience: Default::default(),
         #[cfg(feature = "observe")]
         otel: None,
+        pause_path: None,
     }
 }
 
@@ -116,11 +117,19 @@ async fn sse_split_across_tiny_frames_round_trips_and_records() {
     .await
     .expect("byte-at-a-time stream must not hang");
 
-    assert_eq!(body.as_ref(), SSE.as_bytes(), "stream must round-trip intact");
+    assert_eq!(
+        body.as_ref(),
+        SSE.as_bytes(),
+        "stream must round-trip intact"
+    );
 
     tokio::time::sleep(Duration::from_millis(250)).await;
     let rows = storage.requests_for_date(&today()).unwrap();
-    assert_eq!(rows.len(), 1, "the reassembled stream should record one row");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the reassembled stream should record one row"
+    );
     assert!(rows[0].cost_usd > 0.0, "usage parsed from reassembled body");
     assert_eq!(rows[0].input_tokens, 2000);
     assert_eq!(rows[0].output_tokens, 300);
@@ -246,5 +255,8 @@ async fn client_disconnect_midstream_does_not_hang_the_proxy() {
         let _ = resp.bytes().await;
     })
     .await;
-    assert!(ok.is_ok(), "proxy must stay responsive after a client disconnect");
+    assert!(
+        ok.is_ok(),
+        "proxy must stay responsive after a client disconnect"
+    );
 }

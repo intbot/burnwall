@@ -9,6 +9,7 @@
 #[cfg(feature = "audit")]
 pub mod audit;
 pub mod budget;
+pub mod bypass;
 pub mod cli;
 pub mod config;
 pub mod coverage;

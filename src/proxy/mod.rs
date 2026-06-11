@@ -85,6 +85,12 @@ pub struct AppState {
     /// is off (the default).
     #[cfg(feature = "observe")]
     pub otel: Option<Arc<crate::observe::otel::SpanWriter>>,
+    /// Runtime-pause state file (`~/.burnwall/pause.json`), checked per
+    /// request so `burnwall pause` / `allow-once` flip protection live —
+    /// without a daemon or tool restart. `None` disables the runtime pause
+    /// (the test constructor's default, so a developer's real pause file
+    /// can't leak into test runs).
+    pub pause_path: Option<std::path::PathBuf>,
 }
 
 impl AppState {
@@ -106,6 +112,7 @@ impl AppState {
             resilience: Arc::new(Resilience::default()),
             #[cfg(feature = "observe")]
             otel: None,
+            pause_path: None,
         }
     }
 
@@ -144,7 +151,7 @@ async fn handle_with_panic_catch(
 /// 502 with a clear, opinionated error body the user can act on. Tells them
 /// the kill-switch exists so a runaway crash isn't a dead end.
 fn panic_response() -> Response<ProxyBody> {
-    let body = r#"{"error":{"type":"proxy_error","message":"Burnwall encountered an internal error. Set BURNWALL_BYPASS=1 to relay traffic directly while you investigate."}}"#;
+    let body = r#"{"error":{"type":"proxy_error","message":"Burnwall encountered an internal error. Run `burnwall pause` to relay traffic unchecked while you investigate (auto-resumes), or `burnwall stop` to turn the proxy off."}}"#;
     Response::builder()
         .status(StatusCode::BAD_GATEWAY)
         .header("content-type", "application/json")

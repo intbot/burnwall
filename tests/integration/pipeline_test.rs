@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use burnwall::budget::{BudgetConfig, BudgetTracker, LoopDetector};
 use burnwall::observe::otel::SpanWriter;
 use burnwall::proxy::resilience::Resilience;
-use burnwall::proxy::{serve, AppState};
+use burnwall::proxy::{AppState, serve};
 use burnwall::security::SecurityEngine;
 use burnwall::storage::Storage;
 use serde_json::json;
@@ -69,6 +69,7 @@ async fn safe_anthropic_request_records_cost() {
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let budget = Arc::new(BudgetTracker::with_defaults());
     let state = AppState {
+        pause_path: None,
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -134,6 +135,7 @@ async fn safe_openai_request_records_cost_with_cache() {
 
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
+        pause_path: None,
         upstream_anthropic: "http://127.0.0.1:1".to_string(),
         upstream_openai: mock.uri(),
         http_client: reqwest::Client::new(),
@@ -181,6 +183,7 @@ async fn security_violation_returns_403_and_records_event() {
 
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
+        pause_path: None,
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -215,10 +218,12 @@ async fn security_violation_returns_403_and_records_event() {
     assert_eq!(resp.status(), 403);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["error"]["type"], "security_blocked");
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("Burnwall blocked"));
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Burnwall blocked")
+    );
 
     settle().await;
 
@@ -256,6 +261,7 @@ async fn budget_exceeded_returns_429_without_forwarding() {
 
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
+        pause_path: None,
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -319,6 +325,7 @@ async fn subscription_traffic_not_blocked_by_dollar_cap() {
 
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
+        pause_path: None,
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -388,6 +395,7 @@ data: {\"type\":\"message_stop\"}\n\n";
 
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
+        pause_path: None,
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -458,6 +466,7 @@ async fn budget_warning_does_not_block() {
     budget.record(9.50);
 
     let state = AppState {
+        pause_path: None,
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -511,6 +520,7 @@ async fn loop_detection_blocks_after_threshold_identical_requests() {
 
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
+        pause_path: None,
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -556,10 +566,12 @@ async fn loop_detection_blocks_after_threshold_identical_requests() {
     );
     let body_text: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body_text["error"]["type"], "loop_detected");
-    assert!(body_text["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("loop detected"));
+    assert!(
+        body_text["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("loop detected")
+    );
 
     settle().await;
 
@@ -568,11 +580,13 @@ async fn loop_detection_blocks_after_threshold_identical_requests() {
     assert_eq!(rows.len(), 3, "all 3 requests should be logged");
     let blocked: Vec<_> = rows.iter().filter(|r| r.blocked).collect();
     assert_eq!(blocked.len(), 1, "exactly 1 blocked row");
-    assert!(blocked[0]
-        .block_reason
-        .as_ref()
-        .map(|r| r.contains("loop detected"))
-        .unwrap_or(false));
+    assert!(
+        blocked[0]
+            .block_reason
+            .as_ref()
+            .map(|r| r.contains("loop detected"))
+            .unwrap_or(false)
+    );
     // Successful rows should have request_hash populated.
     let successful: Vec<_> = rows.iter().filter(|r| !r.blocked).collect();
     assert!(successful.iter().all(|r| r.request_hash.is_some()));
@@ -599,6 +613,7 @@ async fn accept_encoding_is_not_forwarded_upstream() {
 
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
+        pause_path: None,
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -655,6 +670,7 @@ async fn security_log_redact_details_strips_rule_from_storage() {
 
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
+        pause_path: None,
         upstream_anthropic: "http://127.0.0.1:1".to_string(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -689,10 +705,12 @@ async fn security_log_redact_details_strips_rule_from_storage() {
     // 403 to the agent is unaffected -- still mentions the rule.
     assert_eq!(resp.status(), 403);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("~/.ssh"));
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("~/.ssh")
+    );
 
     settle().await;
 
@@ -722,6 +740,7 @@ async fn distinct_requests_dont_trip_loop_detector() {
 
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
+        pause_path: None,
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -776,6 +795,7 @@ async fn cache_injection_rewrites_outbound_anthropic_body_when_enabled() {
 
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
+        pause_path: None,
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -827,11 +847,13 @@ async fn cache_injection_rewrites_outbound_anthropic_body_when_enabled() {
         .and_then(|m| m.get("content"))
         .and_then(|c| c.as_array())
         .expect("first message content widened to array");
-    assert!(first_msg_blocks
-        .last()
-        .unwrap()
-        .get("cache_control")
-        .is_some());
+    assert!(
+        first_msg_blocks
+            .last()
+            .unwrap()
+            .get("cache_control")
+            .is_some()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -852,6 +874,7 @@ async fn cache_injection_off_forwards_body_unchanged() {
 
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
+        pause_path: None,
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -906,6 +929,7 @@ async fn utf8_bom_prefixed_body_still_triggers_security_scan() {
 
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
+        pause_path: None,
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -976,6 +1000,7 @@ async fn gemini_request_records_cost_and_latency() {
 
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
+        pause_path: None,
         upstream_anthropic: "http://127.0.0.1:1".to_string(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         upstream_google: mock.uri(),
@@ -1051,6 +1076,7 @@ async fn failover_reroutes_to_healthy_endpoint_on_5xx() {
 
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
+        pause_path: None,
         upstream_anthropic: primary.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         upstream_google: "http://127.0.0.1:1".to_string(),
@@ -1091,6 +1117,7 @@ async fn failover_disabled_forwards_5xx_verbatim() {
 
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
+        pause_path: None,
         upstream_anthropic: primary.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         upstream_google: "http://127.0.0.1:1".to_string(),
@@ -1136,6 +1163,7 @@ async fn otel_span_written_for_forwarded_request() {
 
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
+        pause_path: None,
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         upstream_google: "http://127.0.0.1:1".to_string(),

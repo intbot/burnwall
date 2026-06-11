@@ -24,6 +24,7 @@ pub mod mcp;
 pub mod mcp_watch;
 #[cfg(feature = "observe")]
 pub mod metrics;
+pub mod pause;
 pub mod pricing;
 #[cfg(feature = "observe")]
 pub mod report;
@@ -31,21 +32,21 @@ pub mod report_bug;
 pub mod routing;
 pub mod rules;
 pub mod savings;
-#[cfg(feature = "audit")]
-pub mod share;
-pub mod sidecar;
 pub mod security;
 pub mod self_rollback;
 pub mod service;
+#[cfg(feature = "audit")]
+pub mod share;
+pub mod sidecar;
 pub mod start;
 pub mod status;
 pub mod statusline;
-pub mod upgrade;
 pub mod stop;
 pub mod uninstall;
-pub mod watch;
+pub mod upgrade;
 #[cfg(feature = "waste")]
 pub mod waste;
+pub mod watch;
 
 #[derive(Parser, Debug)]
 #[command(name = "burnwall", version, about)]
@@ -60,6 +61,12 @@ pub enum Command {
     Start(start::StartArgs),
     /// Stop the running Burnwall proxy.
     Stop(stop::StopArgs),
+    /// Pause ALL protection for a short window (relay unchecked) — auto-resumes.
+    Pause(pause::PauseArgs),
+    /// Resume protection immediately (clears a pause or an armed allow-once).
+    Resume,
+    /// Let just the NEXT request through unchecked, then auto-restore.
+    AllowOnce,
     /// Show today's spend summary.
     Status(status::StatusArgs),
     /// Show per-day totals over the last N days.
@@ -138,6 +145,9 @@ impl Cli {
         match self.command {
             Command::Start(args) => start::run_cmd(args).await,
             Command::Stop(args) => stop::run_cmd(args),
+            Command::Pause(args) => pause::run_pause(args),
+            Command::Resume => pause::run_resume(),
+            Command::AllowOnce => pause::run_allow_once(),
             Command::Status(args) => status::run_cmd(args),
             Command::History(args) => history::run_cmd(args),
             Command::Config(args) => config_cmd::run_cmd(args),

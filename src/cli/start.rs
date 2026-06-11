@@ -11,7 +11,7 @@ use clap::Args;
 use super::daemon;
 use crate::budget::{BudgetTracker, LoopDetector};
 use crate::config;
-use crate::proxy::{serve_with_shutdown, AppState};
+use crate::proxy::{AppState, serve_with_shutdown};
 use crate::security::SecurityEngine;
 use crate::storage::Storage;
 
@@ -199,6 +199,9 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
         resilience,
         #[cfg(feature = "observe")]
         otel,
+        // Live escape hatch: `burnwall pause` / `allow-once` write this file;
+        // the handler checks it per request. Resolved once, here.
+        pause_path: crate::bypass::default_path(),
     };
 
     let host: IpAddr = host_str
@@ -288,7 +291,9 @@ pub(crate) fn resume_and_report(proxy_url: &str) {
 
 /// Resolve `logging.file` (with `~/` expansion) to a concrete path. Empty
 /// string disables file logging.
-pub(crate) fn resolved_log_path(logging: &crate::config::types::LoggingConfig) -> Option<std::path::PathBuf> {
+pub(crate) fn resolved_log_path(
+    logging: &crate::config::types::LoggingConfig,
+) -> Option<std::path::PathBuf> {
     let raw = logging.file.trim();
     if raw.is_empty() {
         return None;
@@ -303,7 +308,11 @@ fn init_tracing(log_file: Option<std::path::PathBuf>, level: &str) {
     use tracing_subscriber::EnvFilter;
     let filter = || {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            let lvl = if level.trim().is_empty() { "info" } else { level.trim() };
+            let lvl = if level.trim().is_empty() {
+                "info"
+            } else {
+                level.trim()
+            };
             EnvFilter::new(format!("{lvl},hyper=warn,h2=warn"))
         })
     };
@@ -314,10 +323,17 @@ fn init_tracing(log_file: Option<std::path::PathBuf>, level: &str) {
         // Size cap without a rotation dep: shove an oversized log aside once
         // at startup so the file can't grow unbounded across months of uptime.
         const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
-        if std::fs::metadata(&path).map(|m| m.len() > MAX_LOG_BYTES).unwrap_or(false) {
+        if std::fs::metadata(&path)
+            .map(|m| m.len() > MAX_LOG_BYTES)
+            .unwrap_or(false)
+        {
             let _ = std::fs::rename(&path, path.with_extension("log.old"));
         }
-        match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
             Ok(file) => {
                 let _ = tracing_subscriber::fmt()
                     .with_env_filter(filter())
@@ -327,11 +343,16 @@ fn init_tracing(log_file: Option<std::path::PathBuf>, level: &str) {
                 return;
             }
             Err(e) => {
-                eprintln!("burnwall: could not open log file {}: {e} — logging to stdout", path.display());
+                eprintln!(
+                    "burnwall: could not open log file {}: {e} — logging to stdout",
+                    path.display()
+                );
             }
         }
     }
-    let _ = tracing_subscriber::fmt().with_env_filter(filter()).try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter())
+        .try_init();
 }
 
 /// Apply approved third-party rule packs from `<data dir>/rules/*.toml`. Each
@@ -391,7 +412,10 @@ fn print_banner(
         "{}",
         sty.cyan(&sty.bold(&format!("🛡️  Burnwall v{}", env!("CARGO_PKG_VERSION"))))
     );
-    println!("   Proxy:    {}", sty.green(&format!("http://{}:{}", host, port)));
+    println!(
+        "   Proxy:    {}",
+        sty.green(&format!("http://{}:{}", host, port))
+    );
     println!("   Routes:");
     println!("     /anthropic/* → {}", args.upstream_anthropic);
     println!("     /openai/*    → {}", args.upstream_openai);

@@ -14,7 +14,7 @@ use tracing::warn;
 use crate::budget::BudgetStatus;
 use crate::storage::{RequestRecord, SecurityEvent};
 
-use super::{cache_injection, forwarding, streaming, AppState, ProxyBody};
+use super::{AppState, ProxyBody, cache_injection, forwarding, streaming};
 
 pub async fn handle(
     req: Request<Incoming>,
@@ -37,6 +37,33 @@ pub async fn handle(
     // restart the AI tool, traffic flows through unmodified.
     if bypass_active() {
         return Ok(passthrough(req, &state).await);
+    }
+
+    // ─── runtime pause (file-based, flips live) ───
+    // `burnwall pause` / `burnwall allow-once` write a small auto-expiring
+    // state file the proxy checks here, per request — the escape hatch that
+    // actually works on a running daemon (the env var above is frozen at
+    // daemon spawn). Cost on the fast path: one stat() of an absent file.
+    if let Some(pause_path) = state.pause_path.as_deref() {
+        let now = chrono::Utc::now().timestamp();
+        match crate::bypass::read_at(pause_path, now) {
+            crate::bypass::Bypass::Paused { resumes_in_secs } => {
+                tracing::debug!(
+                    "⏸ protection paused — relaying unchecked ({}s left)",
+                    resumes_in_secs
+                );
+                return Ok(passthrough(req, &state).await);
+            }
+            crate::bypass::Bypass::AllowOnce { .. } => {
+                // The file delete is the atomic claim — exactly one request
+                // gets through unchecked, concurrent losers stay protected.
+                if crate::bypass::consume_allow_once_at(pause_path) {
+                    warn!("⏸ allow-once consumed — relaying this one request unchecked");
+                    return Ok(passthrough(req, &state).await);
+                }
+            }
+            crate::bypass::Bypass::None => {}
+        }
     }
 
     // ─── route ───
@@ -137,7 +164,9 @@ pub async fn handle(
             tracing::error!("blocked-request insert failed: {}", e);
         }
 
-        let what = format!("{} ({}).", violation.message(), violation.location.describe());
+        // Self-explaining block: which tool tripped which rule (with a masked
+        // preview for secret/DLP hits) and *why* — not a bare category label.
+        let what = violation.block_explanation();
         return Ok(block::build(
             provider,
             "security_blocked",
@@ -222,8 +251,12 @@ pub async fn handle(
         if let BudgetStatus::Exceeded { spent, limit } = state.budget.check_session(sid) {
             if enforce_dollar_cap {
                 warn!("💰 SESSION BUDGET EXCEEDED: ${:.2}/${:.2}", spent, limit);
-                let record =
-                    RequestRecord::blocked(provider, &model, "session_budget_exceeded", Some(sid.clone()));
+                let record = RequestRecord::blocked(
+                    provider,
+                    &model,
+                    "session_budget_exceeded",
+                    Some(sid.clone()),
+                );
                 if let Err(e) = state.storage.insert_request(&record) {
                     tracing::error!("blocked-request insert failed: {}", e);
                 }
@@ -254,9 +287,10 @@ pub async fn handle(
     // otherwise collide into one bucket. `should_track` gates both the
     // pre-forward peek and the on-2xx arrival recording.
     let should_track_loop = parts.method != hyper::Method::GET && !body_bytes.is_empty();
-    let request_hash = state
-        .loop_detector
-        .hash(parts.method.as_str(), provider, &rest, &body_bytes);
+    let request_hash =
+        state
+            .loop_detector
+            .hash(parts.method.as_str(), provider, &rest, &body_bytes);
     let request_hash_hex = format!("{:016x}", request_hash);
     if should_track_loop {
         // Read-only peek — the arrival is recorded later by the tee, and only
@@ -441,8 +475,8 @@ fn auth_kind(headers: &hyper::HeaderMap, provider: &str) -> AuthKind {
 /// Self-identifying, actionable block responses (W1-7). Every block Burnwall
 /// imposes tells the user: (1) that *Burnwall* did it, before the request left
 /// the machine; (2) what matched and where; (3) how to proceed if it's a false
-/// positive, escalating inspect → narrow → bypass → pause; and (4) how to
-/// report it. Limit blocks also carry a `Retry-After`. The JSON envelope
+/// positive, escalating inspect → allow-once → narrow → pause → stop; and
+/// (4) how to report it. Limit blocks also carry a `Retry-After`. The JSON envelope
 /// matches the upstream provider's error shape (P-M2) so the AI tool renders a
 /// clean error instead of a raw blob.
 pub(crate) mod block {
@@ -450,34 +484,40 @@ pub(crate) mod block {
     use hyper::{Response, StatusCode};
     use serde_json::json;
 
-    use crate::proxy::{streaming, ProxyBody};
+    use crate::proxy::{ProxyBody, streaming};
 
+    // The escape-hatch lines point at `burnwall allow-once` / `burnwall pause`
+    // — runtime toggles the daemon picks up live. (The old advice, "set
+    // BURNWALL_BYPASS=1 and restart your AI tool", set the var in the tool's
+    // shell where the daemon never saw it: on a backgrounded daemon it did
+    // nothing, and it cost the user their agent session to find out.)
     pub const SECURITY_REMEDIES: &[&str] = &[
         "See exactly what was caught:  burnwall security",
+        "False positive? Let just the next request through, then auto-restore:  burnwall allow-once",
         "If it's wrong, adjust the rule in ~/.burnwall/config.toml (security.deny_paths / deny_commands), or disable a pack:  burnwall rules disable <pack>",
-        "Bypass Burnwall for this session — UNPROTECTED:  set BURNWALL_BYPASS=1 and restart your AI tool",
+        "Pause all protection briefly — UNPROTECTED:  burnwall pause   (auto-resumes in 5m; restore early with: burnwall resume)",
         "Turn Burnwall off entirely — UNPROTECTED:  burnwall stop",
     ];
     pub const BUDGET_REMEDIES: &[&str] = &[
         "See today's spend:  burnwall status",
         "Raise or remove the cap:  burnwall config set budget.daily <usd>   (0 = unlimited)",
         "On a flat-rate plan? The dollar cap is notional — plan traffic isn't blocked by default (budget.enforce_on_plan).",
-        "Bypass for this session — UNPROTECTED:  set BURNWALL_BYPASS=1 and restart your AI tool",
+        "Pause all protection briefly — UNPROTECTED:  burnwall pause   (auto-resumes in 5m)",
     ];
     pub const SESSION_REMEDIES: &[&str] = &[
         "Raise or turn off the per-session cap:  burnwall config set budget.per_session <usd>   (0 = off)",
-        "Bypass for this session — UNPROTECTED:  set BURNWALL_BYPASS=1 and restart your AI tool",
+        "Pause all protection briefly — UNPROTECTED:  burnwall pause   (auto-resumes in 5m)",
     ];
     pub const LOOP_REMEDIES: &[&str] = &[
         "This clears on its own once the retry window drains — usually a client resending an identical request.",
         "Tune the threshold:  burnwall config set loop_detection.max_identical_requests <n>",
         "Disable loop detection:  burnwall config set loop_detection.enabled false",
-        "Bypass for this session — UNPROTECTED:  set BURNWALL_BYPASS=1 and restart your AI tool",
+        "Pause all protection briefly — UNPROTECTED:  burnwall pause   (auto-resumes in 5m)",
     ];
     pub const COST_SPIRAL_REMEDIES: &[&str] = &[
         "Raise the window cap:  burnwall config set loop_detection.max_cost_per_window <usd>",
         "Disable spiral blocking:  burnwall config set loop_detection.cost_spiral_enforce false",
-        "Bypass for this session — UNPROTECTED:  set BURNWALL_BYPASS=1 and restart your AI tool",
+        "Pause all protection briefly — UNPROTECTED:  burnwall pause   (auto-resumes in 5m)",
     ];
 
     /// Seconds until the next local midnight — the daily budget reset time.
@@ -500,7 +540,9 @@ pub(crate) mod block {
                 m.push_str(r);
             }
         }
-        m.push_str("\n\nReport a false positive (nothing leaves your machine):  burnwall report-bug");
+        m.push_str(
+            "\n\nReport a false positive (nothing leaves your machine):  burnwall report-bug",
+        );
         m
     }
 
@@ -529,8 +571,9 @@ pub(crate) mod block {
             }
             _ => json!({"error": {"message": msg, "type": kind, "code": kind}}),
         };
-        let body = serde_json::to_string(&value)
-            .unwrap_or_else(|_| r#"{"error":{"message":"Burnwall blocked this request."}}"#.to_string());
+        let body = serde_json::to_string(&value).unwrap_or_else(|_| {
+            r#"{"error":{"message":"Burnwall blocked this request."}}"#.to_string()
+        });
 
         let mut builder = Response::builder()
             .status(status)
@@ -579,7 +622,10 @@ pub fn session_from_headers(headers: &hyper::HeaderMap) -> Option<String> {
 
 fn bypass_active() -> bool {
     match std::env::var("BURNWALL_BYPASS") {
-        Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
         Err(_) => false,
     }
 }
@@ -587,20 +633,27 @@ fn bypass_active() -> bool {
 /// Pure-relay path used only when [`bypass_active`] is true. Routes by URL
 /// prefix, forwards the request as-is to the upstream, streams the response
 /// back. No security scan, no storage, no parsing.
-async fn passthrough(
-    req: Request<Incoming>,
-    state: &Arc<AppState>,
-) -> Response<ProxyBody> {
+async fn passthrough(req: Request<Incoming>, state: &Arc<AppState>) -> Response<ProxyBody> {
     let path = req.uri().path().to_string();
-    let routed: Option<(String, String)> = if path == "/anthropic" || path.starts_with("/anthropic/") {
-        Some((state.upstream_anthropic.clone(), path["/anthropic".len()..].to_string()))
-    } else if path == "/openai" || path.starts_with("/openai/") {
-        Some((state.upstream_openai.clone(), path["/openai".len()..].to_string()))
-    } else if path == "/google" || path.starts_with("/google/") {
-        Some((state.upstream_google.clone(), path["/google".len()..].to_string()))
-    } else {
-        None
-    };
+    let routed: Option<(String, String)> =
+        if path == "/anthropic" || path.starts_with("/anthropic/") {
+            Some((
+                state.upstream_anthropic.clone(),
+                path["/anthropic".len()..].to_string(),
+            ))
+        } else if path == "/openai" || path.starts_with("/openai/") {
+            Some((
+                state.upstream_openai.clone(),
+                path["/openai".len()..].to_string(),
+            ))
+        } else if path == "/google" || path.starts_with("/google/") {
+            Some((
+                state.upstream_google.clone(),
+                path["/google".len()..].to_string(),
+            ))
+        } else {
+            None
+        };
     let (upstream_base, rest) = match routed {
         Some(r) => r,
         None => {
@@ -627,10 +680,22 @@ async fn passthrough(
             );
         }
     };
-    match forwarding::passthrough(parts.method, &upstream_base, &path_and_query, parts.headers, body_bytes, state).await {
+    match forwarding::passthrough(
+        parts.method,
+        &upstream_base,
+        &path_and_query,
+        parts.headers,
+        body_bytes,
+        state,
+    )
+    .await
+    {
         Ok(resp) => resp,
         Err(e) => {
-            warn!("bypass upstream error for {}{}: {}", upstream_base, path_and_query, e);
+            warn!(
+                "bypass upstream error for {}{}: {}",
+                upstream_base, path_and_query, e
+            );
             error_response(
                 StatusCode::BAD_GATEWAY,
                 "proxy_error",
