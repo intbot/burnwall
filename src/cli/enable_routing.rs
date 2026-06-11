@@ -195,7 +195,7 @@ pub async fn run_cmd(args: EnableRoutingArgs) -> Result<()> {
         writeln!(
             out,
             "   Kill switch (instant bypass without disabling):  {}",
-            sty.yellow("BURNWALL_BYPASS=1")
+            sty.yellow("burnwall pause")
         )?;
         writeln!(
             out,

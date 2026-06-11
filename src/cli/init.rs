@@ -599,7 +599,7 @@ pub fn run_cmd(args: InitArgs) -> anyhow::Result<()> {
         }
         writeln!(
             out,
-            "   • Kill switch (instant bypass):  export BURNWALL_BYPASS=1"
+            "   • Kill switch (pauses the running proxy):  burnwall pause   (auto-resumes in 5m)"
         )?;
     } else {
         writeln!(out, "   • Re-run with --apply to execute.")?;

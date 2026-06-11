@@ -53,9 +53,11 @@ A proxy that terminates or weakens TLS would be a liability. Burnwall does not:
 
 ## Kill switch
 
-If anything ever misbehaves, `BURNWALL_BYPASS=1` turns the proxy into a pure
-relay (no scanning, no budget checks, no storage) for the current session, and
-`burnwall self-rollback <version>` reinstalls a prior release.
+If anything ever misbehaves, `burnwall pause` flips the *running* proxy into a
+pure relay (no scanning, no budget checks, no storage) and auto-restores after
+5 minutes — `burnwall resume` restores it early, and `burnwall allow-once`
+relays just the next request. `burnwall self-rollback <version>` reinstalls a
+prior release.
 
 ## Scope
 
