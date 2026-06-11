@@ -2,6 +2,49 @@
 
 All notable changes to Burnwall.
 
+## [0.9.15] — 2026-06-10
+
+A follow-up from live dogfooding: kill a false-positive class that could wedge a
+whole session, make every block explain itself, give false positives a live
+escape hatch, and stop surfaces from showing stale numbers when the proxy is
+down.
+
+### Added
+- **`burnwall pause` / `resume` / `allow-once` — a live escape hatch.** After a
+  block you believe is a false positive, `burnwall allow-once` lets exactly the
+  next request through (then protection restores itself), and `burnwall pause
+  [5m]` relays everything unchecked for a bounded window — both take effect on
+  the running proxy with no daemon or AI-tool restart, so the agent's session
+  survives. Pauses auto-expire (default 5 minutes, capped at 24 hours), an
+  unused allow-once expires after 10 minutes, and every status surface shows a
+  loud `⏸ PAUSED` warning with a countdown for the whole window. Block messages
+  now point at these toggles; the previous advice (an environment variable plus
+  a tool restart) never reached a backgrounded daemon and has been removed.
+
+### Fixed
+- **A secret-shaped token in conversation history no longer blocks the session.**
+  Security data checks (credentials, cards, SSNs) now run only inside tool-call
+  arguments — the agent *action* — never on prose or resent conversation history.
+  Clients resend the full conversation every turn, so a key-shaped string merely
+  *quoted or discussed* (e.g. an example key in a summary) used to 403 every
+  request until the session was abandoned. The exfiltration vector that matters —
+  a credential leaving the machine inside a tool call — stays fully covered.
+- **Subscribers no longer see a notional dollar figure where a plan reading
+  belongs.** When the latest plan reading is stale (idle, or the proxy was briefly
+  down), the status line keeps showing last-known plan headroom — marked stale —
+  instead of falling back to a session-cost figure that reads as real money. The
+  `status` command frames a subscriber's spend as notional, not a budget breach.
+
+### Changed
+- **Blocks now explain themselves.** A security block names the tool that tripped
+  it, shows a masked, recognisable preview of what matched (e.g. `AKIA…LKEY`) for
+  credential/PII hits — the raw value is never echoed or logged — and states why
+  that class is blocked, instead of a bare category label.
+- **A down proxy now looks down.** When routing points at a dead proxy, status
+  surfaces drop the cost, plan, today, and block-count segments (all stale with no
+  capture happening) and show only the loud "proxy down" warning alongside the
+  tool-reported token and context gauges.
+
 ## [0.9.14] — 2026-06-10
 
 A real-world robustness pass driven by dogfooding: a multi-agent review of

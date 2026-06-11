@@ -204,6 +204,23 @@ When a rule triggers:
    Request returned 403 — file was never accessed.
 ```
 
+### False positives
+
+Every block explains what matched and why, and points at the escape hatches —
+all of which take effect on the **running** proxy, with no restart of the proxy
+or your AI tool (your agent session survives):
+
+```bash
+burnwall allow-once    # let just the NEXT request through, then auto-restore
+burnwall pause 5m      # relay everything unchecked for a bounded window
+burnwall resume        # restore protection early
+burnwall report-bug    # write a sanitized local report (nothing is sent)
+```
+
+Pauses auto-expire (default 5 minutes, capped at 24 hours) and every status
+surface shows a loud `⏸ PAUSED` warning for the whole window — the escape
+hatch can't silently outlive the emergency.
+
 ## Cost Output
 
 ```

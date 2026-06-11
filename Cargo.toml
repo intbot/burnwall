@@ -1,6 +1,6 @@
 [package]
 name = "burnwall"
-version = "0.9.14"
+version = "0.9.15"
 edition = "2024"
 rust-version = "1.87"
 description = "Local proxy for AI coding tools (Claude Code, Codex CLI, Aider): cache-aware cost tracking, path/command security checks, daily budget enforcement. Zero telemetry."
@@ -107,6 +107,12 @@ predicates = "3"                     # Assertion helpers
 [[test]]
 name = "proxy_test"
 path = "tests/integration/proxy_test.rs"
+
+# Own binary (= own process): proxy_test flips the process-global
+# BURNWALL_BYPASS env var, which would race the pause/allow-once assertions.
+[[test]]
+name = "pause_test"
+path = "tests/integration/pause_test.rs"
 
 [[test]]
 name = "parser_test"
