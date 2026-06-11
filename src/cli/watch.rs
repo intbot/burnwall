@@ -123,10 +123,10 @@ fn render_frame_with_plan(
 
 /// Subscription headroom from the freshest proxy-captured snapshot — the
 /// universal surface for CLIs without their own status bar (run `watch` in a
-/// side pane).
+/// side pane). A known subscriber stays in plan mode even on a stale or
+/// window-expired reading; see [`crate::plan::ribbon_limits`].
 fn live_plan() -> Option<ribbon::PlanLimits> {
-    let now = chrono::Utc::now().timestamp();
-    crate::plan::freshest(now, 12 * 3600).and_then(|s| s.to_ribbon_limits(now))
+    crate::plan::ribbon_limits(chrono::Utc::now().timestamp())
 }
 
 /// Build the cross-tool ribbon from the proxy database. The originating tool
@@ -141,10 +141,7 @@ fn ribbon_from_db(db: &Storage) -> Ribbon {
 fn ribbon_with_plan(db: &Storage, plan: Option<ribbon::PlanLimits>) -> Ribbon {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let today_usd = db.total_cost_for_date(&today).unwrap_or(0.0);
-    let blocks = db
-        .security_event_count_for_date(&today)
-        .unwrap_or(0)
-        .max(0) as u64;
+    let blocks = db.security_event_count_for_date(&today).unwrap_or(0).max(0) as u64;
 
     let last = db.most_recent_request().ok().flatten();
     let (model, up, down, msg_usd, ctx) = match last {

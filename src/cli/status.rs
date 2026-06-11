@@ -111,7 +111,13 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
                 writeln!(out)?;
                 writeln!(out, "   By session (x-burnwall-session):")?;
                 for (sid, cost, n) in sessions.iter().take(8) {
-                    writeln!(out, "     {:<28} ${:.2}  ({} req)", truncate(sid, 28), cost, n)?;
+                    writeln!(
+                        out,
+                        "     {:<28} ${:.2}  ({} req)",
+                        truncate(sid, 28),
+                        cost,
+                        n
+                    )?;
                 }
             }
         }
@@ -121,13 +127,40 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
         // anything?" (a common reason such tools get distrusted / disabled).
         let sty = Styler::stdout();
         writeln!(out)?;
-        match super::daemon::running_pid().ok().flatten() {
-            Some(pid) => writeln!(
+        let pause = crate::bypass::read(chrono::Utc::now().timestamp());
+        match (super::daemon::running_pid().ok().flatten(), pause) {
+            // A pause overrides the green heartbeat: a paused proxy *looks*
+            // protective (process up, port answering) while checking nothing.
+            (Some(pid), crate::bypass::Bypass::Paused { resumes_in_secs }) => {
+                writeln!(
+                    out,
+                    "   {} proxy (pid {pid}) is relaying ALL traffic unchecked.",
+                    sty.yellow("⏸  Protection PAUSED —")
+                )?;
+                writeln!(
+                    out,
+                    "      Auto-resumes in {}. Resume now:  burnwall resume",
+                    crate::ribbon::human_duration(resumes_in_secs)
+                )?;
+            }
+            (Some(pid), crate::bypass::Bypass::AllowOnce { .. }) => {
+                writeln!(
+                    out,
+                    "   {} the next request relays unchecked (then protection restores). Disarm:  burnwall resume",
+                    sty.yellow("⏸  Allow-once armed —")
+                )?;
+                writeln!(
+                    out,
+                    "   {} proxy running (pid {pid}).",
+                    sty.green("🟢 Protection active —")
+                )?;
+            }
+            (Some(pid), crate::bypass::Bypass::None) => writeln!(
                 out,
                 "   {} proxy running (pid {pid}); every request is scanned.",
                 sty.green("🟢 Protection active —")
             )?,
-            None => writeln!(
+            (None, _) => writeln!(
                 out,
                 "   {} start it with `burnwall start` (rules apply only while it runs).",
                 sty.yellow("⚪ Proxy not running —")
@@ -211,7 +244,7 @@ fn combined_today(
 /// launch here actually pointed at the proxy? Catches the "proxy up but traffic
 /// goes direct" gap that leaves a user unprotected without any error.
 fn write_routing(w: &mut impl Write, sty: &Styler) -> std::io::Result<()> {
-    use crate::cli::routing::{current_routing, EnvRouting};
+    use crate::cli::routing::{EnvRouting, current_routing};
     match current_routing("anthropic") {
         EnvRouting::Proxied => {
             // Routed per the env — but cross-check the proxy is actually
@@ -374,14 +407,31 @@ fn write_table(
                     combined
                 )?;
             } else {
-                writeln!(w, "   Combined today (proxied + log files): ${:.2}", combined)?;
+                writeln!(
+                    w,
+                    "   Combined today (proxied + log files): ${:.2}",
+                    combined
+                )?;
             }
         }
         writeln!(w)?;
     }
 
     let bcfg = budget.config();
-    if bcfg.daily_usd > 0.0 {
+    // A subscriber's dollar figure is notional (what metered API would have
+    // cost), and on a flat-rate plan the cap isn't enforced — so framing today's
+    // notional spend as a "$60 / $50 (120%)" budget breach is misleading. Show
+    // it as notional spend instead, unless they've opted into enforcing the cap
+    // on plan traffic. (`freshest_any` is `Some` once any plan window was ever
+    // captured — the subscription discriminator.)
+    let subscriber = crate::plan::freshest_any().is_some();
+    if subscriber && !bcfg.enforce_on_plan {
+        writeln!(
+            w,
+            "   💰 Notional spend today: ${:.2}  (flat-rate subscription — not billed; the daily cap isn't enforced on plan traffic)",
+            today_cost
+        )?;
+    } else if bcfg.daily_usd > 0.0 {
         let pct = (today_cost / bcfg.daily_usd) * 100.0;
         writeln!(
             w,
@@ -558,6 +608,14 @@ fn write_json(
     // proxy is dead" (U-C1) instead of showing green over connection-refused.
     let proxy_running = super::daemon::running_pid().ok().flatten().is_some();
 
+    // Runtime pause (`burnwall pause`): the editor extension must be able to
+    // warn that a green-looking proxy is currently checking nothing.
+    let (protection_paused, pause_resumes_in_secs) =
+        match crate::bypass::read(chrono::Utc::now().timestamp()) {
+            crate::bypass::Bypass::Paused { resumes_in_secs } => (true, Some(resumes_in_secs)),
+            _ => (false, None),
+        };
+
     // De-duplicated cross-tool total (X4): excludes log rows of tools whose
     // provider flowed through the proxy today, so proxied Claude Code isn't
     // counted twice in the headline figure.
@@ -572,6 +630,8 @@ fn write_json(
         "date": date,
         "env_routing": env_routing,
         "proxy_running": proxy_running,
+        "protection_paused": protection_paused,
+        "pause_resumes_in_secs": pause_resumes_in_secs,
         "total_cost_usd": today_cost,
         "total_requests": total_requests,
         "blocked_requests": blocked,

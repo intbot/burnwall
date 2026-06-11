@@ -53,6 +53,10 @@ pub enum Routing {
     /// from this environment will fail with connection-refused. The loudest
     /// warning of all: the user's tool is actively broken (U-C1).
     ProxyDown,
+    /// Protection paused via `burnwall pause` — the proxy relays everything
+    /// unchecked until the window ends. Loud and countdown-bearing so a pause
+    /// is impossible to forget.
+    Paused { resumes_in_secs: i64 },
     /// The surface has no environment context to judge routing. Renders nothing.
     Unknown,
 }
@@ -73,6 +77,12 @@ pub struct PlanLimits {
     pub secondary: Option<(String, f64)>,
     /// The provider reports the plan as currently throttled.
     pub throttled: bool,
+    /// The reading is stale (no fresh request recently — idle, or the proxy was
+    /// briefly down). Rendered as last-known headroom with a `~` marker and an
+    /// `idle` chip, no live countdown. We still show it (rather than dropping to
+    /// a notional dollar figure) so a subscriber always sees "subscription",
+    /// never a scary-looking `$ sess` that isn't real money.
+    pub stale: bool,
 }
 
 /// All the data the ribbon can display. Surfaces fill what they know; the
@@ -119,7 +129,11 @@ impl Ribbon {
         // impossible to miss. Shown only when something is wrong.
         match self.routing {
             Routing::Direct => {
-                let _ = write!(s, " · {}", warn_segment("⚠ DIRECT (unprotected)", color, Hue::Red));
+                let _ = write!(
+                    s,
+                    " · {}",
+                    warn_segment("⚠ DIRECT (unprotected)", color, Hue::Red)
+                );
             }
             Routing::Bypassed => {
                 let _ = write!(s, " · {}", warn_segment("⚠ bypass", color, Hue::Yellow));
@@ -131,52 +145,85 @@ impl Ribbon {
                     warn_segment("⛔ PROXY DOWN — run `burnwall start`", color, Hue::Red)
                 );
             }
+            Routing::Paused { resumes_in_secs } => {
+                let _ = write!(
+                    s,
+                    " · {}",
+                    warn_segment(
+                        &format!(
+                            "⏸ PAUSED (unprotected) — resumes in {}",
+                            human_duration(resumes_in_secs)
+                        ),
+                        color,
+                        Hue::Yellow
+                    )
+                );
+            }
             Routing::Proxied | Routing::Unknown => {}
         }
         let _ = write!(s, " · ↑{} ↓{}", human_k(self.up), human_k(self.down));
-        // Subscription mode replaces the (notional) dollar cost with real plan
-        // headroom; otherwise show the dollar cost + today's spend.
-        match &self.plan {
-            Some(p) => {
-                let _ = write!(
-                    s,
-                    " · {} {} {}",
-                    p.primary_label,
-                    bar(p.primary_pct, color),
-                    pct_label(p.primary_pct, color)
-                );
-                if let Some(secs) = p.primary_reset_in {
-                    let _ = write!(s, " ({})", human_duration(secs));
+        // When the proxy is down, nothing is being captured — so cost, plan
+        // headroom, today's spend, and the block count would all be stale.
+        // Showing them next to a "PROXY DOWN" warning whispers "all fine" while
+        // shouting "broken". Suppress them: a broken state should *look* broken.
+        // The token (↑↓) and context segments stay — those come from the tool's
+        // own stdin, not the proxy, so they remain true.
+        if self.routing != Routing::ProxyDown {
+            // Subscription mode replaces the (notional) dollar cost with real plan
+            // headroom; otherwise show the dollar cost + today's spend.
+            match &self.plan {
+                Some(p) => {
+                    // A `~` before the percent marks a stale (last-known) reading.
+                    let tilde = if p.stale { "~" } else { "" };
+                    let _ = write!(
+                        s,
+                        " · {} {} {}{}",
+                        p.primary_label,
+                        bar(p.primary_pct, color),
+                        tilde,
+                        pct_label(p.primary_pct, color)
+                    );
+                    // Live countdown only on a fresh reading — a stale one's reset
+                    // time is meaningless (it likely already passed).
+                    if !p.stale {
+                        if let Some(secs) = p.primary_reset_in {
+                            let _ = write!(s, " ({})", human_duration(secs));
+                        }
+                    }
+                    if let Some((label, pct)) = &p.secondary {
+                        let _ = write!(s, " · {} {}{}", label, tilde, pct_label(*pct, color));
+                    }
+                    if p.stale {
+                        // Distinguishes "subscription, no fresh reading" from a live
+                        // throttle — and keeps the segment unmistakably plan-mode.
+                        let _ = write!(s, " · ⏸ idle");
+                    } else if p.throttled {
+                        let _ = write!(s, " · ⛔ throttled");
+                    }
                 }
-                if let Some((label, pct)) = &p.secondary {
-                    let _ = write!(s, " · {} {}", label, pct_label(*pct, color));
-                }
-                if p.throttled {
-                    let _ = write!(s, " · ⛔ throttled");
+                None => {
+                    // Cost segment: show msg (per-turn) and/or sess, whichever are known.
+                    match (self.msg_usd, self.sess_usd) {
+                        (Some(m), Some(sess)) => {
+                            let _ = write!(s, " · ${:.2} msg ${:.2} sess", m, sess);
+                        }
+                        (Some(m), None) => {
+                            let _ = write!(s, " · ${:.2} msg", m);
+                        }
+                        (None, Some(sess)) => {
+                            let _ = write!(s, " · ${:.2} sess", sess);
+                        }
+                        (None, None) => {}
+                    }
+                    if let Some(today) = self.today_usd {
+                        let _ = write!(s, " · ${today:.2} today");
+                    }
                 }
             }
-            None => {
-                // Cost segment: show msg (per-turn) and/or sess, whichever are known.
-                match (self.msg_usd, self.sess_usd) {
-                    (Some(m), Some(sess)) => {
-                        let _ = write!(s, " · ${:.2} msg ${:.2} sess", m, sess);
-                    }
-                    (Some(m), None) => {
-                        let _ = write!(s, " · ${:.2} msg", m);
-                    }
-                    (None, Some(sess)) => {
-                        let _ = write!(s, " · ${:.2} sess", sess);
-                    }
-                    (None, None) => {}
-                }
-                if let Some(today) = self.today_usd {
-                    let _ = write!(s, " · ${today:.2} today");
-                }
+            if self.blocks_today > 0 {
+                let _ = write!(s, " · 🛡{}", self.blocks_today);
             }
-        }
-        if self.blocks_today > 0 {
-            let _ = write!(s, " · 🛡{}", self.blocks_today);
-        }
+        } // end: proxy-up capture metrics (suppressed when PROXY DOWN)
         match self.ctx {
             Ctx::Exact(p) => {
                 let _ = write!(s, " · ctx {} {}", bar(p, color), pct_label(p, color));
@@ -494,6 +541,7 @@ mod tests {
             primary_reset_in: Some(2 * 3600 + 28 * 60),
             secondary: Some(("7d".to_string(), 10.0)),
             throttled: false,
+            stale: false,
         });
         let s = r.render(false);
         // Limit headroom shown; notional dollars suppressed.
@@ -517,8 +565,40 @@ mod tests {
             primary_reset_in: Some(600),
             secondary: Some(("7d".to_string(), 80.0)),
             throttled: true,
+            stale: false,
         });
         assert!(r.render(false).contains("⛔ throttled"));
+    }
+
+    #[test]
+    fn stale_plan_shows_last_known_headroom_not_dollars() {
+        // A subscriber with no fresh reading (idle, or the proxy was briefly
+        // down) must still see "subscription" — last-known headroom marked
+        // stale — never a notional `$ sess` that reads as real money owed.
+        let mut r = base();
+        r.sess_usd = Some(586.18); // would otherwise render "$586.18 sess"
+        r.plan = Some(PlanLimits {
+            primary_label: "5h".to_string(),
+            primary_pct: 10.0,
+            primary_reset_in: Some(3600), // ignored when stale
+            secondary: Some(("7d".to_string(), 22.0)),
+            throttled: false,
+            stale: true,
+        });
+        let s = r.render(false);
+        assert!(s.contains("5h [▓░░░░░░░] ~10%"), "got: {s}");
+        assert!(s.contains("7d ~22%"), "got: {s}");
+        assert!(s.contains("⏸ idle"), "got: {s}");
+        // No live countdown, and crucially no dollar session figure.
+        assert!(
+            !s.contains("(1h"),
+            "stale reading must not show a countdown: {s}"
+        );
+        assert!(
+            !s.contains("sess"),
+            "subscriber must not see notional dollars: {s}"
+        );
+        assert!(!s.contains("586"), "got: {s}");
     }
 
     #[test]
@@ -562,15 +642,27 @@ mod tests {
         assert_eq!(context_window_for("claude-fable-5[1m]"), Some(1_000_000));
         assert_eq!(context_window_for("claude-opus-4-8"), Some(1_000_000));
         assert_eq!(context_window_for("claude-sonnet-4-6"), Some(1_000_000));
-        assert_eq!(context_window_for("claude-sonnet-4-5-20250929"), Some(200_000));
-        assert_eq!(context_window_for("claude-opus-4-5-20251101"), Some(200_000));
-        assert_eq!(context_window_for("gemini-3.1-pro-preview"), Some(1_000_000));
+        assert_eq!(
+            context_window_for("claude-sonnet-4-5-20250929"),
+            Some(200_000)
+        );
+        assert_eq!(
+            context_window_for("claude-opus-4-5-20251101"),
+            Some(200_000)
+        );
+        assert_eq!(
+            context_window_for("gemini-3.1-pro-preview"),
+            Some(1_000_000)
+        );
     }
 
     #[test]
     fn color_output_contains_ansi() {
         let s = base().render(true);
-        assert!(s.contains("\x1b["), "colored render should contain ANSI codes");
+        assert!(
+            s.contains("\x1b["),
+            "colored render should contain ANSI codes"
+        );
     }
 
     #[test]
@@ -602,6 +694,40 @@ mod tests {
             let s = r.render(false);
             assert!(!s.contains('⚠'), "{routing:?} should not warn: {s}");
         }
+    }
+
+    #[test]
+    fn paused_renders_loud_countdown_warning() {
+        // A pause must be impossible to miss or forget: loud chip + countdown.
+        let mut r = base();
+        r.routing = Routing::Paused {
+            resumes_in_secs: 4 * 60,
+        };
+        let s = r.render(false);
+        assert!(
+            s.contains("⏸ PAUSED (unprotected) — resumes in 4m"),
+            "got: {s}"
+        );
+        // Metrics captured up to the pause stay visible (unlike ProxyDown,
+        // the proxy is alive — the numbers are real, just briefly frozen).
+        assert!(s.contains("$0.16 sess"), "got: {s}");
+    }
+
+    #[test]
+    fn proxy_down_suppresses_stale_capture_metrics() {
+        // A down proxy captures nothing, so cost/today/plan/block-count would be
+        // stale. Show the loud warning + tool-sourced segments only.
+        let mut r = base();
+        r.routing = Routing::ProxyDown;
+        r.blocks_today = 3;
+        let s = r.render(false);
+        assert!(s.contains("PROXY DOWN"), "got: {s}");
+        assert!(s.contains("↑13k ↓615"), "token counts stay: {s}");
+        assert!(s.contains("ctx ["), "context stays: {s}");
+        assert!(!s.contains('$'), "no dollar figures when down: {s}");
+        assert!(!s.contains("sess"), "no session cost when down: {s}");
+        assert!(!s.contains("today"), "no today spend when down: {s}");
+        assert!(!s.contains('🛡'), "no block count when down: {s}");
     }
 
     #[test]

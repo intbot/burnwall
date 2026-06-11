@@ -94,7 +94,10 @@ fn build_ribbon(cc: &CcInput) -> Ribbon {
     let msg = session_msg_delta(cc.session_id.as_deref(), sess);
 
     // "up" is the true prompt size: uncached input + cache writes + cache reads.
-    let usage = cc.context_window.as_ref().and_then(|c| c.current_usage.as_ref());
+    let usage = cc
+        .context_window
+        .as_ref()
+        .and_then(|c| c.current_usage.as_ref());
     let up = usage
         .map(|u| u.input_tokens + u.cache_creation_input_tokens + u.cache_read_input_tokens)
         .unwrap_or(0);
@@ -157,7 +160,20 @@ fn routing_state(model_id: &str) -> ribbon::Routing {
                 .and_then(|u| crate::cli::routing::proxy_alive_for_url(&u))
             {
                 Some(false) => ribbon::Routing::ProxyDown,
-                _ => ribbon::Routing::Proxied,
+                _ => {
+                    // Alive and routed — but is protection paused? A pause
+                    // (`burnwall pause`) relays everything unchecked; surface
+                    // it loudly for the whole window so it can't be forgotten.
+                    let now = chrono::Utc::now().timestamp();
+                    match crate::bypass::read(now) {
+                        crate::bypass::Bypass::Paused { resumes_in_secs } => {
+                            ribbon::Routing::Paused { resumes_in_secs }
+                        }
+                        // An armed allow-once lives for seconds before it's
+                        // consumed — not worth a persistent chip.
+                        _ => ribbon::Routing::Proxied,
+                    }
+                }
             }
         }
         crate::cli::routing::EnvRouting::Direct => ribbon::Routing::Direct,
@@ -183,15 +199,13 @@ fn provider_of(model_id: &str) -> &'static str {
     }
 }
 
-/// Build the subscription-limit segment from the freshest proxy-captured
-/// snapshot, or `None` when there's no fresh subscription reading (API user,
-/// proxy not capturing, or idle long enough the windows are stale). When `Some`,
-/// the ribbon shows real plan headroom instead of the notional dollar cost.
+/// Build the subscription-limit segment. Once any plan snapshot exists the
+/// user is a known flat-rate subscriber and the ribbon stays in plan mode —
+/// fresh readings show live headroom, stale or window-expired readings show
+/// last-known headroom marked `~ … idle`, and only a true API user (no
+/// snapshot ever) gets the dollar segment. See [`crate::plan::ribbon_limits`].
 fn plan_limits() -> Option<ribbon::PlanLimits> {
-    let now = chrono::Utc::now().timestamp();
-    // A subscriber refreshes this on every request; a >12h-old reading means
-    // they've been idle — show nothing rather than a misleading window.
-    crate::plan::freshest(now, 12 * 3600).and_then(|s| s.to_ribbon_limits(now))
+    crate::plan::ribbon_limits(chrono::Utc::now().timestamp())
 }
 
 /// Claude Code reports *cumulative* session cost, and re-renders the status
@@ -249,7 +263,13 @@ fn session_msg_delta(session: Option<&str>, total: f64) -> Option<f64> {
 /// defensive about path separators).
 fn sanitize(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -261,7 +281,10 @@ fn db_enrichment() -> (f64, u64) {
         return (0.0, 0);
     };
     let cost = storage.total_cost_for_date(&today).unwrap_or(0.0);
-    let blocks = storage.security_event_count_for_date(&today).unwrap_or(0).max(0) as u64;
+    let blocks = storage
+        .security_event_count_for_date(&today)
+        .unwrap_or(0)
+        .max(0) as u64;
     (cost, blocks)
 }
 

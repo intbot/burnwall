@@ -72,14 +72,38 @@ impl PlanSnapshot {
     /// expired, so showing yesterday's 92% as live headroom is worse than
     /// showing nothing (U-M7).
     pub fn to_ribbon_limits(&self, now: i64) -> Option<crate::ribbon::PlanLimits> {
+        self.to_ribbon_limits_stale_aware(now, false)
+    }
+
+    /// Like [`Self::to_ribbon_limits`] but tolerates a stale reading. With
+    /// `stale = false` it is identical (and hides a window whose own reset has
+    /// passed — U-M7). With `stale = true` it instead *keeps* surfacing the
+    /// last-known utilizations — marked stale, with no live countdown — rather
+    /// than returning `None`. The status line uses this so a subscriber who has
+    /// been idle, or whose proxy was briefly down, always sees "subscription"
+    /// headroom instead of falling back to a notional dollar figure that reads
+    /// as real money (the dogfooding report: "seeing sess $ instead of
+    /// subscription").
+    pub fn to_ribbon_limits_stale_aware(
+        &self,
+        now: i64,
+        stale: bool,
+    ) -> Option<crate::ribbon::PlanLimits> {
         let primary = self.windows.first()?;
-        if primary.reset <= now {
+        // A fresh reading whose binding window already reset is self-describedly
+        // expired — show nothing (U-M7). A stale reading is *already* known to be
+        // old, so its passed reset is no new information: keep the last-known %.
+        if !stale && primary.reset <= now {
             return None;
         }
         Some(crate::ribbon::PlanLimits {
             primary_label: primary.label.clone(),
             primary_pct: (primary.utilization * 100.0).clamp(0.0, 100.0),
-            primary_reset_in: Some((primary.reset - now).max(0)),
+            primary_reset_in: if stale {
+                None
+            } else {
+                Some((primary.reset - now).max(0))
+            },
             secondary: self
                 .windows
                 .get(1)
@@ -87,11 +111,14 @@ impl PlanSnapshot {
             // Only a positively-throttling status renders the ⛔ chip. Anthropic
             // emits warning-grade intermediates (e.g. `allowed_warning`) near
             // the limit while requests still succeed — "anything ≠ allowed"
-            // showed a false THROTTLED at ~80% utilization (U-H4).
-            throttled: matches!(
-                self.status.as_str(),
-                "throttled" | "rejected" | "blocked" | "rate_limited"
-            ),
+            // showed a false THROTTLED at ~80% utilization (U-H4). A stale
+            // reading can't claim a live throttle, so it never shows the chip.
+            throttled: !stale
+                && matches!(
+                    self.status.as_str(),
+                    "throttled" | "rejected" | "blocked" | "rate_limited"
+                ),
+            stale,
         })
     }
 }
@@ -157,7 +184,9 @@ fn parse_openai(_headers: &hyper::HeaderMap, _now: i64) -> Option<PlanSnapshot> 
 
 /// Path to the snapshot file under the data dir, if a data dir resolves.
 pub fn snapshot_path() -> Option<PathBuf> {
-    crate::storage::data_dir().ok().map(|d| d.join(SNAPSHOT_FILE))
+    crate::storage::data_dir()
+        .ok()
+        .map(|d| d.join(SNAPSHOT_FILE))
 }
 
 /// Load the per-provider snapshot map (empty on missing/unreadable/legacy file).
@@ -197,6 +226,35 @@ pub fn freshest(now: i64, max_age_secs: i64) -> Option<PlanSnapshot> {
         .max_by_key(|s| s.captured_at)
 }
 
+/// The most recently captured snapshot across providers, **regardless of
+/// staleness**. The status line uses this to keep a subscriber in plan mode
+/// (showing last-known headroom, marked stale) instead of dropping to a notional
+/// dollar figure when no fresh reading is available — see
+/// [`PlanSnapshot::to_ribbon_limits_stale_aware`].
+pub fn freshest_any() -> Option<PlanSnapshot> {
+    read_all().into_iter().max_by_key(|s| s.captured_at)
+}
+
+/// The plan segment for single-line surfaces (status line, `watch`): once any
+/// snapshot exists the user is a known subscriber, and the surface must stay in
+/// plan mode — never fall back to a notional dollar figure that reads as real
+/// money. Three honesty tiers:
+///
+/// 1. Fresh reading, window live → real headroom with a countdown.
+/// 2. Stale reading (idle > 12h, or the proxy was down) → last-known headroom,
+///    marked `~ … idle`.
+/// 3. Fresh reading whose binding window's reset has passed (idle just long
+///    enough for the window to roll) → also rendered as last-known/stale: the
+///    percentages are no longer live (the window reset behind our back), but a
+///    subscriber seeing `$586 sess` where "subscription" belongs is worse
+///    (U-M7 kept the *live* claim honest; this keeps the *mode* honest).
+pub fn ribbon_limits(now: i64) -> Option<crate::ribbon::PlanLimits> {
+    let snap = freshest_any()?;
+    let stale = snap.is_stale(now, 12 * 3600);
+    snap.to_ribbon_limits_stale_aware(now, stale)
+        .or_else(|| snap.to_ribbon_limits_stale_aware(now, true))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,7 +278,10 @@ mod tests {
             ("anthropic-ratelimit-unified-7d-utilization", "0.1"),
             ("anthropic-ratelimit-unified-7d-reset", "1781150400"),
             ("anthropic-ratelimit-unified-status", "allowed"),
-            ("anthropic-ratelimit-unified-representative-claim", "five_hour"),
+            (
+                "anthropic-ratelimit-unified-representative-claim",
+                "five_hour",
+            ),
         ])
     }
 
@@ -278,7 +339,10 @@ mod tests {
         );
         let snap = parse_limits("anthropic", &h, 1780951905).unwrap();
         let rl = snap.to_ribbon_limits(1780951905).unwrap();
-        assert!(!rl.throttled, "warning-grade status must not show throttled");
+        assert!(
+            !rl.throttled,
+            "warning-grade status must not show throttled"
+        );
 
         let mut h = unified();
         h.insert(
@@ -296,6 +360,45 @@ mod tests {
         let snap = parse_limits("anthropic", &unified(), 1780951905).unwrap();
         let after_reset = 1780960800 + 60;
         assert!(snap.to_ribbon_limits(after_reset).is_none());
+    }
+
+    #[test]
+    fn fresh_snapshot_with_expired_window_renders_as_stale_not_dollars() {
+        // The composition `ribbon_limits` uses: a FRESH snapshot whose binding
+        // window's reset has passed (user idle just long enough for the window
+        // to roll) must still yield a plan segment — rendered stale — never
+        // `None` (which would drop a known subscriber back to a dollar figure,
+        // the exact "seeing sess $ instead of subscription" report).
+        let snap = parse_limits("anthropic", &unified(), 1780951905).unwrap();
+        let after_5h_reset = 1780960800 + 60; // 5h window expired, snapshot fresh
+        let stale = snap.is_stale(after_5h_reset, 12 * 3600);
+        assert!(!stale, "precondition: the snapshot itself is fresh");
+        let rl = snap
+            .to_ribbon_limits_stale_aware(after_5h_reset, stale)
+            .or_else(|| snap.to_ribbon_limits_stale_aware(after_5h_reset, true))
+            .expect("known subscriber must stay in plan mode");
+        assert!(rl.stale, "expired-window reading renders as last-known");
+        assert_eq!(rl.primary_reset_in, None, "no live countdown");
+    }
+
+    #[test]
+    fn stale_aware_keeps_last_known_headroom_marked_stale() {
+        let snap = parse_limits("anthropic", &unified(), 1780951905).unwrap();
+        // Long past both reset times: a FRESH reading vanishes (U-M7)…
+        let way_later = 1781150400 + 10_000;
+        assert!(snap.to_ribbon_limits(way_later).is_none());
+        // …but a STALE reading keeps surfacing last-known headroom — marked
+        // stale, with no live countdown and no throttle claim — so a subscriber
+        // stays in plan mode instead of seeing a notional dollar figure.
+        let rl = snap
+            .to_ribbon_limits_stale_aware(way_later, true)
+            .expect("stale reading still renders");
+        assert!(rl.stale);
+        assert_eq!(rl.primary_reset_in, None);
+        assert!(!rl.throttled);
+        assert_eq!(rl.primary_label, "5h");
+        assert!((rl.primary_pct - 11.0).abs() < 1e-9);
+        assert_eq!(rl.secondary, Some(("7d".to_string(), 10.0)));
     }
 
     #[test]
