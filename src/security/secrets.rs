@@ -72,7 +72,10 @@ pub static PATTERNS: LazyLock<Vec<SecretPattern>> = LazyLock::new(|| {
         SecretPattern::builtin("OpenAI project key", r"\bsk-proj-[A-Za-z0-9_-]{20,}\b"),
         SecretPattern::builtin("OpenAI API key", r"\bsk-[A-Za-z0-9]{48}\b"),
         SecretPattern::builtin("Anthropic API key", r"\bsk-ant-[A-Za-z0-9_-]{36,}\b"),
-        SecretPattern::builtin("GitLab personal access token", r"\bglpat-[A-Za-z0-9_-]{20,}\b"),
+        SecretPattern::builtin(
+            "GitLab personal access token",
+            r"\bglpat-[A-Za-z0-9_-]{20,}\b",
+        ),
         SecretPattern::builtin("Slack token", r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b"),
         // Added v0.6. All keep a distinctive prefix + length so the false-
         // positive rate stays low; deliberately NO generic-entropy or JWT
@@ -106,7 +109,9 @@ const EXAMPLE_SECRETS: &[&str] = &[
 ];
 
 fn is_example_secret(matched: &str) -> bool {
-    EXAMPLE_SECRETS.iter().any(|e| e.eq_ignore_ascii_case(matched))
+    EXAMPLE_SECRETS
+        .iter()
+        .any(|e| e.eq_ignore_ascii_case(matched))
 }
 
 /// Name of the first **built-in** pattern that matches `value` with a match
@@ -115,7 +120,10 @@ pub fn first_match(value: &str) -> Option<&'static str> {
     for p in PATTERNS.iter() {
         // Any non-example match counts; scan all matches so a real key elsewhere
         // in the leaf isn't masked by a leading example.
-        if p.regex.find_iter(value).any(|m| !is_example_secret(m.as_str())) {
+        if p.regex
+            .find_iter(value)
+            .any(|m| !is_example_secret(m.as_str()))
+        {
             return match &p.name {
                 Cow::Borrowed(s) => Some(*s),
                 Cow::Owned(_) => unreachable!("built-in patterns carry borrowed names"),
@@ -132,4 +140,55 @@ pub fn first_match_in<'a>(value: &str, patterns: &'a [SecretPattern]) -> Option<
         .iter()
         .find(|p| p.regex.is_match(value))
         .map(|p| p.name.as_ref())
+}
+
+/// Like [`first_match`] but also returns a **masked, recognisable preview** of
+/// the matched value (e.g. `AKIA…LKEY`) for the block message. The raw value is
+/// never returned, echoed, or logged — only this masked form, and only to the
+/// user's own terminal.
+pub fn first_match_masked(value: &str) -> Option<(&'static str, String)> {
+    for p in PATTERNS.iter() {
+        if let Some(m) = p
+            .regex
+            .find_iter(value)
+            .find(|m| !is_example_secret(m.as_str()))
+        {
+            let name = match &p.name {
+                Cow::Borrowed(s) => *s,
+                Cow::Owned(_) => unreachable!("built-in patterns carry borrowed names"),
+            };
+            return Some((name, mask_match(m.as_str())));
+        }
+    }
+    None
+}
+
+/// [`first_match_in`] with a masked preview of the matched value (pack patterns).
+pub fn first_match_in_masked<'a>(
+    value: &str,
+    patterns: &'a [SecretPattern],
+) -> Option<(&'a str, String)> {
+    for p in patterns {
+        if let Some(m) = p.regex.find(value) {
+            return Some((p.name.as_ref(), mask_match(m.as_str())));
+        }
+    }
+    None
+}
+
+/// Mask a matched secret/PII value for display: keep a short recognisable head
+/// and tail, redact the middle. The reveal is capped at 4 chars per end and at
+/// a quarter of the value's length, so a short token shows very little (a 12-char
+/// value reveals at most 3+3). Used only in the terminal block message — never
+/// persisted, consistent with the never-log-secrets principle.
+pub fn mask_match(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
+    let reveal = (n / 4).min(4);
+    if reveal == 0 {
+        return "•".repeat(n.clamp(1, 8));
+    }
+    let head: String = chars[..reveal].iter().collect();
+    let tail: String = chars[n - reveal..].iter().collect();
+    format!("{head}…{tail}")
 }

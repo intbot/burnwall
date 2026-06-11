@@ -7,15 +7,20 @@
 //!   (`tools/call` arguments), advertised MCP tool definitions, and the
 //!   `burnwall rules test` playground.
 //!
-//! - [`scan_request`] is context-aware, for LLM request bodies. Command-shaped
-//!   checks (denied paths, denied commands, network mounts, destructive
-//!   commands, exfil techniques) run only inside **tool-call argument**
-//!   subtrees — an Anthropic `tool_use.input`, an OpenAI `tool_calls` /
-//!   `function_call`, a Gemini `functionCall` — and, within a conversation,
-//!   only in the **latest turn's in-flight tool round** (see
-//!   [`walk_turn_array`]). Data-shaped checks (secrets, DLP) still run on
-//!   every string leaf: a credential or card number is worth blocking
-//!   wherever it sits in the payload.
+//! - [`scan_request`] is context-aware, for LLM request bodies. Both the
+//!   command-shaped checks (denied paths, denied commands, network mounts,
+//!   destructive commands, exfil techniques) AND the data-shaped checks
+//!   (secrets, DLP) run only inside **tool-call argument** subtrees — an
+//!   Anthropic `tool_use.input`, an OpenAI `tool_calls` / `function_call`, a
+//!   Gemini `functionCall` — and, within a conversation, only in the **latest
+//!   turn's in-flight tool round** (see [`walk_turn_array`]). Prose and settled
+//!   history (system prompt, chat text, tool definitions, tool results, resent
+//!   earlier turns) get **no** rule checks: that text is natural language bound
+//!   for the trusted provider and is resent verbatim every turn, so blocking on
+//!   it merely *mentioning* a denied path, a card number, or a key-shaped token
+//!   would permanently wedge the session. The harm Burnwall stops is an agent
+//!   *action* — a credential or dangerous command inside a tool call — and that
+//!   stays fully covered.
 //!
 //! The split exists because an LLM request carries far more than tool calls:
 //! system prompts, chat history, tool *definitions*, tool results. Those can
@@ -39,69 +44,80 @@ enum Scope {
     /// are commands.
     ToolArgs,
     /// Inside an **editor/content** tool-call argument subtree (Write, Edit,
-    /// apply_patch, …) → data checks only (secrets, DLP). The argument is file
-    /// *content* the model is writing, not a command to run — a README that
-    /// mentions `~/.ssh` or a runbook that mentions `chmod 777` must not 403
-    /// (S-H4: the class that blocked this very review session). A secret or
-    /// card number in that content is still worth catching, so data checks
-    /// stay on.
+    /// apply_patch, …) → data checks (secrets, DLP) plus path/mount checks on
+    /// path-shaped leaves. The argument is file *content* the model is writing,
+    /// not a command to run — a README that mentions `~/.ssh` or a runbook that
+    /// mentions `chmod 777` must not 403 (S-H4: the class that blocked this very
+    /// review session) — but a secret or card number the agent is writing to a
+    /// file, or a path argument pointing AT `~/.ssh`, still blocks.
     ContentArgs,
     /// Anywhere else (system prompt, chat text, tool definitions, tool
-    /// results) → data checks only (secrets, DLP). Tool-call shapes found
-    /// here promote their subtree to [`Scope::ToolArgs`] / [`Scope::ContentArgs`].
+    /// results) → **no** rule checks. This text is prose bound for the trusted
+    /// provider and is resent every turn; blocking on it merely mentioning a
+    /// secret/card/path would wedge the session. Tool-call shapes found here
+    /// promote their subtree to [`Scope::ToolArgs`] / [`Scope::ContentArgs`],
+    /// which is where the actionable checks live.
     Prose,
-    /// An already-adjudicated conversation turn → data checks only, and
+    /// An already-adjudicated conversation turn → **no** rule checks, and
     /// tool-call shapes do NOT promote. See [`walk_turn_array`].
     History,
 }
 
 /// Scan every string leaf with the full check set.
 pub fn scan(value: &Value, rules: &Ruleset) -> Option<Violation> {
-    walk(value, rules, Scope::ToolArgs)
+    walk(value, rules, Scope::ToolArgs, None)
 }
 
 /// Context-aware scan for an LLM request body — see the module docs.
 pub fn scan_request(value: &Value, rules: &Ruleset) -> Option<Violation> {
-    walk(value, rules, Scope::Prose)
+    walk(value, rules, Scope::Prose, None)
 }
 
 /// Context-aware scan for an MCP JSON-RPC body (M-C1). The envelope
 /// (`jsonrpc`/`method`/`id` and most of `params`) is **prose** — a memory note
 /// or issue title that merely mentions `rm -rf` or `~/.ssh` must not 403. Only
 /// the `params.arguments` of a `tools/call` are real tool-call arguments and
-/// get the full command set (or content-only checks for an editor-ish tool,
-/// keyed on `params.name`). Data checks (secrets, DLP) still run across the
-/// whole envelope. Mirrors the prose-safe scoping the LLM proxy already uses —
-/// the MCP path was still running the full-strict `scan`.
+/// get the full command set (or content + data checks for an editor-ish tool,
+/// keyed on `params.name`) — including secret/DLP detection, since the args are
+/// where a credential would be exfiltrated to a tool. The rest of the envelope
+/// is prose and gets no checks. Mirrors the prose-safe scoping the LLM proxy
+/// already uses — the MCP path was still running the full-strict `scan`.
 pub fn scan_mcp(value: &Value, rules: &Ruleset) -> Option<Violation> {
     if value.get("method").and_then(Value::as_str) == Some("tools/call") {
         if let Some(params) = value.get("params") {
             if let Some(args) = params.get("arguments") {
                 // MCP tools are overwhelmingly app integrations (memory, search,
                 // GitHub, …) whose arguments are free text, not commands — so
-                // the default is data-checks-only (catch credential exfil, the
-                // real MCP risk). Command-shaped checks apply ONLY when the tool
-                // name is identifiably a shell/exec tool. This is the inverse of
-                // the LLM default (where Bash/Read are common and dangerous), and
-                // is what keeps a memory note that mentions `rm -rf` from 403ing.
+                // the default (ContentArgs) is data + path checks, no command
+                // checks: catch a credential exfiltrated to a tool, the real MCP
+                // risk, without 403ing a memory note that merely mentions
+                // `rm -rf`. Command-shaped checks apply ONLY when the tool name
+                // is identifiably a shell/exec tool. This is the inverse of the
+                // LLM default (where Bash/Read are common and dangerous).
                 let name = params.get("name").and_then(Value::as_str);
                 let scope = if name.map(is_shell_tool).unwrap_or(false) {
                     Scope::ToolArgs
                 } else {
                     Scope::ContentArgs
                 };
-                if let Some(v) = walk(args, rules, scope) {
+                if let Some(v) = walk(args, rules, scope, name) {
                     return Some(v);
                 }
             }
         }
     }
-    // Data checks across the whole envelope; command-shaped checks stay scoped
-    // to the arguments handled above (prose here, so they don't fire).
-    walk(value, rules, Scope::Prose)
+    // The rest of the envelope is prose: no checks fire here. (The actionable
+    // `tools/call` arguments were handled above.) Walked for completeness so a
+    // future promotable shape inside `params` is still discovered.
+    walk(value, rules, Scope::Prose, None)
 }
 
-fn walk(value: &Value, rules: &Ruleset, scope: Scope) -> Option<Violation> {
+fn walk<'a>(
+    value: &'a Value,
+    rules: &Ruleset,
+    scope: Scope,
+    tool: Option<&'a str>,
+) -> Option<Violation> {
     match value {
         Value::Object(map) => {
             for (k, v) in map {
@@ -123,13 +139,19 @@ fn walk(value: &Value, rules: &Ruleset, scope: Scope) -> Option<Violation> {
                         }
                     }
                 }
-                let child_scope = match scope {
-                    Scope::ToolArgs => Scope::ToolArgs,
-                    Scope::ContentArgs => Scope::ContentArgs,
-                    Scope::Prose => tool_arg_scope(k, map).unwrap_or(Scope::Prose),
-                    Scope::History => Scope::History,
+                // Descending into a tool-call argument subtree both sets the
+                // scope and captures the tool's name, so a block can say which
+                // tool (`bash`, `write_file`, …) tripped it.
+                let (child_scope, child_tool) = match scope {
+                    Scope::ToolArgs => (Scope::ToolArgs, tool),
+                    Scope::ContentArgs => (Scope::ContentArgs, tool),
+                    Scope::Prose => match tool_arg_scope(k, map) {
+                        Some((sc, name)) => (sc, name.or(tool)),
+                        None => (Scope::Prose, tool),
+                    },
+                    Scope::History => (Scope::History, tool),
                 };
-                if let Some(violation) = walk(v, rules, child_scope) {
+                if let Some(violation) = walk(v, rules, child_scope, child_tool) {
                     return Some(violation);
                 }
             }
@@ -137,13 +159,13 @@ fn walk(value: &Value, rules: &Ruleset, scope: Scope) -> Option<Violation> {
         }
         Value::Array(arr) => {
             for v in arr {
-                if let Some(violation) = walk(v, rules, scope) {
+                if let Some(violation) = walk(v, rules, scope, tool) {
                     return Some(violation);
                 }
             }
             None
         }
-        Value::String(s) => check_string(s, rules, scope),
+        Value::String(s) => check_string(s, rules, scope, tool),
         _ => None,
     }
 }
@@ -156,8 +178,9 @@ fn walk(value: &Value, rules: &Ruleset, scope: Scope) -> Option<Violation> {
 /// it would make one (correctly) blocked tool call poison the conversation
 /// forever, since clients resend the full history on every request. With this
 /// rule a block is a speed bump, not a death sentence: the user's next
-/// message ends the round, and data checks (secrets, DLP) still cover the
-/// whole history.
+/// message ends the round. Data checks (secrets, DLP) follow the same scoping
+/// — they fire on the in-flight tool round, not on settled/resent history (a
+/// key-shaped token quoted in an old turn must not re-block forever).
 fn walk_turn_array(turns: &[Value], rules: &Ruleset) -> Option<Violation> {
     let last_actor = turns.iter().rposition(is_actor_turn);
     let in_flight = match last_actor {
@@ -173,7 +196,8 @@ fn walk_turn_array(turns: &[Value], rules: &Ruleset) -> Option<Violation> {
         } else {
             Scope::History
         };
-        if let Some(violation) = walk(turn, rules, scope) {
+        // Tool name is resolved deeper, on descent into the tool-call subtree.
+        if let Some(violation) = walk(turn, rules, scope, None) {
             return Some(violation);
         }
     }
@@ -258,34 +282,37 @@ fn holds_tool_args(key: &str, obj: &serde_json::Map<String, Value>) -> bool {
 }
 
 /// If `key` (an entry of `obj`) holds tool-call arguments, return the scope its
-/// subtree should get — [`Scope::ToolArgs`] for a shell-ish tool (its args are
-/// commands) or [`Scope::ContentArgs`] for an editor/content tool (its args are
-/// file content, S-H4). Unknown tool names default to strict `ToolArgs` so an
-/// unrecognized tool keeps full coverage. Returns `None` if `key` isn't a
-/// tool-args slot.
-fn tool_arg_scope(key: &str, obj: &serde_json::Map<String, Value>) -> Option<Scope> {
+/// subtree should get **and the tool's name** — [`Scope::ToolArgs`] for a
+/// shell-ish tool (its args are commands) or [`Scope::ContentArgs`] for an
+/// editor/content tool (its args are file content, S-H4). Unknown tool names
+/// default to strict `ToolArgs` so an unrecognized tool keeps full coverage. The
+/// name (when present) rides into the block message so a user knows which tool
+/// tripped the firewall. Returns `None` if `key` isn't a tool-args slot.
+fn tool_arg_scope<'a>(
+    key: &str,
+    obj: &'a serde_json::Map<String, Value>,
+) -> Option<(Scope, Option<&'a str>)> {
     if !holds_tool_args(key, obj) {
         return None;
     }
     let name = tool_name(obj);
-    Some(if name.map(is_editor_tool).unwrap_or(false) {
+    let scope = if name.map(is_editor_tool).unwrap_or(false) {
         Scope::ContentArgs
     } else {
         Scope::ToolArgs
-    })
+    };
+    Some((scope, name))
 }
 
 /// Best-effort tool name from a tool-call object: the sibling `name`
 /// (Anthropic `tool_use`, OpenAI Responses `function_call`, legacy
 /// `function_call`) or the nested `function.name` (OpenAI Chat `tool_calls`).
 fn tool_name(obj: &serde_json::Map<String, Value>) -> Option<&str> {
-    obj.get("name")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            obj.get("function")
-                .and_then(|f| f.get("name"))
-                .and_then(Value::as_str)
-        })
+    obj.get("name").and_then(Value::as_str).or_else(|| {
+        obj.get("function")
+            .and_then(|f| f.get("name"))
+            .and_then(Value::as_str)
+    })
 }
 
 /// Does this tool name denote a shell/exec tool — one whose arguments are a
@@ -328,7 +355,7 @@ fn is_editor_tool(name: &str) -> bool {
     EDITOR_MARKERS.iter().any(|m| n.contains(m))
 }
 
-fn check_string(s: &str, rules: &Ruleset, scope: Scope) -> Option<Violation> {
+fn check_string(s: &str, rules: &Ruleset, scope: Scope, tool: Option<&str>) -> Option<Violation> {
     // Where this leaf sits — surfaced in the block message so a user can tell
     // a real action from the model quoting something (S-C3).
     let location = match scope {
@@ -345,8 +372,19 @@ fn check_string(s: &str, rules: &Ruleset, scope: Scope) -> Option<Violation> {
     //   single-line; a file body or note being written is neither, so a README
     //   that mentions `~/.ssh` in its prose passes (S-H4) while a path argument
     //   pointing AT `~/.ssh` blocks.
-    // - Prose and history: data checks only.
+    // - Data checks (secrets, DLP): tool-call argument subtrees only — the
+    //   agent ACTION surface. They do NOT run on prose or settled history
+    //   (system prompt, chat text, tool results, resent earlier turns). That
+    //   text is natural language bound for the trusted provider, it is resent
+    //   verbatim on every turn, and re-blocking it permanently WEDGES a session
+    //   over a key-shaped token that is merely discussed or quoted — the
+    //   dogfooding failure that motivated this: an innocent one-line question
+    //   403'd on every retry because the conversation's own /compact summary
+    //   mentioned an example AWS key. The exfiltration vector that matters — a
+    //   credential leaving the machine inside a tool call — stays fully covered
+    //   (a secret in tool args is ToolArgs/ContentArgs and still blocks).
     let command_set = scope == Scope::ToolArgs;
+    let scan_data = matches!(scope, Scope::ToolArgs | Scope::ContentArgs);
     let path_set = command_set || (scope == Scope::ContentArgs && path_shaped(s));
 
     if path_set && !command_set {
@@ -358,20 +396,17 @@ fn check_string(s: &str, rules: &Ruleset, scope: Scope) -> Option<Violation> {
         if !path_allowed {
             for rule in &rules.deny_paths {
                 if rules::path_matches(s, rule) {
-                    return Some(Violation {
-                        kind: ViolationKind::Path,
-                        matched: rule.clone(),
-                        location,
-                    });
+                    return Some(
+                        Violation::new(ViolationKind::Path, rule.clone(), location).with_tool(tool),
+                    );
                 }
             }
         }
         if rules.block_network_mounts && rules::mount_matches(s) {
-            return Some(Violation {
-                kind: ViolationKind::Mount,
-                matched: extract_mount_prefix(s).to_string(),
-                location,
-            });
+            return Some(
+                Violation::new(ViolationKind::Mount, extract_mount_prefix(s), location)
+                    .with_tool(tool),
+            );
         }
     }
 
@@ -389,21 +424,17 @@ fn check_string(s: &str, rules: &Ruleset, scope: Scope) -> Option<Violation> {
         if !path_allowed {
             for rule in &rules.deny_paths {
                 if rules::path_matches(s, rule) {
-                    return Some(Violation {
-                        kind: ViolationKind::Path,
-                        matched: rule.clone(),
-                        location,
-                    });
+                    return Some(
+                        Violation::new(ViolationKind::Path, rule.clone(), location).with_tool(tool),
+                    );
                 }
             }
         }
         for rule in &rules.deny_commands {
             if rules::command_matches(s, rule) {
-                return Some(Violation {
-                    kind: ViolationKind::Command,
-                    matched: rule.clone(),
-                    location,
-                });
+                return Some(
+                    Violation::new(ViolationKind::Command, rule.clone(), location).with_tool(tool),
+                );
             }
         }
         // Catastrophic-command detection by *shape* (flag-order / spacing /
@@ -411,29 +442,27 @@ fn check_string(s: &str, rules: &Ruleset, scope: Scope) -> Option<Violation> {
         // since these are data-loss-grade and narrow enough to avoid false
         // positives.
         if let Some(label) = super::destructive::first_match(s) {
-            return Some(Violation {
-                kind: ViolationKind::Destructive,
-                matched: label.to_string(),
-                location,
-            });
+            return Some(
+                Violation::new(ViolationKind::Destructive, label, location).with_tool(tool),
+            );
         }
         if rules.block_network_mounts && rules::mount_matches(s) {
-            return Some(Violation {
-                kind: ViolationKind::Mount,
-                matched: extract_mount_prefix(s).to_string(),
-                location,
-            });
+            return Some(
+                Violation::new(ViolationKind::Mount, extract_mount_prefix(s), location)
+                    .with_tool(tool),
+            );
         }
     }
-    if rules.detect_secrets {
+    if rules.detect_secrets && scan_data {
         // Built-in patterns scan the FULL leaf — we must never miss a known
-        // credential. (These are linear-time and few.)
-        if let Some(name) = secrets::first_match(s) {
-            return Some(Violation {
-                kind: ViolationKind::Secret,
-                matched: name.to_string(),
-                location,
-            });
+        // credential. (These are linear-time and few.) The masked preview lets
+        // the block name *what* matched without echoing the raw value.
+        if let Some((name, preview)) = secrets::first_match_masked(s) {
+            return Some(
+                Violation::new(ViolationKind::Secret, name, location)
+                    .with_tool(tool)
+                    .with_preview(preview),
+            );
         }
         // Pack-contributed patterns are additive (extra detection). Cap the
         // input they run against (invariant I5) — an adversarial pack can't
@@ -441,12 +470,14 @@ fn check_string(s: &str, rules: &Ruleset, scope: Scope) -> Option<Violation> {
         // catch, never a built-in one.
         if !rules.secret_patterns.is_empty() {
             let hay = capped(s, MAX_PACK_SCAN_INPUT);
-            if let Some(name) = secrets::first_match_in(hay, &rules.secret_patterns) {
-                return Some(Violation {
-                    kind: ViolationKind::Secret,
-                    matched: name.to_string(),
-                    location,
-                });
+            if let Some((name, preview)) =
+                secrets::first_match_in_masked(hay, &rules.secret_patterns)
+            {
+                return Some(
+                    Violation::new(ViolationKind::Secret, name, location)
+                        .with_tool(tool)
+                        .with_preview(preview),
+                );
             }
         }
     }
@@ -459,20 +490,19 @@ fn check_string(s: &str, rules: &Ruleset, scope: Scope) -> Option<Violation> {
         // tool-args only.
         if command_set {
             if let Some(name) = super::exfil::first_match(hay) {
-                return Some(Violation {
-                    kind: ViolationKind::Exfil,
-                    matched: name.to_string(),
-                    location,
-                });
+                return Some(Violation::new(ViolationKind::Exfil, name, location).with_tool(tool));
             }
         }
-        // Then structured exfiltration-prone data (cards, SSNs).
-        if let Some(name) = super::dlp::first_match(hay) {
-            return Some(Violation {
-                kind: ViolationKind::Dlp,
-                matched: name.to_string(),
-                location,
-            });
+        // Then structured exfiltration-prone data (cards, SSNs) — like secrets,
+        // only inside tool-call arguments (the action), never resent prose.
+        if scan_data {
+            if let Some((name, preview)) = super::dlp::first_match_masked(hay) {
+                return Some(
+                    Violation::new(ViolationKind::Dlp, name, location)
+                        .with_tool(tool)
+                        .with_preview(preview),
+                );
+            }
         }
     }
     None

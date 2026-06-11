@@ -61,11 +61,13 @@ impl ViolationKind {
     }
 }
 
-/// Where in the request body the matching leaf sat. Decisive for the
-/// false-positive judgment (S-C3): a hit "in the current tool call" is an
-/// action the model is taking now; a hit "in earlier conversation history" is
-/// almost always the model quoting/discussing something. The block message
-/// surfaces this so the user can tell the two apart.
+/// Where in the request body the matching leaf sat. Surfaced in the block
+/// message ("… in the current tool call"). The false-positive insight behind
+/// this (S-C3) is now acted on structurally: every check fires only inside
+/// tool-call arguments, so a real block is always [`Self::ToolCall`] — an
+/// action the model is taking now. The `Body`/`History` variants are retained
+/// (the scope→location map stays total) as a guard against a future scope
+/// change silently mislabeling a hit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatchLocation {
     /// In the current in-flight tool call's arguments.
@@ -96,9 +98,106 @@ pub struct Violation {
     pub matched: String,
     /// Where the matching leaf sat in the payload.
     pub location: MatchLocation,
+    /// The tool whose arguments held the match (`bash`, `write_file`, …), when
+    /// the hit was inside a recognized tool call. Surfaced in the block message
+    /// so the user knows *which action* tripped the firewall. Never persisted.
+    pub tool: Option<String>,
+    /// A masked, recognisable preview of the matched value (e.g. `AKIA…LKEY`),
+    /// set only for secret/DLP hits. Lets the user identify *what* matched
+    /// without the raw value ever being echoed or logged — terminal-only,
+    /// never written to the DB or log (the redaction principle holds: the value
+    /// is masked here and the stored row keeps only the rule label).
+    pub preview: Option<String>,
 }
 
 impl Violation {
+    /// A violation carrying just kind/matched/location; tool and preview unset.
+    pub fn new(kind: ViolationKind, matched: impl Into<String>, location: MatchLocation) -> Self {
+        Self {
+            kind,
+            matched: matched.into(),
+            location,
+            tool: None,
+            preview: None,
+        }
+    }
+
+    /// Attach the originating tool name (no-op if `None`).
+    pub fn with_tool(mut self, tool: Option<&str>) -> Self {
+        self.tool = tool.map(str::to_string);
+        self
+    }
+
+    /// Attach a masked preview of the matched value.
+    pub fn with_preview(mut self, preview: String) -> Self {
+        self.preview = Some(preview);
+        self
+    }
+
+    /// The headline sentence of a block: *which* action tripped *what* rule,
+    /// naming the tool when known and showing a masked preview for secret/DLP
+    /// hits. This is the "what/where" half the earlier message lacked (a bare
+    /// "in earlier conversation history" left users unable to find the cause).
+    pub fn headline(&self) -> String {
+        let actor = match &self.tool {
+            Some(t) => format!("Your `{t}` tool call"),
+            None => "This tool call".to_string(),
+        };
+        let preview = self
+            .preview
+            .as_deref()
+            .map(|p| format!(" (looks like: {p})"))
+            .unwrap_or_default();
+        match self.kind {
+            ViolationKind::Path => {
+                format!("{actor} tried to access a denied path: {}.", self.matched)
+            }
+            ViolationKind::Command => {
+                format!("{actor} ran a denied command: {}.", self.matched)
+            }
+            ViolationKind::Mount => {
+                format!("{actor} accessed a network mount: {}.", self.matched)
+            }
+            ViolationKind::Destructive => {
+                format!("{actor} ran a destructive command: {}.", self.matched)
+            }
+            ViolationKind::Secret => {
+                format!("{actor} contains a credential — {}{preview}.", self.matched)
+            }
+            ViolationKind::Dlp => {
+                format!(
+                    "{actor} contains sensitive data — {}{preview}.",
+                    self.matched
+                )
+            }
+            ViolationKind::Exfil => {
+                format!("{actor} looks like data exfiltration: {}.", self.matched)
+            }
+        }
+    }
+
+    /// One line on *why* Burnwall blocks this class — so a block reads as a
+    /// reasoned decision, not an opaque refusal.
+    pub fn why(&self) -> &'static str {
+        match self.kind {
+            ViolationKind::Path | ViolationKind::Mount => {
+                "Burnwall blocks reads of sensitive paths and network mounts so an agent can't scoop up your keys or credentials."
+            }
+            ViolationKind::Command | ViolationKind::Destructive => {
+                "Burnwall blocks dangerous commands before they run on your machine."
+            }
+            ViolationKind::Secret | ViolationKind::Dlp | ViolationKind::Exfil => {
+                "Burnwall blocks credentials and sensitive data inside tool calls so they can't be exfiltrated off your machine."
+            }
+        }
+    }
+
+    /// The full "what + why" block embedded in the 403 (headline, then the
+    /// rationale on its own line).
+    pub fn block_explanation(&self) -> String {
+        format!("{}\n{}", self.headline(), self.why())
+    }
+
     /// One-line user-facing message, as embedded in the 403 JSON body and
     /// printed to the terminal with the 🛡️ prefix.
     pub fn message(&self) -> String {
@@ -158,20 +257,22 @@ impl SecurityEngine {
         scanner::scan(&json, &self.rules)
     }
 
-    /// Scan an LLM request body, scoping command-shaped checks (paths,
-    /// commands, mounts, destructive, exfil) to tool-call argument subtrees.
-    /// Prose — the system prompt, chat text, tool definitions, tool results —
-    /// only gets the data checks (secrets, DLP), so a payload that merely
-    /// *mentions* a denied path or command is not blocked. See
-    /// [`scanner::scan_request`].
+    /// Scan an LLM request body, scoping **all** checks — command-shaped (paths,
+    /// commands, mounts, destructive, exfil) AND data-shaped (secrets, DLP) — to
+    /// tool-call argument subtrees. Prose and resent history — the system
+    /// prompt, chat text, tool definitions, tool results, earlier turns — get no
+    /// checks, so a payload that merely *mentions* a denied path, a card number,
+    /// or a key-shaped token is not blocked (it would re-block on every resend
+    /// and wedge the session). See [`scanner::scan_request`].
     pub fn scan_request(&self, body: &[u8]) -> Option<Violation> {
         let json = self.parse_for_scan(body)?;
         scanner::scan_request(&json, &self.rules)
     }
 
     /// Scan an MCP JSON-RPC body. Like [`scan_request`] but for the JSON-RPC
-    /// envelope: only `tools/call` `params.arguments` get command-shaped checks;
-    /// the rest is prose (data checks only). See [`scanner::scan_mcp`].
+    /// envelope: only `tools/call` `params.arguments` get checked (command-shaped
+    /// for a shell tool, data + path checks otherwise); the rest of the envelope
+    /// is prose and gets no checks. See [`scanner::scan_mcp`].
     pub fn scan_mcp(&self, body: &[u8]) -> Option<Violation> {
         let json = self.parse_for_scan(body)?;
         scanner::scan_mcp(&json, &self.rules)
