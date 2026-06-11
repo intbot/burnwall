@@ -18,8 +18,8 @@
 //! per-process which is fine — we only need same content -> same hash
 //! within a single run.
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::VecDeque;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
 
@@ -338,9 +338,7 @@ mod tests {
         let prefix = r#"{"model":"claude-fable-5","messages":[{"role":"user","content":"please investigate why successful proxied requests are not recorded and fix the streaming usage parser so the cost tracking pipeline works again"}"#;
         assert!(prefix.len() > 200, "prefix must exceed the old hash window");
         for i in 0..10 {
-            let body = format!(
-                "{prefix},{{\"role\":\"assistant\",\"content\":\"turn {i}\"}}]}}"
-            );
+            let body = format!("{prefix},{{\"role\":\"assistant\",\"content\":\"turn {i}\"}}]}}");
             let hash = h(&det, body.as_bytes());
             let verdict = det.check_request(hash);
             assert_eq!(verdict, LoopVerdict::Ok, "turn {i} wrongly flagged as loop");
@@ -351,7 +349,10 @@ mod tests {
     #[test]
     fn byte_identical_bodies_still_trip() {
         let det = LoopDetector::with_defaults();
-        let hash = h(&det, br#"{"model":"m","messages":[{"role":"user","content":"same"}]}"#);
+        let hash = h(
+            &det,
+            br#"{"model":"m","messages":[{"role":"user","content":"same"}]}"#,
+        );
         // Five identical *successful* requests are tolerated; the sixth peek
         // sees a full window and blocks. Each Ok request records its arrival
         // (as the tee does on a 2xx).

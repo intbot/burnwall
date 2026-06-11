@@ -32,7 +32,7 @@ use chrono::Datelike;
 pub mod limits;
 pub mod loop_detector;
 
-pub use limits::{check_daily, check_monthly, check_session, BudgetConfig, BudgetStatus};
+pub use limits::{BudgetConfig, BudgetStatus, check_daily, check_monthly, check_session};
 pub use loop_detector::{LoopConfig, LoopDetector, LoopVerdict};
 
 use crate::storage::Storage;
@@ -158,7 +158,10 @@ impl BudgetTracker {
             return;
         }
         let units = (cost_usd * MICROCENTS_PER_USD).round() as u64;
-        *self.session_microcents.entry(session.to_string()).or_insert(0) += units;
+        *self
+            .session_microcents
+            .entry(session.to_string())
+            .or_insert(0) += units;
     }
 
     /// Spend so far for a session (USD).
@@ -206,7 +209,8 @@ impl BudgetTracker {
         let spent = storage.total_cost_for_month(month)?;
         let units = (spent * MICROCENTS_PER_USD).round() as u64;
         self.month_microcents.store(units, Ordering::Relaxed);
-        self.month_stamp.store(local_epoch_month(), Ordering::Relaxed);
+        self.month_stamp
+            .store(local_epoch_month(), Ordering::Relaxed);
         Ok(())
     }
 }

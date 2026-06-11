@@ -1,7 +1,7 @@
 //! Unit tests for `burnwall::mcp::resolve_route` — the pure path → upstream
 //! routing used by multi-server `mcp-watch` (v0.6.5). No I/O.
 
-use burnwall::mcp::{resolve_route, McpServer, Route};
+use burnwall::mcp::{McpServer, Route, resolve_route};
 
 fn servers() -> Vec<McpServer> {
     vec![

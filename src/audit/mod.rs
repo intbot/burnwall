@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use ed25519_dalek::{Signature, Signer, SigningKey};
 use sha2::{Digest as _, Sha256};
 
-use crate::storage::{data_dir, ReceiptRow, RequestRecord, SecurityEvent, Storage};
+use crate::storage::{ReceiptRow, RequestRecord, SecurityEvent, Storage, data_dir};
 
 /// 64 hex zeros — the `prev_hash` of the first receipt in a chain.
 pub const GENESIS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -190,7 +190,9 @@ impl AuditChain {
         // Append-only archive of closed segments — the external record of
         // where each key's coverage ends, so an auditor can still verify the
         // old segment against the old public key.
-        let archive = self.chain_pub_path.with_file_name("audit_chain_segments.log");
+        let archive = self
+            .chain_pub_path
+            .with_file_name("audit_chain_segments.log");
         let line = format!(
             "{} closed-segment pubkey={} head={} receipts={}\n",
             chrono::Utc::now().to_rfc3339(),

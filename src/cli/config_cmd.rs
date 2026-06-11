@@ -188,11 +188,15 @@ fn doctor(path: &Path) -> anyhow::Result<()> {
     writeln!(
         out,
         "  proxy: {} (port {})",
-        if proxy_up { "🟢 listening" } else { "⚪ not running" },
+        if proxy_up {
+            "🟢 listening"
+        } else {
+            "⚪ not running"
+        },
         cfg.proxy.port
     )?;
     for shell in crate::cli::init::Shell::ALL {
-        use crate::cli::routing::{env_file_state, rc_hook_present, EnvFileState};
+        use crate::cli::routing::{EnvFileState, env_file_state, rc_hook_present};
         let env = match env_file_state(shell) {
             Some(EnvFileState::Active) => "active",
             Some(EnvFileState::Paused) => "paused",

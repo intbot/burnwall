@@ -31,7 +31,8 @@ pub fn first_match(s: &str) -> Option<&'static str> {
     }
 
     // 2) Secret file read shipped straight to the network.
-    let has_net = has_word(&lower, NET_TOOLS) || lower.contains("--data") || lower.contains("--post-file");
+    let has_net =
+        has_word(&lower, NET_TOOLS) || lower.contains("--data") || lower.contains("--post-file");
     if has_net && mentions_sensitive(&lower) {
         return Some("secret-to-network");
     }
@@ -48,14 +49,26 @@ pub fn first_match(s: &str) -> Option<&'static str> {
 const DNS_TOOLS: &[&str] = &["dig", "nslookup", "drill", "host"];
 
 /// Tools/flags that move bytes off the machine.
-const NET_TOOLS: &[&str] = &["curl", "wget", "nc", "ncat", "netcat", "scp", "sftp", "ftp", "telnet"];
+const NET_TOOLS: &[&str] = &[
+    "curl", "wget", "nc", "ncat", "netcat", "scp", "sftp", "ftp", "telnet",
+];
 
 /// Sensitive locations whose presence next to a network tool is the exfil tell.
 const SENSITIVE: &[&str] = &[
-    "~/.ssh", "/.ssh/", "id_rsa", "id_ed25519",
-    "~/.aws", "/.aws/", "credentials",
-    ".env", "secrets", "private_key", "private key",
-    "~/.config/gcloud", "kube/config", ".kube/config",
+    "~/.ssh",
+    "/.ssh/",
+    "id_rsa",
+    "id_ed25519",
+    "~/.aws",
+    "/.aws/",
+    "credentials",
+    ".env",
+    "secrets",
+    "private_key",
+    "private key",
+    "~/.config/gcloud",
+    "kube/config",
+    ".kube/config",
 ];
 
 /// Whole-ish word match: `needle` bordered by a non-alphanumeric (or string

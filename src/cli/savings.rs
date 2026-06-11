@@ -58,7 +58,10 @@ pub fn run_cmd(args: SavingsArgs) -> anyhow::Result<()> {
     writeln!(out)?;
 
     if report.opportunities.is_empty() {
-        writeln!(out, "   ✓ No major caching opportunities — cache use looks healthy.")?;
+        writeln!(
+            out,
+            "   ✓ No major caching opportunities — cache use looks healthy."
+        )?;
     } else {
         writeln!(out, "   Opportunity — models underusing cache:")?;
         for o in &report.opportunities {
@@ -175,7 +178,14 @@ fn row_usage(r: &ModelBreakdown) -> TokenUsage {
 mod tests {
     use super::*;
 
-    fn row(model: &str, input: u64, cache_create: u64, cache_read: u64, output: u64, cost: f64) -> ModelBreakdown {
+    fn row(
+        model: &str,
+        input: u64,
+        cache_create: u64,
+        cache_read: u64,
+        output: u64,
+        cost: f64,
+    ) -> ModelBreakdown {
         ModelBreakdown {
             provider: "anthropic".to_string(),
             model: model.to_string(),

@@ -5,12 +5,11 @@ use chrono::{Duration, Utc};
 use burnwall::logscrape::UsageEntry;
 use burnwall::providers::TokenUsage;
 use burnwall::waste::{
-    self,
+    self, Finding, Severity, WasteRule,
     rules::{
         CacheHitStarvation, ContextWindowSaturation, MegaSessions, ModelOverreliance,
         ReasoningEffortOveruse, RunawayContextGrowth,
     },
-    Finding, Severity, WasteRule,
 };
 
 fn entry(model: &str, input: u64, cache_creation: u64, cache_read: u64) -> UsageEntry {
@@ -102,9 +101,11 @@ fn healthy_cache_rate_is_not_flagged() {
         .map(|_| entry("claude-sonnet-4-6", 500, 0, 9_500))
         .collect();
 
-    assert!(test_rule()
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        test_rule()
+            .evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]
@@ -114,9 +115,11 @@ fn below_sample_threshold_is_not_flagged() {
         .map(|_| entry("claude-sonnet-4-6", 8_000, 0, 0))
         .collect();
 
-    assert!(test_rule()
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        test_rule()
+            .evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]
@@ -126,9 +129,11 @@ fn small_prompts_are_ignored() {
         .map(|_| entry("claude-sonnet-4-6", 1_000, 0, 0))
         .collect();
 
-    assert!(test_rule()
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        test_rule()
+            .evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]
@@ -140,9 +145,11 @@ fn unknown_model_contributes_no_waste() {
         .map(|_| entry("claude-imaginary-9000", 8_000, 0, 0))
         .collect();
 
-    assert!(test_rule()
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        test_rule()
+            .evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]
@@ -186,9 +193,10 @@ fn mid_tier_model_is_not_flagged_as_overreliance() {
         min_sample: 3,
     };
     let entries: Vec<UsageEntry> = (0..10).map(|_| small_entry("claude-sonnet-4-6")).collect();
-    assert!(rule
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        rule.evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]
@@ -202,9 +210,10 @@ fn large_requests_are_not_overreliance() {
     let entries: Vec<UsageEntry> = (0..10)
         .map(|_| entry_out("claude-opus-4-7", 50_000, 0, 0, 4_000))
         .collect();
-    assert!(rule
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        rule.evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]
@@ -239,9 +248,10 @@ fn light_reasoning_is_not_flagged() {
     let entries: Vec<UsageEntry> = (0..10)
         .map(|_| reasoning_entry("gpt-5.5", 800, 400, 200))
         .collect();
-    assert!(rule
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        rule.evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]
@@ -255,9 +265,10 @@ fn heavy_reasoning_on_large_prompts_is_not_flagged() {
     let entries: Vec<UsageEntry> = (0..10)
         .map(|_| reasoning_entry("gpt-5.5", 50_000, 3_000, 2_000))
         .collect();
-    assert!(rule
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        rule.evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]
@@ -270,9 +281,10 @@ fn tools_without_reasoning_counts_never_trip() {
         min_sample: 3,
     };
     let entries: Vec<UsageEntry> = (0..20).map(|_| small_entry("claude-opus-4-7")).collect();
-    assert!(rule
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        rule.evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]
@@ -304,9 +316,10 @@ fn entries_without_a_window_are_not_saturation() {
     let entries: Vec<UsageEntry> = (0..10)
         .map(|_| entry_out("claude-opus-4-7", 240_000, 0, 0, 0))
         .collect();
-    assert!(rule
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        rule.evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]
@@ -342,9 +355,10 @@ fn stable_session_is_not_runaway() {
     let entries: Vec<UsageEntry> = (0..9)
         .map(|i| session_entry("s1", "claude-sonnet-4-6", 5_000, i))
         .collect();
-    assert!(rule
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        rule.evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]
@@ -360,9 +374,10 @@ fn short_session_is_not_runaway() {
         .enumerate()
         .map(|(i, &v)| session_entry("s1", "claude-sonnet-4-6", v, i as i64))
         .collect();
-    assert!(rule
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        rule.evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]
@@ -393,9 +408,10 @@ fn small_session_is_not_mega() {
     let entries: Vec<UsageEntry> = (0..10)
         .map(|i| session_entry("s1", "claude-opus-4-7", 15_000, i))
         .collect();
-    assert!(rule
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        rule.evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]

@@ -5,7 +5,7 @@
 
 use std::fs;
 
-use burnwall::providers::{anthropic, google, openai, TokenUsage};
+use burnwall::providers::{TokenUsage, anthropic, google, openai};
 
 fn fixture(name: &str) -> Vec<u8> {
     let path = format!("tests/fixtures/{}", name);

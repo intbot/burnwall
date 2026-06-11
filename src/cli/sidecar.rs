@@ -45,7 +45,9 @@ pub async fn run_cmd(args: SidecarArgs) -> anyhow::Result<()> {
              (the sandbox bridge), never a public host."
         );
     }
-    println!("   (Same scanning + budgets + cost tracking as `burnwall start`, just deployed beside the agent.)");
+    println!(
+        "   (Same scanning + budgets + cost tracking as `burnwall start`, just deployed beside the agent.)"
+    );
     println!();
 
     // Delegate to the normal start path with the sidecar bind defaults.

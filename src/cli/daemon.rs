@@ -230,7 +230,7 @@ pub async fn shutdown_signal() {
     };
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         let mut sigterm = match signal(SignalKind::terminate()) {
             Ok(s) => s,
             Err(e) => {
@@ -288,7 +288,7 @@ fn spawn_detached(exe: &std::path::Path, args: &[String]) -> anyhow::Result<u32>
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{
-        CreateProcessW, CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS, PROCESS_INFORMATION,
+        CREATE_NEW_PROCESS_GROUP, CreateProcessW, DETACHED_PROCESS, PROCESS_INFORMATION,
         STARTUPINFOW,
     };
 
@@ -449,8 +449,8 @@ pub fn terminate_process(pid: u32) -> anyhow::Result<()> {
 pub fn process_is_alive(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW,
-        PROCESS_QUERY_LIMITED_INFORMATION,
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
     };
     // A process that has fully exited reports an exit code other than
     // STILL_ACTIVE (259). A process that genuinely exits *with* 259 would be
@@ -490,7 +490,7 @@ pub fn process_is_alive(pid: u32) -> bool {
 #[cfg(windows)]
 pub fn terminate_process(pid: u32) -> anyhow::Result<()> {
     use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
     unsafe {
         let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
         if handle.is_null() {

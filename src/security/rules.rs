@@ -160,7 +160,8 @@ pub fn is_unc_mount(value: &str) -> bool {
             // `:`? No — there it's `C` `:` `\` `\`, so the byte before `\\` is
             // `:`. Guard that: a single drive letter + colon before `\\` is a
             // local drive path, not UNC.
-            let drive_path = i >= 2 && bytes[i - 1] == b':' && (bytes[i - 2] as char).is_ascii_alphabetic();
+            let drive_path =
+                i >= 2 && bytes[i - 1] == b':' && (bytes[i - 2] as char).is_ascii_alphabetic();
             if at_boundary && !drive_path {
                 let rest = &value[i + 2..];
                 let rest_lower = rest.to_ascii_lowercase();
@@ -187,10 +188,7 @@ pub fn is_unc_mount(value: &str) -> bool {
 /// true for every leaf, blocking 100% of traffic (S-H8); filter it at ruleset
 /// construction so a hand-edited config or installed pack can't brick the proxy.
 pub fn non_empty_rules<I: IntoIterator<Item = String>>(rules: I) -> Vec<String> {
-    rules
-        .into_iter()
-        .filter(|r| !r.trim().is_empty())
-        .collect()
+    rules.into_iter().filter(|r| !r.trim().is_empty()).collect()
 }
 
 /// Lowercase and unify path separators (`\` → `/`) for case- and
@@ -217,7 +215,10 @@ mod tests {
     fn path_matches_handles_mixed_separators() {
         // Windows tools (Git Bash / WSL / agents) emit mixed separators.
         assert!(path_matches("C:\\Users\\me/.aws/credentials", "~/.aws"));
-        assert!(path_matches("C:\\Users\\me\\.config/gcloud\\creds", "~/.config/gcloud"));
+        assert!(path_matches(
+            "C:\\Users\\me\\.config/gcloud\\creds",
+            "~/.config/gcloud"
+        ));
         assert!(path_matches("\\\\.ssh\\id_rsa", "~/.ssh"));
     }
 
@@ -279,6 +280,9 @@ mod tests {
             "   ".to_string(),
             "chmod 777".to_string(),
         ]);
-        assert_eq!(filtered, vec!["rm -rf /".to_string(), "chmod 777".to_string()]);
+        assert_eq!(
+            filtered,
+            vec!["rm -rf /".to_string(), "chmod 777".to_string()]
+        );
     }
 }

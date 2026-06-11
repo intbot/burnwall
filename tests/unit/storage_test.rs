@@ -250,8 +250,13 @@ fn daily_totals_one_day_window_returns_only_today() {
     // the same inclusive-of-today convention as the `*_since_days` queries
     // (regression test for the off-by-one that made `history --days 7`
     // print 8 days).
-    let mut today_row =
-        RequestRecord::successful("anthropic", "claude-sonnet-4-6", &sample_usage(), 0.05, None);
+    let mut today_row = RequestRecord::successful(
+        "anthropic",
+        "claude-sonnet-4-6",
+        &sample_usage(),
+        0.05,
+        None,
+    );
     today_row.timestamp = local_noon(0);
     storage.insert_request(&today_row).unwrap();
 
@@ -513,10 +518,12 @@ fn approve_whole_server_approves_all_its_tools() {
 fn approve_unknown_tool_returns_false() {
     let storage = Storage::open_in_memory().unwrap();
     assert!(!storage.approve_mcp_tool("ghost", "nope").unwrap());
-    assert!(storage
-        .mcp_tool_trust_state("ghost", "nope")
-        .unwrap()
-        .is_none());
+    assert!(
+        storage
+            .mcp_tool_trust_state("ghost", "nope")
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]

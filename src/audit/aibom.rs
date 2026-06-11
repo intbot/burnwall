@@ -5,7 +5,7 @@
 //! each MCP server a `service`, and window-level totals ride in metadata
 //! properties. Metadata only — no prompt content.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::observe::digest::Digest;
 

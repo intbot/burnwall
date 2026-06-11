@@ -293,7 +293,10 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Re
         .any(|name| name == column);
     drop(stmt);
     if !present {
-        match conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"), []) {
+        match conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"),
+            [],
+        ) {
             Ok(_) => {}
             // Tolerate the check-then-ALTER race (D-M6): two processes opening
             // at once can both see the column missing; the loser's ALTER fails

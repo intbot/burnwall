@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use burnwall::mcp::{parse_tool_call, serve_with_shutdown, ToolCall, WatchState};
+use burnwall::mcp::{ToolCall, WatchState, parse_tool_call, serve_with_shutdown};
 use burnwall::security::SecurityEngine;
 use burnwall::storage::Storage;
 use serde_json::json;
@@ -726,10 +726,12 @@ async fn auto_denied_block_is_a_jsonrpc_error_with_string_id_echo() {
     assert_eq!(body["id"], "abc-1", "string ids must echo as strings");
     assert_eq!(body["error"]["code"], -32000);
     assert_eq!(body["error"]["type"], "auto_denied");
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("auto_deny"));
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("auto_deny")
+    );
 }
 
 // ─────────────────── M-C2: description-only change keeps approval ───────────────────

@@ -54,7 +54,11 @@ fn build_report(events: &[crate::storage::SecurityEvent], days: i64) -> String {
     let mut s = String::new();
     s.push_str("# Burnwall bug report\n\n");
     s.push_str(&format!("- Version: {}\n", env!("CARGO_PKG_VERSION")));
-    s.push_str(&format!("- OS: {} {}\n", std::env::consts::OS, std::env::consts::ARCH));
+    s.push_str(&format!(
+        "- OS: {} {}\n",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    ));
     s.push_str(&format!(
         "- Generated: {}\n",
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S %z")

@@ -7,7 +7,7 @@
 //! - M-M4: SARIF results must carry a `locations` array (GitHub code scanning
 //!   rejects results without one).
 
-use burnwall::audit::{sarif, AuditChain, VerifyReport};
+use burnwall::audit::{AuditChain, VerifyReport, sarif};
 use burnwall::providers::TokenUsage;
 use burnwall::storage::{RequestRecord, SecurityEvent, Storage};
 
@@ -142,10 +142,7 @@ fn concurrent_seals_do_not_fork_the_chain() {
     // Every row sealed exactly once between the two runs, and the resulting
     // chain is a single intact line — no duplicate prev_hash fork.
     assert_eq!(total.load(Ordering::SeqCst), 6);
-    assert_eq!(
-        c1.verify(&s1).unwrap(),
-        VerifyReport::Intact { count: 6 }
-    );
+    assert_eq!(c1.verify(&s1).unwrap(), VerifyReport::Intact { count: 6 });
 }
 
 // ── M-M4: SARIF results carry synthetic locations ────────────────────────────

@@ -129,7 +129,10 @@ fn install(exe: &std::path::Path, start: bool, _task: bool) -> Result<()> {
         }
         println!("   {}", sty.green("🟢 Loaded and started."));
     } else {
-        println!("   (not started — run `launchctl load -w {}`)", path.display());
+        println!(
+            "   (not started — run `launchctl load -w {}`)",
+            path.display()
+        );
     }
     println!("   Logs:  ~/Library/Logs/burnwall.log");
     println!("   Crash-loop bound: restart no more than once per 60s.");
@@ -143,8 +146,7 @@ fn uninstall() -> Result<()> {
         let _ = std::process::Command::new("launchctl")
             .args(["unload", "-w", path.to_str().unwrap_or("")])
             .status();
-        std::fs::remove_file(&path)
-            .with_context(|| format!("removing {}", path.display()))?;
+        std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
         println!("🛡  Removed LaunchAgent: {}", path.display());
     } else {
         println!("🛡  No LaunchAgent installed.");
@@ -198,7 +200,10 @@ fn install(exe: &std::path::Path, start: bool, _task: bool) -> Result<()> {
     let sty = Styler::stdout();
     println!(
         "{}",
-        sty.green(&format!("🛡  Installed systemd user unit: {}", path.display()))
+        sty.green(&format!(
+            "🛡  Installed systemd user unit: {}",
+            path.display()
+        ))
     );
     let _ = std::process::Command::new("systemctl")
         .args(["--user", "daemon-reload"])
@@ -237,8 +242,7 @@ fn uninstall() -> Result<()> {
         let _ = std::process::Command::new("systemctl")
             .args(["--user", "disable", "burnwall.service"])
             .status();
-        std::fs::remove_file(&path)
-            .with_context(|| format!("removing {}", path.display()))?;
+        std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
         let _ = std::process::Command::new("systemctl")
             .args(["--user", "daemon-reload"])
             .status();
@@ -253,8 +257,7 @@ fn uninstall() -> Result<()> {
 
 #[cfg(target_os = "windows")]
 fn task_xml_path() -> Result<PathBuf> {
-    let appdata = std::env::var_os("APPDATA")
-        .ok_or_else(|| anyhow::anyhow!("APPDATA not set"))?;
+    let appdata = std::env::var_os("APPDATA").ok_or_else(|| anyhow::anyhow!("APPDATA not set"))?;
     Ok(PathBuf::from(appdata).join("burnwall").join("task.xml"))
 }
 
@@ -358,9 +361,14 @@ fn install_run_key(exe: &std::path::Path, start: bool) -> Result<()> {
     if start {
         start_daemon_now(exe);
     } else {
-        println!("   {}", sty.yellow("(not started — will start at next logon)"));
+        println!(
+            "   {}",
+            sty.yellow("(not started — will start at next logon)")
+        );
     }
-    println!("   Tip: `--task` installs a Scheduled Task with crash-restart (needs an elevated terminal).");
+    println!(
+        "   Tip: `--task` installs a Scheduled Task with crash-restart (needs an elevated terminal)."
+    );
     Ok(())
 }
 
@@ -383,8 +391,7 @@ fn install_scheduled_task(exe: &std::path::Path, start: bool) -> Result<()> {
     for w in utf16 {
         bytes.extend_from_slice(&w.to_le_bytes());
     }
-    std::fs::write(&xml_path, &bytes)
-        .with_context(|| format!("writing {}", xml_path.display()))?;
+    std::fs::write(&xml_path, &bytes).with_context(|| format!("writing {}", xml_path.display()))?;
 
     let status = std::process::Command::new("schtasks.exe")
         .args([
@@ -433,7 +440,10 @@ fn start_daemon_now(exe: &std::path::Path) {
         .args(["start", "--daemon"])
         .status()
     {
-        Ok(s) if s.success() => println!("   {}", sty.green("🟢 Proxy started — now protecting traffic.")),
+        Ok(s) if s.success() => println!(
+            "   {}",
+            sty.green("🟢 Proxy started — now protecting traffic.")
+        ),
         _ => println!(
             "   {}",
             sty.yellow("(could not start now — will start at next logon)")

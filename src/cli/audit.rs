@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::{Args, Subcommand};
 
-use crate::audit::{aibom, sarif, AuditChain, VerifyReport};
+use crate::audit::{AuditChain, VerifyReport, aibom, sarif};
 use crate::observe::digest::Digest;
 use crate::storage::{ReceiptRow, Storage};
 
@@ -220,12 +220,29 @@ fn write_evidence_pack(
     std::fs::write(dir.join("MANIFEST.md"), manifest).context("writing MANIFEST.md")?;
 
     writeln!(out, "🧾 Evidence pack written to {}", dir.display())?;
-    writeln!(out, "   receipts.json        — {} signed hash-chained receipt(s)", receipts.len())?;
-    writeln!(out, "   aibom.cdx.json       — CycloneDX 1.6 AI Bill of Materials")?;
-    writeln!(out, "   security.sarif.json  — SARIF 2.1.0 ({} security event(s))", events.len())?;
-    writeln!(out, "   MANIFEST.md          — control mapping (ISO 42001 / EU AI Act / FINRA)")?;
+    writeln!(
+        out,
+        "   receipts.json        — {} signed hash-chained receipt(s)",
+        receipts.len()
+    )?;
+    writeln!(
+        out,
+        "   aibom.cdx.json       — CycloneDX 1.6 AI Bill of Materials"
+    )?;
+    writeln!(
+        out,
+        "   security.sarif.json  — SARIF 2.1.0 ({} security event(s))",
+        events.len()
+    )?;
+    writeln!(
+        out,
+        "   MANIFEST.md          — control mapping (ISO 42001 / EU AI Act / FINRA)"
+    )?;
     if public_key.is_none() {
-        writeln!(out, "   ⚠  no audit key found — receipts are unsigned; run `burnwall audit seal` first")?;
+        writeln!(
+            out,
+            "   ⚠  no audit key found — receipts are unsigned; run `burnwall audit seal` first"
+        )?;
     }
     Ok(())
 }
@@ -265,11 +282,7 @@ fn evidence_manifest(
 }
 
 fn plural(n: u64) -> &'static str {
-    if n == 1 {
-        ""
-    } else {
-        "s"
-    }
+    if n == 1 { "" } else { "s" }
 }
 
 fn write_receipts_json(

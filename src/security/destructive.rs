@@ -99,7 +99,10 @@ fn tokens(lower: &str) -> impl Iterator<Item = &str> {
     lower
         .split(|c: char| {
             c.is_whitespace()
-                || matches!(c, ';' | '|' | '&' | '"' | '\'' | '{' | '}' | ':' | ',' | '(' | ')')
+                || matches!(
+                    c,
+                    ';' | '|' | '&' | '"' | '\'' | '{' | '}' | ':' | ',' | '(' | ')'
+                )
         })
         .filter(|t| !t.is_empty())
 }

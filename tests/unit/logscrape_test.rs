@@ -8,7 +8,7 @@ use std::time::{Duration as StdDuration, SystemTime};
 
 use chrono::{DateTime, Duration, Local, NaiveDate, Utc};
 
-use burnwall::logscrape::{self, aider, claude_code, codex, opencode, UsageEntry};
+use burnwall::logscrape::{self, UsageEntry, aider, claude_code, codex, opencode};
 use burnwall::providers::TokenUsage;
 
 fn fixture(name: &str) -> String {
@@ -207,9 +207,11 @@ fn codex_collect_reads_rollout_files() {
     let _guard = set_log_dir("BURNWALL_CODEX_LOG_DIR", dir.path());
     let entries = codex::collect();
     assert_eq!(entries.len(), 3);
-    assert!(entries
-        .iter()
-        .all(|e| e.tool == "codex" && e.model == "gpt-5.5"));
+    assert!(
+        entries
+            .iter()
+            .all(|e| e.tool == "codex" && e.model == "gpt-5.5")
+    );
 }
 
 // ─────────────────────────── OpenCode parser ───────────────────────────

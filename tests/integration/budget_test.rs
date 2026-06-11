@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::thread;
 
 use burnwall::budget::{
-    check_daily, BudgetConfig, BudgetStatus, BudgetTracker, LoopConfig, LoopDetector, LoopVerdict,
+    BudgetConfig, BudgetStatus, BudgetTracker, LoopConfig, LoopDetector, LoopVerdict, check_daily,
 };
 use burnwall::providers::TokenUsage;
 use burnwall::storage::{RequestRecord, Storage};
@@ -91,7 +91,10 @@ fn reset_zeroes_day_but_not_month() {
     t.record(5.0);
     t.reset();
     assert!((t.today_spent()).abs() < EPS, "daily reset to zero");
-    assert!((t.month_spent() - 5.0).abs() < EPS, "month untouched by daily reset");
+    assert!(
+        (t.month_spent() - 5.0).abs() < EPS,
+        "month untouched by daily reset"
+    );
 }
 
 // ───────────────────────────── Pure check ─────────────────────────────
@@ -515,7 +518,10 @@ fn per_session_accumulates_and_blocks_at_cap() {
 fn per_session_is_isolated_per_session_id() {
     let t = BudgetTracker::new(cfg_session(1.0));
     t.record_session("a", 1.5);
-    assert!(matches!(t.check_session("a"), BudgetStatus::Exceeded { .. }));
+    assert!(matches!(
+        t.check_session("a"),
+        BudgetStatus::Exceeded { .. }
+    ));
     // A different session/swarm is unaffected by sibling spend.
     assert!(matches!(t.check_session("b"), BudgetStatus::Ok));
 }

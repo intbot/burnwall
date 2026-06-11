@@ -19,15 +19,15 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Instant;
 
 use bytes::Bytes;
-use hyper::http::{HeaderMap, HeaderName, HeaderValue, Method};
 use hyper::Response;
+use hyper::http::{HeaderMap, HeaderName, HeaderValue, Method};
 use tracing::{debug, error, warn};
 
 use crate::pricing;
-use crate::providers::{anthropic, google, openai, ParsedResponse, TokenUsage};
+use crate::providers::{ParsedResponse, TokenUsage, anthropic, google, openai};
 use crate::storage::RequestRecord;
 
-use super::{streaming, AppState, BoxError, ProxyBody};
+use super::{AppState, BoxError, ProxyBody, streaming};
 
 // RFC 7230 §6.1 hop-by-hop headers, plus `Host` (reqwest derives it from
 // the URL) and `Content-Length` (we re-stream, so chunked encoding will
@@ -413,7 +413,9 @@ pub async fn passthrough(
             headers_mut.append(hn, hv);
         }
     }
-    Ok(response.body(body).expect("passthrough: response build failed"))
+    Ok(response
+        .body(body)
+        .expect("passthrough: response build failed"))
 }
 
 #[cfg(test)]
@@ -423,14 +425,14 @@ mod tests {
     #[test]
     fn tracked_outbound_headers_strips_accept_encoding_and_hop_by_hop() {
         let mut h = HeaderMap::new();
-        h.insert("accept-encoding", HeaderValue::from_static("gzip, br, zstd"));
+        h.insert(
+            "accept-encoding",
+            HeaderValue::from_static("gzip, br, zstd"),
+        );
         h.insert("connection", HeaderValue::from_static("keep-alive"));
         h.insert("content-length", HeaderValue::from_static("42"));
         h.insert("x-api-key", HeaderValue::from_static("k"));
-        h.insert(
-            "anthropic-version",
-            HeaderValue::from_static("2023-06-01"),
-        );
+        h.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
         let out = tracked_outbound_headers(&h);
         // Forwarding the client's accept-encoding lets the upstream compress
         // the body, which the tee can't parse — cost tracking goes dark.

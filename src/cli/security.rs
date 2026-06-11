@@ -144,7 +144,10 @@ fn print_summary<W: Write>(
     };
     if events.is_empty() {
         writeln!(out, "🛡️  All clear — Burnwall blocked nothing {window}.")?;
-        writeln!(out, "   (No news is good news; protection is running silently.)")?;
+        writeln!(
+            out,
+            "   (No news is good news; protection is running silently.)"
+        )?;
         return Ok(());
     }
 

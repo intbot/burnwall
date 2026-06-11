@@ -8,7 +8,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use assert_cmd::Command;
-use burnwall::cli::init::{append_to_rc, binary_in_path_var, detect_tools, Shell};
+use burnwall::cli::init::{Shell, append_to_rc, binary_in_path_var, detect_tools};
 use predicates::prelude::*;
 
 fn make_fake_binary(dir: &PathBuf, name: &str) {

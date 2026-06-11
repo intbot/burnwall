@@ -194,7 +194,10 @@ pub fn mtime_is_stale(mtime: SystemTime, cutoff: SystemTime) -> bool {
 /// no pruning rather than wrong pruning).
 pub fn cutoff_for_local_date(date: &str) -> Option<SystemTime> {
     let day = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
-    let midnight = day.and_hms_opt(0, 0, 0)?.and_local_timezone(Local).earliest()?;
+    let midnight = day
+        .and_hms_opt(0, 0, 0)?
+        .and_local_timezone(Local)
+        .earliest()?;
     Some(SystemTime::from(midnight))
 }
 

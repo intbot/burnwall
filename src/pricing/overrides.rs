@@ -100,7 +100,9 @@ pub fn parse(toml_text: &str) -> Result<Vec<(String, ModelPricing)>, toml::de::E
 /// Default location of the override file: `<data dir>/pricing.toml`
 /// (i.e. `~/.burnwall/pricing.toml`, honoring `BURNWALL_DATA_DIR`).
 pub fn override_path() -> Option<PathBuf> {
-    crate::storage::data_dir().ok().map(|d| d.join("pricing.toml"))
+    crate::storage::data_dir()
+        .ok()
+        .map(|d| d.join("pricing.toml"))
 }
 
 /// Load the override file (if present) into the process-global table. Idempotent

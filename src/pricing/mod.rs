@@ -10,7 +10,7 @@ pub mod overrides;
 pub mod rates;
 
 pub use cache_calc::{cache_savings, cost, cost_without_cache};
-pub use rates::{get_pricing, get_pricing_with, ModelPricing, KNOWN_MODELS, PRICING_LAST_UPDATED};
+pub use rates::{KNOWN_MODELS, ModelPricing, PRICING_LAST_UPDATED, get_pricing, get_pricing_with};
 
 /// Load user pricing overrides from `~/.burnwall/pricing.toml` into the
 /// process-global table. Call once at startup, before any cost is computed.

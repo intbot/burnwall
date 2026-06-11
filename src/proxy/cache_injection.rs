@@ -10,7 +10,7 @@
 //! enabling injection is an explicit opt-in via config or CLI flag.
 
 use bytes::Bytes;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Outcome of an attempt to rewrite a request body.
 #[derive(Debug, Clone)]

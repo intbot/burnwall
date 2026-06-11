@@ -9,13 +9,13 @@
 //! derives them from `chrono::Local`).
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 
 use super::{
+    Result, Storage,
     models::{
         DailyTotal, McpEvent, McpToolRow, ModelBreakdown, ReceiptRow, RequestRecord, SecurityEvent,
     },
-    Result, Storage,
 };
 
 /// Outcome of recording a tool advertised by an MCP server, relative to what
@@ -645,9 +645,8 @@ impl Storage {
                  WHERE DATE(timestamp, 'localtime') >= DATE('now', 'localtime', ?1)
                  ORDER BY timestamp DESC",
             )?;
-            let rows: rusqlite::Result<Vec<McpEvent>> = stmt
-                .query_map(params![offset], row_to_mcp_event)?
-                .collect();
+            let rows: rusqlite::Result<Vec<McpEvent>> =
+                stmt.query_map(params![offset], row_to_mcp_event)?.collect();
             Ok(rows?)
         })
     }
@@ -661,9 +660,8 @@ impl Storage {
                  WHERE DATE(timestamp, 'localtime') = ?1
                  ORDER BY timestamp DESC",
             )?;
-            let rows: rusqlite::Result<Vec<McpEvent>> = stmt
-                .query_map(params![date], row_to_mcp_event)?
-                .collect();
+            let rows: rusqlite::Result<Vec<McpEvent>> =
+                stmt.query_map(params![date], row_to_mcp_event)?.collect();
             Ok(rows?)
         })
     }

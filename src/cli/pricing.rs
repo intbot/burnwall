@@ -218,7 +218,11 @@ fn path(init: bool) -> anyhow::Result<()> {
     let mut out = std::io::stdout().lock();
     writeln!(out, "{}", path.display())?;
     if path.exists() {
-        writeln!(out, "   (exists — {} override(s) loaded)", overrides::count())?;
+        writeln!(
+            out,
+            "   (exists — {} override(s) loaded)",
+            overrides::count()
+        )?;
         return Ok(());
     }
     if init {
@@ -228,7 +232,10 @@ fn path(init: bool) -> anyhow::Result<()> {
         }
         std::fs::write(&path, overrides::sample_toml())
             .with_context(|| format!("writing {}", path.display()))?;
-        writeln!(out, "   ✓ wrote a commented starter file — edit it, then run `burnwall pricing list` to confirm.")?;
+        writeln!(
+            out,
+            "   ✓ wrote a commented starter file — edit it, then run `burnwall pricing list` to confirm."
+        )?;
     } else {
         writeln!(
             out,
@@ -355,7 +362,8 @@ fn update(
     })?;
 
     let content = String::from_utf8(card_bytes).context("card is not valid UTF-8")?;
-    let table = overrides::parse(&content).context("fetched file did not parse as a pricing card")?;
+    let table =
+        overrides::parse(&content).context("fetched file did not parse as a pricing card")?;
 
     println!(
         "📥 Fetched pricing card — signature verified (publisher '{}').",

@@ -7,7 +7,7 @@ use std::io::Write;
 use anyhow::Context;
 use clap::Args;
 
-use crate::observe::metrics::{aggregate, ModelMetrics};
+use crate::observe::metrics::{ModelMetrics, aggregate};
 use crate::storage::Storage;
 
 #[derive(Args, Debug)]
@@ -95,11 +95,7 @@ fn write_json(w: &mut impl Write, days: i64, metrics: &[ModelMetrics]) -> std::i
 }
 
 fn plural(n: i64) -> &'static str {
-    if n == 1 {
-        ""
-    } else {
-        "s"
-    }
+    if n == 1 { "" } else { "s" }
 }
 
 fn truncate(s: &str, n: usize) -> String {

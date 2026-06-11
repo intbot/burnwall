@@ -5,7 +5,7 @@
 //! distinct `event_type` becomes a rule; each event a result at `error` level.
 //! Metadata only — `details` may already be redacted by `log_redact_details`.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::storage::SecurityEvent;
 

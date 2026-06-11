@@ -110,7 +110,11 @@ pub fn sweep_stale_artifact() {
 /// renamed to `.old`, so reusing it would fail. Order: canonical dir → bare
 /// `burnwall` (PATH-resolved) → the original path as a last resort.
 fn restart_binary(original_exe: &std::path::Path) -> std::path::PathBuf {
-    let bin_name = if cfg!(windows) { "burnwall.exe" } else { "burnwall" };
+    let bin_name = if cfg!(windows) {
+        "burnwall.exe"
+    } else {
+        "burnwall"
+    };
     if let Some(home) = dirs::home_dir() {
         let canonical = home.join(".burnwall").join("bin").join(bin_name);
         if canonical.exists() {
@@ -139,7 +143,9 @@ fn installer_url() -> String {
 fn run_installer(url: &str) -> Result<()> {
     let status = std::process::Command::new("sh")
         .arg("-c")
-        .arg(format!("curl --proto '=https' --tlsv1.2 -LsSf '{url}' | sh"))
+        .arg(format!(
+            "curl --proto '=https' --tlsv1.2 -LsSf '{url}' | sh"
+        ))
         .status()
         .context("running shell installer")?;
     if !status.success() {

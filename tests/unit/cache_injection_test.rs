@@ -1,7 +1,7 @@
 //! Unit tests for the Anthropic `cache_control` auto-injection logic.
 
 use bytes::Bytes;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use burnwall::proxy::cache_injection::{
     estimate_savings_usd, inject_if_eligible, is_messages_path,

@@ -90,9 +90,7 @@ pub fn env_file_disabled(shell: Shell) -> String {
         Shell::Powershell => "#",
         _ => "#",
     };
-    format!(
-        "{comment} burnwall routing — disabled. Re-enable with `burnwall enable-routing`.\n"
-    )
+    format!("{comment} burnwall routing — disabled. Re-enable with `burnwall enable-routing`.\n")
 }
 
 /// Marker carried by an env file that `burnwall stop` paused, telling it
@@ -674,7 +672,10 @@ mod tests {
         assert!(joined.contains("TcpClient"), "{joined}");
         assert!(joined.contains("$env:ANTHROPIC_BASE_URL ="));
         assert!(joined.contains("$env:OPENAI_BASE_URL ="));
-        assert!(joined.contains("catch"), "probe failure must be swallowed: {joined}");
+        assert!(
+            joined.contains("catch"),
+            "probe failure must be swallowed: {joined}"
+        );
     }
 
     #[test]
@@ -704,7 +705,10 @@ mod tests {
     #[test]
     fn unset_lines_posix() {
         let lines = unset_lines(Shell::Bash);
-        assert_eq!(lines, vec!["unset ANTHROPIC_BASE_URL", "unset OPENAI_BASE_URL"]);
+        assert_eq!(
+            lines,
+            vec!["unset ANTHROPIC_BASE_URL", "unset OPENAI_BASE_URL"]
+        );
     }
 
     #[test]

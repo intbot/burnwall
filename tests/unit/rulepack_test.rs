@@ -193,9 +193,11 @@ id = "corp"
 deny_paths = ["/corp/secrets"]
 "#,
     );
-    assert!(engine
-        .scan(br#"{"path": "/corp/secrets/db.json"}"#)
-        .is_some());
+    assert!(
+        engine
+            .scan(br#"{"path": "/corp/secrets/db.json"}"#)
+            .is_some()
+    );
 }
 
 // ── Official bundled packs (Phase B) ───────────────────────────────────────
@@ -261,9 +263,8 @@ fn lint_rejects_overbroad_rules() {
     let overbroad_cmd = packs::lint("id = \"x\"\ndeny_commands = [\"rm\"]\n");
     assert!(overbroad_cmd.iter().any(|x| x.code == "overbroad-command"));
 
-    let overbroad_re = packs::lint(
-        "id = \"x\"\n[[secret_patterns]]\nname = \"all\"\nregex = \".*\"\n",
-    );
+    let overbroad_re =
+        packs::lint("id = \"x\"\n[[secret_patterns]]\nname = \"all\"\nregex = \".*\"\n");
     assert!(overbroad_re.iter().any(|x| x.code == "overbroad-regex"));
 }
 
@@ -278,10 +279,16 @@ fn lint_rejects_uncompilable_regex() {
 #[test]
 fn lint_flags_empty_pack_and_missing_id() {
     use burnwall::security::packs;
-    assert!(packs::lint("id = \"x\"\n").iter().any(|x| x.code == "empty-pack"));
-    assert!(packs::lint("deny_paths = [\"/a\"]\n")
-        .iter()
-        .any(|x| x.code == "missing-id"));
+    assert!(
+        packs::lint("id = \"x\"\n")
+            .iter()
+            .any(|x| x.code == "empty-pack")
+    );
+    assert!(
+        packs::lint("deny_paths = [\"/a\"]\n")
+            .iter()
+            .any(|x| x.code == "missing-id")
+    );
 }
 
 // ── M-M6 — pack id is used as a filename; reject traversal attempts ─────────
@@ -314,5 +321,8 @@ fn lint_clean_pack_passes_with_only_warnings() {
     let full = packs::lint(
         "id = \"corp\"\nname = \"Corp\"\nversion = \"1.0.0\"\ndeny_paths = [\"/corp/secrets\"]\n",
     );
-    assert!(full.is_empty(), "fully-specified pack should have no findings: {full:?}");
+    assert!(
+        full.is_empty(),
+        "fully-specified pack should have no findings: {full:?}"
+    );
 }

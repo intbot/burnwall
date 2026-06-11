@@ -141,7 +141,10 @@ impl Shell {
     /// single-shell assumption breaks on Windows, where PowerShell and Git-bash
     /// commonly coexist.
     pub fn configured() -> Vec<Shell> {
-        Self::ALL.into_iter().filter(|s| s.is_configured()).collect()
+        Self::ALL
+            .into_iter()
+            .filter(|s| s.is_configured())
+            .collect()
     }
 
     /// The shells an enable/disable should act on: every already-configured
@@ -335,10 +338,22 @@ pub fn run_cmd(args: InitArgs) -> anyhow::Result<()> {
         && crate::coverage::codex_auth_mode() == Some(crate::coverage::CodexAuth::ChatGpt)
     {
         writeln!(out)?;
-        writeln!(out, "  ⚠️  Codex is on ChatGPT login — its traffic goes to the ChatGPT")?;
-        writeln!(out, "      backend and CANNOT be protected by Burnwall (or any no-MITM")?;
-        writeln!(out, "      proxy). Codex in API-key mode would route through Burnwall, but")?;
-        writeln!(out, "      it bills per-token rather than your flat subscription — weigh")?;
+        writeln!(
+            out,
+            "  ⚠️  Codex is on ChatGPT login — its traffic goes to the ChatGPT"
+        )?;
+        writeln!(
+            out,
+            "      backend and CANNOT be protected by Burnwall (or any no-MITM"
+        )?;
+        writeln!(
+            out,
+            "      proxy). Codex in API-key mode would route through Burnwall, but"
+        )?;
+        writeln!(
+            out,
+            "      it bills per-token rather than your flat subscription — weigh"
+        )?;
         writeln!(out, "      the cost trade-off before switching.")?;
     }
     writeln!(out)?;
@@ -354,7 +369,10 @@ pub fn run_cmd(args: InitArgs) -> anyhow::Result<()> {
     // Three things init can do — show what each is, then either dry-run or
     // execute based on --apply. Service install is opt-in via flag or prompt.
     if !args.apply {
-        writeln!(out, "▶ This run is a DRY RUN. Re-run with --apply to perform the actions below.")?;
+        writeln!(
+            out,
+            "▶ This run is a DRY RUN. Re-run with --apply to perform the actions below."
+        )?;
         writeln!(out)?;
     }
 
@@ -371,7 +389,11 @@ pub fn run_cmd(args: InitArgs) -> anyhow::Result<()> {
         for line in super::routing::export_lines(s, &args.proxy_url) {
             writeln!(out, "               {}", line)?;
         }
-        writeln!(out, "             append source line to {}", hook_target_label(s))?;
+        writeln!(
+            out,
+            "             append source line to {}",
+            hook_target_label(s)
+        )?;
         if args.apply {
             // Preflight (M1): writing an Active env file with no proxy serving
             // means every new terminal exports a dead-port URL — the user's
@@ -409,11 +431,18 @@ pub fn run_cmd(args: InitArgs) -> anyhow::Result<()> {
             if hook_added {
                 writeln!(out, "   ✓ rc hook added to {}", hook_target_label(s))?;
             } else {
-                writeln!(out, "   • rc hook already present in {}", hook_target_label(s))?;
+                writeln!(
+                    out,
+                    "   • rc hook already present in {}",
+                    hook_target_label(s)
+                )?;
             }
         }
     } else {
-        writeln!(out, "   (shell not detected — set ANTHROPIC_BASE_URL / OPENAI_BASE_URL manually)")?;
+        writeln!(
+            out,
+            "   (shell not detected — set ANTHROPIC_BASE_URL / OPENAI_BASE_URL manually)"
+        )?;
     }
 
     // Git Bash on Windows: init run from a PowerShell terminal detects
@@ -430,7 +459,10 @@ pub fn run_cmd(args: InitArgs) -> anyhow::Result<()> {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "~/.bashrc".to_string());
         writeln!(out)?;
-        writeln!(out, "   Git Bash detected — bash sessions are not routed yet.")?;
+        writeln!(
+            out,
+            "   Git Bash detected — bash sessions are not routed yet."
+        )?;
         if !args.apply {
             let env_file = super::routing::env_file_path(Shell::Bash)
                 .map(|p| p.display().to_string())
@@ -469,7 +501,10 @@ pub fn run_cmd(args: InitArgs) -> anyhow::Result<()> {
     } else if args.apply {
         prompt_yes_no(&mut out, "   Register burnwall as a login service?")?
     } else {
-        writeln!(out, "   (use --install-service to register the proxy as a login-time service)")?;
+        writeln!(
+            out,
+            "   (use --install-service to register the proxy as a login-time service)"
+        )?;
         false
     };
     if want_service {
@@ -486,7 +521,10 @@ pub fn run_cmd(args: InitArgs) -> anyhow::Result<()> {
             writeln!(out, "   {action_label}: register login-time service")?;
         }
     } else if args.apply {
-        writeln!(out, "   • skipped (re-run with --install-service to add it later)")?;
+        writeln!(
+            out,
+            "   • skipped (re-run with --install-service to add it later)"
+        )?;
     }
     writeln!(out)?;
 
@@ -502,19 +540,32 @@ pub fn run_cmd(args: InitArgs) -> anyhow::Result<()> {
                 match super::claude_settings::install(&path) {
                     Ok(super::claude_settings::InstallOutcome::Wrote) => {
                         writeln!(out, "   ✓ added `statusLine` to {}", path.display())?;
-                        writeln!(out, "     restart Claude Code to see: 🔥 burnwall · model · ↑/↓ tokens · $ spend")?;
+                        writeln!(
+                            out,
+                            "     restart Claude Code to see: 🔥 burnwall · model · ↑/↓ tokens · $ spend"
+                        )?;
                     }
                     Ok(super::claude_settings::InstallOutcome::AlreadyOurs) => {
                         writeln!(out, "   • already wired up in {}", path.display())?;
                     }
                     Ok(super::claude_settings::InstallOutcome::ForeignPresent(cmd)) => {
-                        writeln!(out, "   • left your existing status line untouched (command: {cmd})")?;
-                        writeln!(out, "     to use Burnwall's, set statusLine.command to `burnwall statusline`")?;
+                        writeln!(
+                            out,
+                            "   • left your existing status line untouched (command: {cmd})"
+                        )?;
+                        writeln!(
+                            out,
+                            "     to use Burnwall's, set statusLine.command to `burnwall statusline`"
+                        )?;
                     }
                     Err(e) => writeln!(out, "   ⚠  skipped: {}", e)?,
                 }
             } else {
-                writeln!(out, "   {action_label}: merge `statusLine` → {}", path.display())?;
+                writeln!(
+                    out,
+                    "   {action_label}: merge `statusLine` → {}",
+                    path.display()
+                )?;
                 writeln!(out, "             command: burnwall statusline")?;
             }
         } else {
@@ -537,13 +588,19 @@ pub fn run_cmd(args: InitArgs) -> anyhow::Result<()> {
         writeln!(out, "   • Apply to *this* shell now without restarting:")?;
         match shell {
             Some(Shell::Powershell) => {
-                writeln!(out, "       burnwall enable-routing --eval | Out-String | Invoke-Expression")?;
+                writeln!(
+                    out,
+                    "       burnwall enable-routing --eval | Out-String | Invoke-Expression"
+                )?;
             }
             _ => {
                 writeln!(out, "       eval \"$(burnwall enable-routing)\"")?;
             }
         }
-        writeln!(out, "   • Kill switch (instant bypass):  export BURNWALL_BYPASS=1")?;
+        writeln!(
+            out,
+            "   • Kill switch (instant bypass):  export BURNWALL_BYPASS=1"
+        )?;
     } else {
         writeln!(out, "   • Re-run with --apply to execute.")?;
         writeln!(out, "   • Or run the commands directly:")?;

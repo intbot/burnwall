@@ -184,7 +184,11 @@ pub async fn run_cmd(args: EnableRoutingArgs) -> Result<()> {
                 )?;
             }
             _ => {
-                writeln!(out, "     {}", sty.bold("eval \"$(burnwall enable-routing)\""))?;
+                writeln!(
+                    out,
+                    "     {}",
+                    sty.bold("eval \"$(burnwall enable-routing)\"")
+                )?;
             }
         }
         writeln!(out)?;

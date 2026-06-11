@@ -27,7 +27,7 @@ use futures_util::stream::{Stream, StreamExt};
 use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt, Empty, Full, StreamBody};
 use hyper::body::Frame;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 

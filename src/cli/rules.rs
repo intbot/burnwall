@@ -411,7 +411,9 @@ fn print_add_summary(pack: &packs::RulePack, prior: Option<&str>, hash: &str) {
     match prior {
         Some(h) if h == hash => println!("   Status: already approved (unchanged)"),
         Some(_) => {
-            println!("   Status: ⚠️  CHANGED since last approval — review carefully (possible tampering)")
+            println!(
+                "   Status: ⚠️  CHANGED since last approval — review carefully (possible tampering)"
+            )
         }
         None => println!("   Status: new — not previously approved"),
     }

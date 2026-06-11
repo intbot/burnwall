@@ -5,8 +5,8 @@
 //! `f64` multiplication, no exotic rounding.
 
 use burnwall::pricing::{
-    cache_savings, calculate_cost, cost, cost_without_cache, get_pricing, get_pricing_with,
-    overrides, ModelPricing,
+    ModelPricing, cache_savings, calculate_cost, cost, cost_without_cache, get_pricing,
+    get_pricing_with, overrides,
 };
 use burnwall::providers::TokenUsage;
 
@@ -235,7 +235,11 @@ fn cost_gemini_cached_matches_hand_calculation() {
         cache_read_tokens: 1536,
     };
     let pricing = get_pricing("gemini-2.5-flash").expect("pricing");
-    approx_eq(cost(&usage, pricing), 0.00094968, "gemini flash cached cost");
+    approx_eq(
+        cost(&usage, pricing),
+        0.00094968,
+        "gemini flash cached cost",
+    );
 }
 
 #[test]

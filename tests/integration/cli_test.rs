@@ -650,7 +650,11 @@ fn pricing_verify_without_publishers_errors() {
     let path = dir.path().to_path_buf();
     fs::create_dir_all(&path).unwrap();
     let card = path.join("card.toml");
-    fs::write(&card, "[[model]]\nname = \"x\"\ninput_per_mtok = 1.0\noutput_per_mtok = 1.0\n").unwrap();
+    fs::write(
+        &card,
+        "[[model]]\nname = \"x\"\ninput_per_mtok = 1.0\noutput_per_mtok = 1.0\n",
+    )
+    .unwrap();
     let sig = path.join("card.sig");
     fs::write(&sig, "deadbeef").unwrap();
 
@@ -681,7 +685,7 @@ fn statusline_renders_ribbon_from_claude_code_json() {
         .assert()
         .success()
         .stdout(predicate::str::contains("🔥 burnwall · sonnet-4.6"))
-        .stdout(predicate::str::contains("↑13k ↓615"))   // input buckets summed
+        .stdout(predicate::str::contains("↑13k ↓615")) // input buckets summed
         .stdout(predicate::str::contains("$0.16 sess"))
         .stdout(predicate::str::contains("ctx [▓▓"))
         .stdout(predicate::str::contains("22%"));
@@ -777,9 +781,20 @@ fn status_shows_by_session_when_sessions_present() {
     fs::create_dir_all(&path).unwrap();
     // Seed two requests carrying an x-burnwall-session id.
     let db = Storage::open(path.join("burnwall.db")).unwrap();
-    let usage = TokenUsage { input_tokens: 1000, output_tokens: 200, cache_creation_tokens: 0, cache_read_tokens: 0 };
+    let usage = TokenUsage {
+        input_tokens: 1000,
+        output_tokens: 200,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+    };
     for cost in [0.02_f64, 0.03] {
-        let mut r = RequestRecord::successful("anthropic", "claude-sonnet-4-6", &usage, cost, Some("swarm-7".into()));
+        let mut r = RequestRecord::successful(
+            "anthropic",
+            "claude-sonnet-4-6",
+            &usage,
+            cost,
+            Some("swarm-7".into()),
+        );
         r.timestamp = Utc::now();
         db.insert_request(&r).unwrap();
     }

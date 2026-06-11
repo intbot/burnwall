@@ -39,8 +39,8 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tracing::warn;
 
-use super::secrets::SecretPattern;
 use super::Ruleset;
+use super::secrets::SecretPattern;
 
 /// SHA-256 of a pack's bytes, hex-encoded — the content pin used for
 /// Trust-On-First-Use (invariant I6: any byte change re-flags the pack, so a
@@ -207,8 +207,26 @@ const OVERBROAD_PATHS: &[&str] = &["", "/", "~", "~/", ".", "/.", "/.env", "/.gi
 
 /// Bare common commands that would over-block normal development if denied.
 const OVERBROAD_COMMANDS: &[&str] = &[
-    "", "rm", "delete", "git", "kubectl", "helm", "npm", "yarn", "go", "cat", "ls",
-    "curl", "wget", "sudo", "docker", "terraform", "python", "python3", "node", "pip",
+    "",
+    "rm",
+    "delete",
+    "git",
+    "kubectl",
+    "helm",
+    "npm",
+    "yarn",
+    "go",
+    "cat",
+    "ls",
+    "curl",
+    "wget",
+    "sudo",
+    "docker",
+    "terraform",
+    "python",
+    "python3",
+    "node",
+    "pip",
 ];
 
 /// Regexes that match (nearly) everything — a secret pattern this broad would
@@ -291,7 +309,10 @@ pub fn lint(content: &str) -> Vec<LintFinding> {
         }
     };
     let Some(table) = value.as_table() else {
-        out.push(LintFinding::error("not-a-table", "pack must be a TOML table"));
+        out.push(LintFinding::error(
+            "not-a-table",
+            "pack must be a TOML table",
+        ));
         return out;
     };
     for key in table.keys() {
@@ -327,7 +348,10 @@ pub fn lint(content: &str) -> Vec<LintFinding> {
         out.push(LintFinding::warn("missing-name", "pack has no `name`"));
     }
     if raw.version.trim().is_empty() {
-        out.push(LintFinding::warn("missing-version", "pack has no `version`"));
+        out.push(LintFinding::warn(
+            "missing-version",
+            "pack has no `version`",
+        ));
     } else if !is_semverish(&raw.version) {
         out.push(LintFinding::warn(
             "version-format",
@@ -391,7 +415,10 @@ pub fn lint(content: &str) -> Vec<LintFinding> {
 /// Loose semver gate: three dot-separated numeric components (`1.0.0`).
 fn is_semverish(v: &str) -> bool {
     let parts: Vec<&str> = v.trim().split('.').collect();
-    parts.len() == 3 && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Official rule packs compiled into the binary — inherently trusted, part of

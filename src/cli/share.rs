@@ -30,9 +30,7 @@ pub fn run_cmd(args: ShareArgs) -> anyhow::Result<()> {
     let storage = Storage::open_default().context("opening storage")?;
     let rows = storage.breakdown_since_days(args.days)?;
     let (spent, saved) = spend_and_savings(&rows);
-    let blocked = storage
-        .security_events_since_days(args.days)?
-        .len();
+    let blocked = storage.security_events_since_days(args.days)?.len();
 
     // Canonical, signable payload — the exact numbers shown, so a verifier can
     // confirm the card wasn't doctored.
@@ -53,8 +51,15 @@ pub fn run_cmd(args: ShareArgs) -> anyhow::Result<()> {
     let mut out = std::io::stdout().lock();
     let line1 = format!("🔥 Burnwall · last {} days", args.days);
     let line2 = format!("💰 ${:.2} spent · ${:.2} saved by caching", spent, saved);
-    let line3 = format!("🛡  {blocked} risky action{} blocked", if blocked == 1 { "" } else { "s" });
-    let width = [line1.len(), line2.len(), line3.len()].into_iter().max().unwrap_or(40) + 2;
+    let line3 = format!(
+        "🛡  {blocked} risky action{} blocked",
+        if blocked == 1 { "" } else { "s" }
+    );
+    let width = [line1.len(), line2.len(), line3.len()]
+        .into_iter()
+        .max()
+        .unwrap_or(40)
+        + 2;
     let rule = "─".repeat(width);
 
     writeln!(out, "┌{rule}┐")?;
@@ -67,7 +72,10 @@ pub fn run_cmd(args: ShareArgs) -> anyhow::Result<()> {
             let key_short = &pubkey[..pubkey.len().min(16)];
             writeln!(out, "  🔐 signed {sig_short}… · key {key_short}…")?;
         }
-        None => writeln!(out, "  (unsigned — run `burnwall audit seal` once to enable signing)")?,
+        None => writeln!(
+            out,
+            "  (unsigned — run `burnwall audit seal` once to enable signing)"
+        )?,
     }
     writeln!(out, "└{rule}┘")?;
     if let Some((sig, pubkey)) = &signature {

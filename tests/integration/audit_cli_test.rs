@@ -92,7 +92,12 @@ fn audit_pack_writes_evidence_bundle() {
         .stdout(predicate::str::contains("ISO 42001"));
 
     // All four artifacts exist.
-    for f in ["receipts.json", "aibom.cdx.json", "security.sarif.json", "MANIFEST.md"] {
+    for f in [
+        "receipts.json",
+        "aibom.cdx.json",
+        "security.sarif.json",
+        "MANIFEST.md",
+    ] {
         assert!(out.join(f).exists(), "missing {f}");
     }
 
@@ -101,7 +106,12 @@ fn audit_pack_writes_evidence_bundle() {
         serde_json::from_slice(&std::fs::read(out.join("aibom.cdx.json")).unwrap()).unwrap();
     assert_eq!(bom["bomFormat"], "CycloneDX");
     assert_eq!(bom["specVersion"], "1.6");
-    assert!(bom["serialNumber"].as_str().unwrap().starts_with("urn:uuid:"));
+    assert!(
+        bom["serialNumber"]
+            .as_str()
+            .unwrap()
+            .starts_with("urn:uuid:")
+    );
     assert!(bom["metadata"]["timestamp"].is_string());
 
     // The manifest maps artifacts to the frameworks auditors ask for.

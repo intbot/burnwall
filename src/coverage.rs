@@ -160,7 +160,10 @@ impl CoverageState {
     pub fn summary(&self) -> String {
         match self {
             CoverageState::Protected { since_secs } => {
-                format!("🟢 protected (seen {} ago)", crate::ribbon::human_duration(*since_secs))
+                format!(
+                    "🟢 protected (seen {} ago)",
+                    crate::ribbon::human_duration(*since_secs)
+                )
             }
             CoverageState::InstalledNotSeen => "⚪ installed — no traffic seen yet".to_string(),
             CoverageState::Bypasses { reason } => format!("🔴 not protected — {reason}"),
@@ -190,7 +193,11 @@ mod tests {
 
     #[test]
     fn apikey_codex_with_recent_traffic_is_protected() {
-        let state = classify("codex", |p| (p == "openai").then_some(120), Some(CodexAuth::ApiKey));
+        let state = classify(
+            "codex",
+            |p| (p == "openai").then_some(120),
+            Some(CodexAuth::ApiKey),
+        );
         assert_eq!(state, CoverageState::Protected { since_secs: 120 });
     }
 
@@ -230,7 +237,8 @@ mod tests {
 
     #[test]
     fn classify_codex_auth_detects_oauth_tokens() {
-        let json = r#"{"OPENAI_API_KEY": null, "tokens": {"access_token": "x", "account_id": "y"}}"#;
+        let json =
+            r#"{"OPENAI_API_KEY": null, "tokens": {"access_token": "x", "account_id": "y"}}"#;
         assert_eq!(classify_codex_auth(json), Some(CodexAuth::ChatGpt));
     }
 
@@ -248,8 +256,16 @@ mod tests {
 
     #[test]
     fn summary_strings_are_glyph_led() {
-        assert!(CoverageState::Protected { since_secs: 60 }.summary().starts_with("🟢"));
+        assert!(
+            CoverageState::Protected { since_secs: 60 }
+                .summary()
+                .starts_with("🟢")
+        );
         assert!(CoverageState::InstalledNotSeen.summary().starts_with("⚪"));
-        assert!(CoverageState::Bypasses { reason: "x".into() }.summary().starts_with("🔴"));
+        assert!(
+            CoverageState::Bypasses { reason: "x".into() }
+                .summary()
+                .starts_with("🔴")
+        );
     }
 }

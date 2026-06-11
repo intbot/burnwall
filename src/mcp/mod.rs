@@ -473,8 +473,8 @@ async fn handle(
             // We still record the tool_call attempt with status 0 so
             // operators can spot upstream connectivity issues in the log.
             if let Some(call) = tool_call {
-                let event = McpEvent::new(&call.name, call.id.as_deref(), 0)
-                    .with_upstream_uri(&logged_uri);
+                let event =
+                    McpEvent::new(&call.name, call.id.as_deref(), 0).with_upstream_uri(&logged_uri);
                 if let Err(e) = state.storage.insert_mcp_event(&event) {
                     error!("mcp_event insert failed: {}", e);
                 }
@@ -518,7 +518,10 @@ async fn handle(
                      answering 504 (body was partially consumed; pass-through impossible)",
                     logged_uri
                 );
-                return Ok(error_response(StatusCode::GATEWAY_TIMEOUT, "upstream_timeout"));
+                return Ok(error_response(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "upstream_timeout",
+                ));
             }
         }
     } else {
@@ -583,25 +586,26 @@ fn inspect_tools_list(body: &[u8], state: &WatchState, server: &str, upstream: &
         //    changed since we last saw this tool. Only a schema change resets
         //    an approved tool to 'pending' (via the storage layer): the schema
         //    is what the tool can actually be asked to do.
-        let schema_changed = match state
-            .storage
-            .observe_mcp_tool(server, &tool.name, &tool.schema_fingerprint)
-        {
-            Ok(McpToolObservation::Changed) => {
-                warn!(
-                    "🛡️ MCP tool '{}' on server '{}' changed its input schema since last seen \
+        let schema_changed =
+            match state
+                .storage
+                .observe_mcp_tool(server, &tool.name, &tool.schema_fingerprint)
+            {
+                Ok(McpToolObservation::Changed) => {
+                    warn!(
+                        "🛡️ MCP tool '{}' on server '{}' changed its input schema since last seen \
                      (possible rug pull) — approval reset to pending",
-                    tool.name, server
-                );
-                record_mcp_security(state, "mcp_tool_changed", &tool.name, &tool.name);
-                true
-            }
-            Ok(_) => false,
-            Err(e) => {
-                error!("mcp_tools observe failed: {}", e);
-                false
-            }
-        };
+                        tool.name, server
+                    );
+                    record_mcp_security(state, "mcp_tool_changed", &tool.name, &tool.name);
+                    true
+                }
+                Ok(_) => false,
+                Err(e) => {
+                    error!("mcp_tools observe failed: {}", e);
+                    false
+                }
+            };
 
         // 4. Description drift (M-C2): a description-only change is recorded
         //    and warned about — descriptions are prompt-visible, so a swap is
