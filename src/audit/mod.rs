@@ -20,7 +20,9 @@
 //! depend on receipts.
 
 pub mod aibom;
+pub mod compliance;
 pub mod sarif;
+pub mod spdx;
 
 use std::path::{Path, PathBuf};
 
@@ -841,5 +843,27 @@ mod tests {
         let results = log["runs"][0]["results"].as_array().unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0]["level"], "error");
+
+        // Compliance crosswalk now rides on every rule (and result) without
+        // changing the rule/result counts above.
+        let rules = log["runs"][0]["tool"]["driver"]["rules"]
+            .as_array()
+            .unwrap();
+        let tags = rules[0]["properties"]["tags"].as_array().unwrap();
+        assert!(
+            tags.iter()
+                .any(|t| t.as_str() == Some("EU AI Act:EU AI Act Art. 12")),
+            "rule properties should carry the record-keeping control id, got {tags:?}"
+        );
+        let comp = rules[0]["properties"]["compliance"].as_array().unwrap();
+        assert!(
+            comp.iter()
+                .any(|c| c["framework"].is_string() && c["controlId"].is_string()),
+            "structured compliance refs should split framework/controlId"
+        );
+        assert!(
+            results[0]["properties"]["tags"].is_array(),
+            "each result should also carry control tags"
+        );
     }
 }

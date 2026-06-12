@@ -57,6 +57,12 @@ pub struct WatchState {
     pub auto_approve: Vec<String>,
     /// Auto-deny globs (v0.9.1): a match is always blocked, before approval.
     pub auto_deny: Vec<String>,
+    /// Per-project MCP server allowlist from a discovered `.burnwall.yaml`
+    /// (`mcp_allowed_servers`). Empty = no per-project restriction (the
+    /// default, so a user who never sets it is unaffected). When non-empty,
+    /// deny-by-omission: a `tools/call` routed to a server *not* on the list
+    /// is blocked (403). Checked *after* `auto_deny` — auto_deny still wins.
+    pub allowed_servers: Vec<String>,
 }
 
 impl WatchState {
@@ -78,6 +84,7 @@ impl WatchState {
             security,
             auto_approve: Vec::new(),
             auto_deny: Vec::new(),
+            allowed_servers: Vec::new(),
         }
     }
 
@@ -397,6 +404,46 @@ async fn handle(
                     "Burnwall: tool '{}' on '{}' is blocked by [mcp].auto_deny policy. \
                      Remove the matching glob from [mcp].auto_deny in config.toml to allow it.",
                     call.name, route.server
+                ),
+            ));
+        }
+    }
+
+    // Per-project MCP allowlist (`.burnwall.yaml` → `mcp_allowed_servers`): a
+    // `tools/call` routed to a server NOT on this repo's allowlist is blocked,
+    // regardless of enforce mode. Checked AFTER `auto_deny` (which still wins)
+    // and applied only when the list is non-empty, so a user who never sets it
+    // is never blocked. It is ALSO skipped unless named multi-server routing is
+    // configured (`[[mcp.servers]]`, i.e. `state.servers` non-empty): in
+    // single-upstream mode every call routes to the synthetic `"default"`, so a
+    // list of real server names would block everything (FP-review Part 2). The
+    // gate composes with — does not replace — the approval gate.
+    if let Some(call) = tool_call.as_ref() {
+        if firewall::server_blocked(
+            &state.allowed_servers,
+            &route.server,
+            !state.servers.is_empty(),
+        ) {
+            warn!(
+                "🛡️ MCP tools/call '{}' on server '{}' blocked — not in this project's \
+                 .burnwall.yaml mcp_allowed_servers",
+                call.name, route.server
+            );
+            let event = SecurityEvent::new("mcp_server_not_allowed", &route.server)
+                .with_provider("mcp", &call.name);
+            if let Err(e) = state.storage.insert_security_event(&event) {
+                error!("mcp security_event insert failed: {}", e);
+            }
+            // M-C2 shape: a proper JSON-RPC error so MCP clients render the
+            // reason (and the fix) instead of a generic transport failure.
+            return Ok(jsonrpc_error_response(
+                StatusCode::FORBIDDEN,
+                "server_not_allowed",
+                raw_rpc_id(&body_bytes),
+                format!(
+                    "Burnwall: MCP server '{}' is not in this project's allowlist. \
+                     Add '{}' to mcp_allowed_servers in .burnwall.yaml to allow it.",
+                    route.server, route.server
                 ),
             ));
         }

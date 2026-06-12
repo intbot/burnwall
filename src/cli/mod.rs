@@ -16,6 +16,7 @@ pub mod disable_routing;
 pub mod enable_routing;
 #[cfg(feature = "logscrape")]
 pub mod explore;
+pub mod guard;
 pub mod history;
 pub mod init;
 #[cfg(feature = "mcp")]
@@ -26,18 +27,21 @@ pub mod mcp_watch;
 pub mod metrics;
 pub mod pause;
 pub mod pricing;
+pub mod recover;
 #[cfg(feature = "observe")]
 pub mod report;
 pub mod report_bug;
 pub mod routing;
 pub mod rules;
 pub mod savings;
+pub mod scan;
 pub mod security;
 pub mod self_rollback;
 pub mod service;
 #[cfg(feature = "audit")]
 pub mod share;
 pub mod sidecar;
+pub mod skills;
 pub mod start;
 pub mod status;
 pub mod statusline;
@@ -47,6 +51,8 @@ pub mod upgrade;
 #[cfg(feature = "waste")]
 pub mod waste;
 pub mod watch;
+#[cfg(feature = "observe")]
+pub mod wire_check;
 
 #[derive(Parser, Debug)]
 #[command(name = "burnwall", version, about)]
@@ -67,6 +73,12 @@ pub enum Command {
     Resume,
     /// Let just the NEXT request through unchecked, then auto-restore.
     AllowOnce,
+    /// Get unstuck after the proxy died under you: pause routing so new shells
+    /// go direct, and print how to recover already-open tools.
+    Recover(recover::RecoverArgs),
+    /// Watchdog: pause routing automatically if the proxy dies while routed,
+    /// so a crashed/quarantined proxy can't strand new shells.
+    Guard(guard::GuardArgs),
     /// Show today's spend summary.
     Status(status::StatusArgs),
     /// Show per-day totals over the last N days.
@@ -77,6 +89,9 @@ pub enum Command {
     Init(init::InitArgs),
     /// Inspect security events (blocked attempts).
     Security(security::SecurityArgs),
+    /// Scan agent config files on disk for committed credentials and hidden
+    /// instructions (CI / pre-commit file mode — not live traffic).
+    Scan(scan::ScanArgs),
     /// Write a sanitized, local bug report of recent blocks (nothing is sent).
     ReportBug(report_bug::ReportBugArgs),
     /// Print a shell-completion script to stdout.
@@ -110,6 +125,9 @@ pub enum Command {
     /// Approximate cost of the current git branch / PR (local logs + git).
     #[cfg(feature = "observe")]
     CostPerPr(cost_per_pr::CostPerPrArgs),
+    /// Compare on-the-wire proxied spend with a local log-scrape estimate.
+    #[cfg(feature = "observe")]
+    WireCheck(wire_check::WireCheckArgs),
     /// Enable AI-tool routing through the proxy (writes env file + rc hook).
     EnableRouting(enable_routing::EnableRoutingArgs),
     /// Disable AI-tool routing (empties env file; pair with `eval` to drop from current shell).
@@ -135,6 +153,9 @@ pub enum Command {
     Savings(savings::SavingsArgs),
     /// Run the proxy as a co-located egress sidecar (for off-laptop sandboxes/CI).
     Sidecar(sidecar::SidecarArgs),
+    /// Install a guide that teaches coding agents (Claude Code, Codex) to
+    /// read Burnwall state and handle blocks — without weakening protection.
+    Skills(skills::SkillsArgs),
     /// Emit an opt-in, signed, screenshot-friendly value card.
     #[cfg(feature = "audit")]
     Share(share::ShareArgs),
@@ -148,11 +169,14 @@ impl Cli {
             Command::Pause(args) => pause::run_pause(args),
             Command::Resume => pause::run_resume(),
             Command::AllowOnce => pause::run_allow_once(),
+            Command::Recover(args) => recover::run_cmd(args),
+            Command::Guard(args) => guard::run_cmd(args).await,
             Command::Status(args) => status::run_cmd(args),
             Command::History(args) => history::run_cmd(args),
             Command::Config(args) => config_cmd::run_cmd(args),
             Command::Init(args) => init::run_cmd(args),
             Command::Security(args) => security::run_cmd(args),
+            Command::Scan(args) => scan::run_cmd(args),
             Command::ReportBug(args) => report_bug::run_cmd(args),
             Command::Completions(args) => completions::run_cmd(args),
             #[cfg(feature = "mcp")]
@@ -174,6 +198,8 @@ impl Cli {
             Command::Report(args) => report::run_cmd(args),
             #[cfg(feature = "observe")]
             Command::CostPerPr(args) => cost_per_pr::run_cmd(args),
+            #[cfg(feature = "observe")]
+            Command::WireCheck(args) => wire_check::run_cmd(args),
             Command::EnableRouting(args) => enable_routing::run_cmd(args).await,
             Command::DisableRouting(args) => disable_routing::run_cmd(args),
             Command::InstallService(args) => service::install_cmd(args),
@@ -186,6 +212,7 @@ impl Cli {
             Command::Watch(args) => watch::run_cmd(args),
             Command::Savings(args) => savings::run_cmd(args),
             Command::Sidecar(args) => sidecar::run_cmd(args).await,
+            Command::Skills(args) => skills::run_cmd(args),
             #[cfg(feature = "audit")]
             Command::Share(args) => share::run_cmd(args),
         }

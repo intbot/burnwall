@@ -49,6 +49,9 @@ fn state_for(upstream: String, storage: Arc<Storage>, client: reqwest::Client) -
         loop_detector: Arc::new(LoopDetector::with_defaults()),
         storage,
         cache_injection: false,
+        trim_tool_output: false,
+        paranoid: false,
+        warn_response_exfil: false,
         resilience: Default::default(),
         #[cfg(feature = "observe")]
         otel: None,
@@ -188,6 +191,82 @@ async fn upstream_that_stalls_forever_is_bounded_by_read_timeout() {
         outcome.is_ok(),
         "a stalled upstream must be bounded by read_timeout, not hang"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_mid_stream_drains_in_flight_response() {
+    // Graceful drain: a shutdown signal arriving while a response is still
+    // streaming must NOT cut the client off — the in-flight request gets to
+    // finish (idle connections close immediately). This is the regression
+    // test for the "every stop cuts an active agent turn mid-stream" class.
+    use burnwall::proxy::serve_with_shutdown;
+
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let up_addr = upstream.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut sock, _) = upstream.accept().await.unwrap();
+        drain_request_headers(&mut sock).await;
+        let header = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n",
+            SSE.len()
+        );
+        sock.write_all(header.as_bytes()).await.unwrap();
+        // Trickle slowly so the shutdown fires while the body is in flight.
+        for chunk in SSE.as_bytes().chunks(16) {
+            if sock.write_all(chunk).await.is_err() {
+                break;
+            }
+            let _ = sock.flush().await;
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let _ = sock.shutdown().await;
+    });
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = state_for(
+        format!("http://{up_addr}"),
+        storage.clone(),
+        reqwest::Client::new(),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        serve_with_shutdown(listener, Arc::new(state), async {
+            let _ = shutdown_rx.await;
+        })
+        .await
+    });
+
+    let body = tokio::time::timeout(Duration::from_secs(15), async {
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/anthropic/v1/messages"))
+            .json(&json!({"model": "claude-haiku-4-5", "stream": true}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        // Headers are in — the response is mid-flight. Pull the trigger.
+        shutdown_tx.send(()).unwrap();
+        resp.bytes()
+            .await
+            .expect("in-flight body must complete during the drain")
+    })
+    .await
+    .expect("drain must not hang");
+
+    assert_eq!(
+        body.as_ref(),
+        SSE.as_bytes(),
+        "the full body must arrive despite the shutdown"
+    );
+
+    // And the server itself must come down once the drain completes.
+    let outcome = tokio::time::timeout(Duration::from_secs(12), server)
+        .await
+        .expect("server task must end after the drain");
+    assert!(outcome.is_ok());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

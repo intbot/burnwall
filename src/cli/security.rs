@@ -38,15 +38,27 @@ pub fn run_cmd(args: SecurityArgs) -> anyhow::Result<()> {
         events.retain(|e| args.event_type.iter().any(|t| t == &e.event_type));
     }
 
+    // How many canary tripwires are armed (config values meeting the minimum
+    // length) — a one-line confirmation the trap is set. Best-effort: a
+    // missing/unreadable config just reads as zero.
+    let canaries_armed = crate::config::default_path()
+        .and_then(crate::config::load_or_default)
+        .map(|c| crate::security::rules::armed_canaries(c.security.canaries.clone()).len())
+        .unwrap_or(0);
+
     let mut out = std::io::stdout().lock();
 
     if args.summary && !args.json {
+        if canaries_armed > 0 {
+            writeln!(out, "🐤 Canary tripwires armed: {canaries_armed}")?;
+        }
         return print_summary(&mut out, &events, args.days);
     }
     if args.json {
         let value = serde_json::json!({
             "days": args.days,
             "count": events.len(),
+            "canaries_armed": canaries_armed,
             "events": events.iter().map(|e| serde_json::json!({
                 "id": e.id,
                 "timestamp": e.timestamp.to_rfc3339(),
@@ -66,6 +78,9 @@ pub fn run_cmd(args: SecurityArgs) -> anyhow::Result<()> {
         args.days,
         if args.days == 1 { "" } else { "s" }
     )?;
+    if canaries_armed > 0 {
+        writeln!(out, "   🐤 Canary tripwires armed: {canaries_armed}")?;
+    }
     if events.is_empty() {
         writeln!(out, "   (none)")?;
         return Ok(());
@@ -126,6 +141,8 @@ fn friendly_type(event_type: &str) -> &str {
         "dlp_blocked" => "PII/data exfiltration",
         "exfil_blocked" => "data-exfiltration technique",
         "destructive_blocked" => "catastrophic command",
+        "obfuscation_blocked" => "invisible-character obfuscation",
+        "canary_triggered" => "canary tripwire (planted credential)",
         other => other,
     }
 }
@@ -158,10 +175,12 @@ fn print_summary<W: Write>(
         *counts.entry(e.event_type.as_str()).or_default() += 1;
     }
     let order = [
+        "canary_triggered",
         "destructive_blocked",
         "exfil_blocked",
         "secret_detected",
         "dlp_blocked",
+        "obfuscation_blocked",
         "command_blocked",
         "path_blocked",
         "mount_blocked",

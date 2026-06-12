@@ -2,6 +2,80 @@
 
 All notable changes to Burnwall.
 
+## [0.10.0] — 2026-06-11
+
+A large release: a wave of security, cost, and compliance features, plus an
+availability-hardening pass driven by dogfooding — so the proxy stays safe to run
+hands-off even when something outside Burnwall (an antivirus, a crash) takes it down.
+
+### Added
+
+**Security**
+- **Scan agent config files for committed secrets + hidden instructions.** `burnwall
+  scan <paths>` checks `CLAUDE.md` / `.cursorrules` / `.mcp.json` / `.claude/` and
+  friends for committed credentials and invisible-Unicode instruction smuggling, with
+  SARIF output. A one-line **GitHub Action** runs it in CI and posts findings to the
+  repository's Security tab.
+- **Teach your agent about Burnwall.** `burnwall skills install` drops a guide where
+  Claude Code and Codex discover it, so the agent can read your spend, explain a block,
+  and run the file scanner — but never weaken protection itself.
+- **Decode-then-scan + invisible-text scrubbing.** Obfuscated (base64/hex) and
+  zero-width-Unicode payloads inside tool calls are un-hidden before checking.
+- **Canary trap.** Plant a fake credential; if it ever tries to leave the machine, the
+  request is blocked and a tamper-proof receipt is sealed.
+- **Egress checks for file uploads and credential misdirection** (opt-in), a
+  **silent-billing watchdog** (warns when a session flips from subscription to metered),
+  and a **slow-drip exfiltration monitor** (warn-only).
+- **Per-project MCP allowlist** — restrict which MCP servers an agent may reach, per repo.
+- **Paranoid mode** (opt-in) — fail closed: block a request the scanner cannot inspect,
+  for users who prefer that over the fail-open default.
+- **Image/link exfil warning** (opt-in, warn-only) — flags a model reply that embeds a
+  data-carrying image URL, the zero-click exfiltration pattern.
+
+**Cost**
+- **Per-repo / per-client cost export** to CSV, correct even when several projects run
+  at once.
+- **`burnwall wire-check`** — compare your real on-the-wire spend with a log-scrape
+  estimate.
+- **Cache-dead-zone warning**, an **hourly spend brake** (opt-in), and an optional
+  **cheaper-model fallback** when you hit a budget cap instead of stopping work.
+- **Tool-output trim** (opt-in) — middle-truncate oversized tool results before they
+  re-enter context, with an in-band marker, to cut token cost.
+
+**Compliance**
+- **SPDX 3.0 AI-profile bill-of-materials** and framework-labelled evidence packs on top
+  of the existing CycloneDX AIBOM + SARIF exporters; a control crosswalk rides on blocks.
+
+**Integration**
+- **Sit in front of a gateway you already use.** A new `[upstreams]` config (and
+  `--upstream-*` flags) chains Burnwall ahead of any OpenAI- or Anthropic-compatible
+  gateway, keeping cross-tool spend tracking and enforcement on top.
+
+**Resilience**
+- **`burnwall recover`** — get unstuck if the proxy dies under you: pauses routing so new
+  shells go direct, and explains how to restore already-open tools.
+- **`burnwall guard`** — a watchdog that auto-pauses routing if the proxy dies while
+  routed, so a crash or quarantine can't strand new shells.
+
+### Changed
+- **Graceful drain on stop.** `burnwall stop` (and `upgrade`) now let in-flight requests
+  finish before exiting instead of cutting them mid-stream.
+- **A crash, forced kill, or antivirus quarantine is now diagnosed.** `burnwall start`
+  notices an unclean prior exit and, on a streak, points at the likely cause (an
+  antivirus quarantining the unsigned binary) with the fix. Panics in background tasks
+  are now written to the log instead of vanishing silently.
+- **Status-line block count** reads `🚫 N blocked` and no longer renders the digit on top
+  of the shield glyph in some terminals.
+- **Windows install note.** The README and the installer now explain the
+  Defender/SmartScreen false positive and how to recover from it.
+
+### Fixed
+- **Fewer false security blocks**, each locked with a regression test: a
+  credential-shaped string in resent conversation history (including a `/compact`
+  summary), an editor tool writing a key into a local test fixture, a search query that
+  mentions a sensitive path, and a tool's non-command metadata field no longer 403 —
+  while a genuine credential or dangerous command inside an actual tool call still blocks.
+
 ## [0.9.15] — 2026-06-10
 
 A follow-up from live dogfooding: kill a false-positive class that could wedge a

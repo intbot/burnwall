@@ -55,3 +55,9 @@ allow-dirty = ["ci"]
 # `gh attestation verify <file> --repo intbot/burnwall`. No signing key to
 # manage — a security tool should be exemplary about its own integrity.
 github-attestations = true
+# Code signing is NOT wired yet — unsigned releases can trip Windows Defender /
+# SmartScreen and macOS Gatekeeper. The procurement + CI plan (Azure Artifact
+# Signing for Windows, Apple Developer ID + notarization for macOS) lives in
+# internal/SIGNING.md. Signing must integrate through cargo-dist's codesign hook
+# so the SIGNED binary is the one hashed + attested — a post-hoc re-sign would
+# break the published checksums and `gh attestation verify`.

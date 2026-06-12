@@ -553,6 +553,7 @@ fn enforce_state(upstream: String, storage: Arc<Storage>) -> WatchState {
         security: Arc::new(SecurityEngine::with_defaults()),
         auto_approve: Vec::new(),
         auto_deny: Vec::new(),
+        allowed_servers: Vec::new(),
     }
 }
 
@@ -705,6 +706,7 @@ async fn auto_denied_block_is_a_jsonrpc_error_with_string_id_echo() {
         security: Arc::new(SecurityEngine::with_defaults()),
         auto_approve: Vec::new(),
         auto_deny: vec!["default/evil_*".to_string()],
+        allowed_servers: Vec::new(),
     };
     let addr = spawn_watcher(state).await;
 
@@ -868,6 +870,194 @@ async fn upstream_query_string_is_forwarded_but_never_persisted() {
         "query string must be stripped from the persisted URI, got {stored}"
     );
     assert!(stored.ends_with("/rpc"), "got {stored}");
+}
+
+// ─────────────────── Per-project MCP server allowlist (Feature 6) ───────────────────
+
+use burnwall::mcp::McpServer;
+
+/// An observe-mode watcher fronting two named servers (`filesystem`, `shell`),
+/// with the supplied per-project `mcp_allowed_servers` allowlist applied.
+fn allowlist_state(
+    fs_upstream: String,
+    shell_upstream: String,
+    storage: Arc<Storage>,
+    allowed_servers: Vec<String>,
+) -> WatchState {
+    WatchState {
+        upstream: String::new(),
+        servers: vec![
+            McpServer {
+                name: "filesystem".to_string(),
+                upstream: fs_upstream,
+            },
+            McpServer {
+                name: "shell".to_string(),
+                upstream: shell_upstream,
+            },
+        ],
+        require_approval: false,
+        http_client: reqwest::Client::new(),
+        storage,
+        security: Arc::new(SecurityEngine::with_defaults()),
+        auto_approve: Vec::new(),
+        auto_deny: Vec::new(),
+        allowed_servers,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_allowlist_lets_any_server_through() {
+    // (i) With no per-project allowlist set, a tools/call to any routed server
+    // forwards exactly as before — the feature must not break existing users.
+    let fs = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"result": "ok"})))
+        .expect(1)
+        .mount(&fs)
+        .await;
+    let shell = MockServer::start().await;
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = allowlist_state(fs.uri(), shell.uri(), storage.clone(), Vec::new());
+    let addr = spawn_watcher(state).await;
+
+    let resp = client()
+        .post(format!("http://{}/filesystem/rpc", addr))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "read_file", "arguments": {"path": "ok.txt"}},
+            "id": 1,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // No server-allowlist block event recorded.
+    let sec = storage.security_events_for_date(&today()).unwrap();
+    assert!(sec.iter().all(|e| e.event_type != "mcp_server_not_allowed"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn allowlist_passes_listed_server_and_blocks_unlisted() {
+    // (ii) With `mcp_allowed_servers: [filesystem]`, a call to `filesystem`
+    // forwards while a call routed to `shell` is blocked with the new reason.
+    let fs = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"result": "ok"})))
+        .expect(1)
+        .mount(&fs)
+        .await;
+    // shell upstream must never be hit — the allowlist blocks before forward.
+    let shell = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&shell)
+        .await;
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let state = allowlist_state(
+        fs.uri(),
+        shell.uri(),
+        storage.clone(),
+        vec!["filesystem".to_string()],
+    );
+    let addr = spawn_watcher(state).await;
+
+    // Listed server → forwarded.
+    let ok = client()
+        .post(format!("http://{}/filesystem/rpc", addr))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "read_file", "arguments": {"path": "ok.txt"}},
+            "id": 1,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200);
+
+    // Unlisted server → blocked with a self-explaining JSON-RPC error.
+    let blocked = client()
+        .post(format!("http://{}/shell/rpc", addr))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "exec", "arguments": {}},
+            "id": 7,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), 403);
+    let body: serde_json::Value = blocked.json().await.unwrap();
+    assert_eq!(body["jsonrpc"], "2.0");
+    assert_eq!(body["id"], 7, "request id must be echoed");
+    assert_eq!(body["error"]["type"], "server_not_allowed");
+    let msg = body["error"]["message"].as_str().unwrap();
+    assert!(
+        msg.contains("'shell'") && msg.contains("mcp_allowed_servers"),
+        "block message must name the server and the fix; got: {msg}"
+    );
+
+    // A security_events row records the blocked call (provider=mcp, model=tool).
+    let sec = storage.security_events_for_date(&today()).unwrap();
+    let block = sec
+        .iter()
+        .find(|e| e.event_type == "mcp_server_not_allowed")
+        .expect("expected an mcp_server_not_allowed event");
+    assert_eq!(block.provider.as_deref(), Some("mcp"));
+    assert_eq!(block.model.as_deref(), Some("exec"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_deny_still_blocks_a_listed_server() {
+    // (iii) Precedence: `[mcp].auto_deny` is checked before the project
+    // allowlist, so it blocks even a tool on an allowlisted server.
+    let fs = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&fs)
+        .await;
+    let shell = MockServer::start().await;
+
+    let storage = Arc::new(Storage::open_in_memory().unwrap());
+    let mut state = allowlist_state(
+        fs.uri(),
+        shell.uri(),
+        storage.clone(),
+        vec!["filesystem".to_string()],
+    );
+    // `filesystem` is allowlisted, but auto_deny blocks this specific tool.
+    state.auto_deny = vec!["filesystem/delete_*".to_string()];
+    let addr = spawn_watcher(state).await;
+
+    let resp = client()
+        .post(format!("http://{}/filesystem/rpc", addr))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "delete_everything", "arguments": {}},
+            "id": 9,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    // The block is the auto_deny one, proving auto_deny wins / is checked first.
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "auto_denied");
+
+    let sec = storage.security_events_for_date(&today()).unwrap();
+    assert!(
+        sec.iter().all(|e| e.event_type != "mcp_server_not_allowed"),
+        "auto_deny must short-circuit before the allowlist check"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -221,7 +221,13 @@ impl Ribbon {
                 }
             }
             if self.blocks_today > 0 {
-                let _ = write!(s, " · 🛡{}", self.blocks_today);
+                // `🚫 N blocked`, not `🛡N`: U+1F6E1 is a narrow-width text
+                // symbol that most terminal fonts draw two cells wide, so a
+                // digit packed right after it renders ON TOP of the glyph
+                // (seen in VS Code's integrated terminal). U+1F6AB has emoji
+                // presentation (a true double-width advance), and the word
+                // makes the number self-explanatory instead of a bare count.
+                let _ = write!(s, " · 🚫 {} blocked", self.blocks_today);
             }
         } // end: proxy-up capture metrics (suppressed when PROXY DOWN)
         match self.ctx {
@@ -451,9 +457,13 @@ mod tests {
     fn blocks_segment_only_when_nonzero() {
         let mut r = base();
         r.blocks_today = 0;
-        assert!(!r.render(false).contains("🛡"));
+        assert!(!r.render(false).contains("blocked"));
         r.blocks_today = 2;
-        assert!(r.render(false).contains("🛡2"));
+        // Self-explanatory wording, and a glyph with true double-width
+        // advance — a digit must never sit directly after a narrow-width
+        // symbol (it renders on top of the glyph in VS Code's terminal).
+        assert!(r.render(false).contains("🚫 2 blocked"));
+        assert!(!r.render(false).contains("🛡"));
     }
 
     #[test]
@@ -727,7 +737,7 @@ mod tests {
         assert!(!s.contains('$'), "no dollar figures when down: {s}");
         assert!(!s.contains("sess"), "no session cost when down: {s}");
         assert!(!s.contains("today"), "no today spend when down: {s}");
-        assert!(!s.contains('🛡'), "no block count when down: {s}");
+        assert!(!s.contains("blocked"), "no block count when down: {s}");
     }
 
     #[test]

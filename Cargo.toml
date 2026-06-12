@@ -1,6 +1,6 @@
 [package]
 name = "burnwall"
-version = "0.9.15"
+version = "0.10.0"
 edition = "2024"
 rust-version = "1.87"
 description = "Local proxy for AI coding tools (Claude Code, Codex CLI, Aider): cache-aware cost tracking, path/command security checks, daily budget enforcement. Zero telemetry."
@@ -47,7 +47,7 @@ tokio = { version = "1", features = ["full"] }
 
 # HTTP proxy
 hyper = { version = "1", features = ["full"] }
-hyper-util = { version = "0.1", features = ["tokio", "server-auto", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "server-graceful", "http1", "http2"] }
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
 
@@ -205,6 +205,10 @@ path = "tests/unit/waste_test.rs"
 [[test]]
 name = "observe_test"
 path = "tests/unit/observe_test.rs"
+
+[[test]]
+name = "cost_export_test"
+path = "tests/unit/cost_export_test.rs"
 
 [[test]]
 name = "audit_cli_test"

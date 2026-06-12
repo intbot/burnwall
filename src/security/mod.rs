@@ -19,7 +19,9 @@
 
 pub mod destructive;
 pub mod dlp;
+pub mod evasion;
 pub mod exfil;
+pub mod filescan;
 pub mod packs;
 pub mod rules;
 pub mod scanner;
@@ -44,6 +46,21 @@ pub enum ViolationKind {
     /// Catastrophic, data-loss-grade command (recursive-force delete, disk
     /// destruction, destructive SQL) — detected by shape, not literal match.
     Destructive,
+    /// A tool-call leaf dense with invisible/zero-width Unicode in the
+    /// token-splitting configuration — content is being hidden from filters
+    /// (and from the user's own review). See [`evasion`].
+    Obfuscation,
+    /// A user-planted canary credential (`security.canaries`) appeared in an
+    /// outbound payload — the exfiltration tripwire fired. The canary has no
+    /// legitimate use anywhere, so any request carrying it is hard-blocked.
+    Canary,
+    /// A recognized provider credential is being sent to a *different*
+    /// provider's endpoint (e.g. an OpenAI `sk-` key in a body forwarded to the
+    /// Anthropic upstream) — credential misdirection. Opt-in
+    /// (`security.block_credential_misdirection`), v0.9.16. `matched` carries a
+    /// human label of the form "<credential> credential sent to the <dest>
+    /// endpoint"; a masked preview rides alongside.
+    Misdirection,
 }
 
 impl ViolationKind {
@@ -57,6 +74,9 @@ impl ViolationKind {
             ViolationKind::Dlp => "dlp_blocked",
             ViolationKind::Exfil => "exfil_blocked",
             ViolationKind::Destructive => "destructive_blocked",
+            ViolationKind::Obfuscation => "obfuscation_blocked",
+            ViolationKind::Canary => "canary_triggered",
+            ViolationKind::Misdirection => "misdirection_blocked",
         }
     }
 }
@@ -173,6 +193,26 @@ impl Violation {
             ViolationKind::Exfil => {
                 format!("{actor} looks like data exfiltration: {}.", self.matched)
             }
+            ViolationKind::Obfuscation => {
+                format!(
+                    "{actor} contains text hidden with invisible Unicode characters ({}).",
+                    self.matched
+                )
+            }
+            ViolationKind::Canary => {
+                // A canary can fire outside a tool call (prose), where "tool
+                // call" would mislead — name the request instead.
+                let carrier = match &self.tool {
+                    Some(t) => format!("Your `{t}` tool call"),
+                    None => "This request".to_string(),
+                };
+                format!(
+                    "{carrier} carries a planted canary credential{preview} — your tripwire fired."
+                )
+            }
+            ViolationKind::Misdirection => {
+                format!("{actor} is sending {}{preview}.", self.matched)
+            }
         }
     }
 
@@ -188,6 +228,15 @@ impl Violation {
             }
             ViolationKind::Secret | ViolationKind::Dlp | ViolationKind::Exfil => {
                 "Burnwall blocks credentials and sensitive data inside tool calls so they can't be exfiltrated off your machine."
+            }
+            ViolationKind::Obfuscation => {
+                "Burnwall found invisible characters hiding content — a technique for smuggling instructions or splitting forbidden tokens past filters. If this content is intentional, let the next request through with `burnwall allow-once`."
+            }
+            ViolationKind::Canary => {
+                "A canary value exists only to detect exfiltration — no legitimate request ever carries it, so something just tried to send yours off your machine. Investigate before continuing; to disarm, remove the value from `security.canaries` in ~/.burnwall/config.toml."
+            }
+            ViolationKind::Misdirection => {
+                "Burnwall blocks a credential for one provider from being sent to a different provider's endpoint — a sign a key is leaking into the wrong request (or that traffic was misrouted). Disable with `burnwall config set security.block_credential_misdirection false`."
             }
         }
     }
@@ -225,6 +274,18 @@ impl Violation {
             }
             ViolationKind::Destructive => {
                 format!("blocked a catastrophic command: {}", self.matched)
+            }
+            ViolationKind::Obfuscation => {
+                format!(
+                    "invisible characters found hiding content: {}",
+                    self.matched
+                )
+            }
+            ViolationKind::Canary => {
+                "a planted canary credential attempted to leave the machine".to_string()
+            }
+            ViolationKind::Misdirection => {
+                format!("credential misdirection: {}", self.matched)
             }
         }
     }
@@ -269,6 +330,34 @@ impl SecurityEngine {
         scanner::scan_request(&json, &self.rules)
     }
 
+    /// Like [`scan_request`] but also knows the request's **destination
+    /// provider** (`"anthropic"` / `"openai"` / `"google"`), enabling the
+    /// credential-misdirection check (feature #7, opt-in via
+    /// `security.block_credential_misdirection`): a recognized provider
+    /// credential in a tool-call argument whose provider differs from the
+    /// destination is blocked as [`ViolationKind::Misdirection`]. With the flag
+    /// off this is identical to [`scan_request`]. The proxy calls this on the
+    /// LLM request path; [`scan_request`] stays for callers/tests without a
+    /// destination.
+    pub fn scan_request_for(&self, body: &[u8], dest_provider: &str) -> Option<Violation> {
+        let json = self.parse_for_scan(body)?;
+        scanner::scan_request_for(&json, &self.rules, dest_provider)
+    }
+
+    /// Scan a **raw, non-JSON** file-upload body (a multipart/form-data upload
+    /// to a provider file endpoint) for secrets / DLP / canaries (feature #3).
+    /// Closes the gap where [`scan_request`] fails open on a non-JSON body and
+    /// the upload is never inspected. Gated by `detect_egress` (the existing
+    /// `security.dlp` opt-in); the caller restricts this to known file-upload
+    /// routes. Returns `None` (forward) when the feature is off, the body is
+    /// largely binary, or nothing matches. See [`scanner::scan_raw_upload`].
+    pub fn scan_upload(&self, body: &[u8]) -> Option<Violation> {
+        if !self.rules.enabled {
+            return None;
+        }
+        scanner::scan_raw_upload(body, &self.rules)
+    }
+
     /// Scan an MCP JSON-RPC body. Like [`scan_request`] but for the JSON-RPC
     /// envelope: only `tools/call` `params.arguments` get checked (command-shaped
     /// for a shell tool, data + path checks otherwise); the rest of the envelope
@@ -276,6 +365,20 @@ impl SecurityEngine {
     pub fn scan_mcp(&self, body: &[u8]) -> Option<Violation> {
         let json = self.parse_for_scan(body)?;
         scanner::scan_mcp(&json, &self.rules)
+    }
+
+    /// Paranoid-mode helper: can the scanner actually inspect this body?
+    /// True for an empty body (a normal GET) or parseable JSON (the only
+    /// format the scanner understands). Pure check — no counters, no log
+    /// noise — used by the opt-in `security.paranoid` fail-closed gate in
+    /// the handler; the default fail-open path keeps its own accounting in
+    /// [`Self::parse_for_scan`].
+    pub fn scannable_json(&self, body: &[u8]) -> bool {
+        if body.is_empty() {
+            return true;
+        }
+        let body = body.strip_prefix(b"\xef\xbb\xbf").unwrap_or(body);
+        serde_json::from_slice::<serde::de::IgnoredAny>(body).is_ok()
     }
 
     fn parse_for_scan(&self, body: &[u8]) -> Option<serde_json::Value> {

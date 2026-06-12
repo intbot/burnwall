@@ -4,7 +4,13 @@
 //! - `verify` — re-walk the chain (hashes + signatures + live source rows).
 //! - `export` — dump the receipts (json | csv).
 //! - `aibom`  — CycloneDX AI Bill of Materials for the window.
-//! - `sarif`  — security blocks as SARIF 2.1.0 (GitHub code scanning).
+//! - `sarif`  — security blocks as SARIF 2.1.0 (GitHub code scanning), now
+//!   carrying the crosswalk control IDs on each rule/result.
+//! - `spdx`   — SPDX 3.0 (AI profile) bill of materials for the window.
+//! - `coverage` — the named-risk coverage sheet (OWASP / EU AI Act control IDs
+//!   each block evidences); `--json` for the machine-readable matrix.
+//! - `evidence` — the sealed receipts grouped by compliance regime
+//!   (SOC 2 / ISO 42001 / NIST AI RMF / FINRA 17a-4 / EU AI Act), as JSON.
 //! - `pack`   — one-command compliance evidence pack (receipts + AIBOM + SARIF
 //!   + a framework-mapping manifest) you can hand to a security/audit team.
 
@@ -14,7 +20,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::{Args, Subcommand};
 
-use crate::audit::{AuditChain, VerifyReport, aibom, sarif};
+use crate::audit::{AuditChain, VerifyReport, aibom, compliance, sarif, spdx};
 use crate::observe::digest::Digest;
 use crate::storage::{ReceiptRow, Storage};
 
@@ -40,9 +46,24 @@ pub enum AuditCommand {
     Aibom(WindowArgs),
     /// Export security blocks as SARIF 2.1.0 (for GitHub code scanning).
     Sarif(WindowArgs),
+    /// Export an SPDX 3.0 (AI profile) bill of materials for the window.
+    Spdx(WindowArgs),
+    /// Print the named-risk coverage sheet (which OWASP / EU AI Act controls
+    /// each Burnwall block evidences). `--json` emits the full matrix.
+    Coverage(CoverageArgs),
+    /// Emit a framework-labelled evidence bundle (JSON): the sealed receipts
+    /// grouped by SOC 2 / ISO 42001 / NIST AI RMF / FINRA 17a-4 / EU AI Act.
+    Evidence(WindowArgs),
     /// Bundle a compliance evidence pack: signed receipts + CycloneDX AIBOM +
     /// SARIF + a framework-mapping manifest, into one directory.
     Pack(PackArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct CoverageArgs {
+    /// Emit the machine-readable coverage matrix as JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -153,11 +174,116 @@ pub fn run_cmd(args: AuditArgs) -> anyhow::Result<()> {
             let log = sarif::build(&events);
             writeln!(out, "{}", serde_json::to_string_pretty(&log).unwrap())?;
         }
+        AuditCommand::Spdx(a) => {
+            let digest = Digest::build(&storage, a.days)?;
+            let now = chrono::Utc::now().to_rfc3339();
+            let serial = format!("urn:uuid:{}", uuid::Uuid::new_v4());
+            let doc = spdx::build(&digest, &now, &serial);
+            writeln!(out, "{}", serde_json::to_string_pretty(&doc).unwrap())?;
+        }
+        AuditCommand::Coverage(a) => {
+            if a.json {
+                writeln!(out, "{}", coverage_json())?;
+            } else {
+                write_coverage_sheet(&mut out)?;
+            }
+        }
+        AuditCommand::Evidence(a) => {
+            // Best-effort seal so the bundle reflects the latest actions.
+            let chain = AuditChain::open_default().ok();
+            if let Some(c) = &chain {
+                let _ = c.seal(&storage);
+            }
+            let public_key = chain.as_ref().map(|c| c.public_key_hex());
+            let receipts = storage.all_receipts()?;
+            let _ = a.days; // evidence covers the whole sealed chain, not a window
+            let pack = compliance::evidence_pack(&receipts, public_key.as_deref());
+            writeln!(out, "{}", evidence_json(&pack))?;
+        }
         AuditCommand::Pack(a) => {
             write_evidence_pack(&mut out, &storage, a.days, a.out)?;
         }
     }
     Ok(())
+}
+
+/// The full coverage matrix as machine-readable JSON.
+fn coverage_json() -> String {
+    use serde_json::json;
+    let rows: Vec<_> = compliance::coverage_matrix()
+        .into_iter()
+        .map(|row| {
+            json!({
+                "event_type": row.event_type,
+                "controls": row.controls.iter().map(|c| json!({
+                    "framework": c.framework.name(),
+                    "control_id": c.control_id,
+                    "label": c.short_label,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let value = json!({
+        "note": "Maps existing Burnwall protections to named risk-control IDs. \
+                 This is labeling, not new protection, and is not a certification.",
+        "coverage": rows,
+    });
+    serde_json::to_string_pretty(&value).unwrap()
+}
+
+/// One-page human-readable "which named risks Burnwall covers" sheet.
+fn write_coverage_sheet(out: &mut impl Write) -> anyhow::Result<()> {
+    writeln!(out, "Burnwall — named-risk coverage")?;
+    writeln!(
+        out,
+        "Which industry risk-control IDs each block evidences. This maps existing"
+    )?;
+    writeln!(
+        out,
+        "protections to named controls — it is labeling, not new protection, and is"
+    )?;
+    writeln!(out, "not a certification.\n")?;
+    writeln!(out, "{:<24}  EVIDENCES", "EVENT TYPE")?;
+    writeln!(out, "{:<24}  {}", "-".repeat(24), "-".repeat(40))?;
+    for row in compliance::coverage_matrix() {
+        let ids: Vec<String> = row
+            .controls
+            .iter()
+            .map(|c| format!("{} {}", c.framework.name(), c.control_id))
+            .collect();
+        writeln!(out, "{:<24}  {}", row.event_type, ids.join("; "))?;
+    }
+    writeln!(
+        out,
+        "\nFrameworks: OWASP Agentic AI (ASI-T*/LLM*), OWASP MCP Top 10 (MCP*), EU AI Act (articles)."
+    )?;
+    Ok(())
+}
+
+/// The framework-labelled evidence bundle as JSON.
+fn evidence_json(pack: &compliance::EvidencePack) -> String {
+    use serde_json::json;
+    let groups: Vec<_> = pack
+        .groups
+        .iter()
+        .map(|g| {
+            json!({
+                "framework": g.regime,
+                "obligation": g.obligation,
+                "receipt_count": g.receipt_count,
+                "blocked_receipts": g.blocked_receipts,
+                "forwarded_receipts": g.forwarded_receipts,
+                "receipt_seqs": g.receipt_seqs,
+            })
+        })
+        .collect();
+    let value = json!({
+        "public_key": pack.public_key,
+        "total_receipts": pack.total_receipts,
+        "note": pack.note,
+        "frameworks": groups,
+    });
+    serde_json::to_string_pretty(&value).unwrap()
 }
 
 /// Build a self-contained compliance evidence pack: the existing artifacts

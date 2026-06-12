@@ -138,31 +138,99 @@ pub fn env_file_state(shell: Shell) -> Option<EnvFileState> {
     Some(classify_env_contents(&contents))
 }
 
-/// Pause routing for every env file that is currently ACTIVE: replace the
+/// The port an ACTIVE env file routes to, parsed from its export body
+/// (`http://localhost:4100/anthropic` → 4100). `None` for paused/disabled
+/// stubs and contents with no URL. Pure over its input for testability.
+pub fn active_env_port(contents: &str) -> Option<u16> {
+    if classify_env_contents(contents) != EnvFileState::Active {
+        return None;
+    }
+    let start = contents.find("http://")?;
+    let rest = &contents[start..];
+    let end = rest
+        .find(|c: char| c == '"' || c.is_whitespace())
+        .unwrap_or(rest.len());
+    Some(proxy_url_port(&rest[..end]))
+}
+
+/// Lifecycle-pause decision for one env file's contents. Pure over its
+/// inputs — the caller supplies the liveness probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PauseAction {
+    /// Active and its routed port is dead → rewrite to the paused stub.
+    Pause,
+    /// Active but the routed port is STILL serving (another Burnwall
+    /// instance) — pausing would cut new shells off from a live proxy, so
+    /// leave routing alone. Carries the live port for reporting.
+    LeftAlive(u16),
+    /// Paused/disabled stub or unparseable → nothing to do.
+    NotActive,
+}
+
+/// Decide what a lifecycle pause should do with one env file. Routing
+/// follows the *live proxy*, not any one process's exit: an active file
+/// whose port still answers belongs to a proxy that is still up (a second
+/// instance, or one this `stop` didn't own), and must not be paused.
+pub fn pause_decision(contents: &str, port_alive: &dyn Fn(u16) -> bool) -> PauseAction {
+    match active_env_port(contents) {
+        None => PauseAction::NotActive,
+        Some(port) if port_alive(port) => PauseAction::LeftAlive(port),
+        Some(_) => PauseAction::Pause,
+    }
+}
+
+/// Outcome of [`pause_routing_unless_alive`].
+pub struct PauseOutcome {
+    /// Env files rewritten to the paused stub.
+    pub paused: Vec<PathBuf>,
+    /// Ports left routed because something is still serving them (deduped).
+    pub left_alive: Vec<u16>,
+}
+
+/// Pause routing for every env file that is currently ACTIVE — replacing the
 /// exports with the paused stub so new shells go direct while the proxy is
-/// down. Explicitly-disabled stubs and absent files are left alone — a
-/// `disable-routing` decision survives a stop/start cycle untouched.
-/// Returns the env files rewritten (deduped — bash and zsh share one).
-pub fn pause_routing() -> Result<Vec<PathBuf>> {
-    let mut paused = Vec::new();
+/// down — but guarded per file: skip the pause when the port that file
+/// routes to is still answering. The guard is what makes a multi-instance
+/// `stop` safe — stopping a scratch/secondary instance must not strand new
+/// shells away from the live proxy that routing actually points at.
+/// Single-instance behavior is unchanged: by the time the pause runs the
+/// stopped proxy's listener is closed, so its port probes dead and the file
+/// is paused exactly as before. Explicitly-disabled stubs and absent files
+/// are left alone — a `disable-routing` decision survives a stop/start
+/// cycle untouched.
+pub fn pause_routing_unless_alive() -> Result<PauseOutcome> {
+    let probe = |port: u16| proxy_port_alive(port, std::time::Duration::from_millis(150));
+    let mut out = PauseOutcome {
+        paused: Vec::new(),
+        left_alive: Vec::new(),
+    };
+    let mut seen: Vec<PathBuf> = Vec::new();
     for shell in Shell::ALL {
         let Some(path) = env_file_path(shell) else {
             continue;
         };
-        if paused.contains(&path) {
-            continue;
+        if seen.contains(&path) {
+            continue; // bash and zsh share env.sh
         }
+        seen.push(path.clone());
         let Ok(contents) = std::fs::read_to_string(&path) else {
             continue;
         };
-        if classify_env_contents(&contents) != EnvFileState::Active {
-            continue;
+        match pause_decision(&contents, &probe) {
+            PauseAction::Pause => {
+                std::fs::write(&path, env_file_paused(shell))
+                    .with_context(|| format!("writing {}", path.display()))?;
+                out.paused.push(path);
+            }
+            PauseAction::LeftAlive(port) => {
+                if !out.left_alive.contains(&port) {
+                    out.left_alive.push(port);
+                }
+            }
+            PauseAction::NotActive => {}
         }
-        std::fs::write(&path, env_file_paused(shell))
-            .with_context(|| format!("writing {}", path.display()))?;
-        paused.push(path);
     }
-    Ok(paused)
+    Ok(out)
 }
 
 /// What `start` did to one configured shell's routing.
@@ -756,6 +824,59 @@ mod tests {
                 shell.label()
             );
         }
+    }
+
+    #[test]
+    fn active_env_port_parses_every_shell_flavor() {
+        for shell in Shell::ALL {
+            assert_eq!(
+                active_env_port(&env_file_contents(shell, "http://localhost:4199")),
+                Some(4199),
+                "{}",
+                shell.label()
+            );
+        }
+        // Paused/disabled stubs route nowhere.
+        assert_eq!(active_env_port(&env_file_paused(Shell::Bash)), None);
+        assert_eq!(active_env_port(&env_file_disabled(Shell::Bash)), None);
+        assert_eq!(active_env_port(""), None);
+    }
+
+    #[test]
+    fn pause_decision_leaves_live_ports_routed() {
+        // The multi-instance guard: an active env file whose port still
+        // answers belongs to a proxy that is still up — stopping a DIFFERENT
+        // instance must not pause it.
+        let active = env_file_contents(Shell::Powershell, "http://localhost:4100");
+        assert_eq!(
+            pause_decision(&active, &|p| p == 4100),
+            PauseAction::LeftAlive(4100)
+        );
+        // Same file with the port dead → pause (single-instance stop).
+        assert_eq!(pause_decision(&active, &|_| false), PauseAction::Pause);
+        // Stubs are never touched, regardless of liveness.
+        assert_eq!(
+            pause_decision(&env_file_paused(Shell::Bash), &|_| true),
+            PauseAction::NotActive
+        );
+        assert_eq!(
+            pause_decision(&env_file_disabled(Shell::Bash), &|_| true),
+            PauseAction::NotActive
+        );
+    }
+
+    #[test]
+    fn live_port_probe_reports_alive() {
+        // Bind an ephemeral listener and confirm the probe sees it — the
+        // counterpart of `dead_port_probe_reports_not_alive`, and the real
+        // probe the pause guard composes with.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(proxy_port_alive(
+            port,
+            std::time::Duration::from_millis(500)
+        ));
+        drop(listener);
     }
 
     #[test]

@@ -91,6 +91,30 @@ fn set_dotted_key_handles_boolean_fields() {
 }
 
 #[test]
+fn set_dotted_key_handles_new_mode_toggles_and_upstreams() {
+    let mut c = Config::default();
+    // All three modes default OFF (opt-in per the no-false-positive rule).
+    assert!(!c.proxy.trim_tool_output);
+    assert!(!c.security.paranoid);
+    assert!(!c.security.warn_response_exfil);
+
+    config::set_dotted_key(&mut c, "proxy.trim_tool_output", "true").unwrap();
+    assert!(c.proxy.trim_tool_output);
+    config::set_dotted_key(&mut c, "security.paranoid", "true").unwrap();
+    assert!(c.security.paranoid);
+    config::set_dotted_key(&mut c, "security.warn_response_exfil", "true").unwrap();
+    assert!(c.security.warn_response_exfil);
+
+    // Gateway chaining: upstreams default empty (= provider's own API) and
+    // are plain string setters; empty restores the default.
+    assert!(c.upstreams.anthropic.is_empty());
+    config::set_dotted_key(&mut c, "upstreams.openai", "https://gateway.local/v1").unwrap();
+    assert_eq!(c.upstreams.openai, "https://gateway.local/v1");
+    config::set_dotted_key(&mut c, "upstreams.openai", "").unwrap();
+    assert!(c.upstreams.openai.is_empty());
+}
+
+#[test]
 fn set_dotted_key_parses_csv_lists() {
     let mut c = Config::default();
     config::set_dotted_key(&mut c, "security.deny_paths", "~/.ssh, ~/.aws, /etc/passwd").unwrap();
@@ -138,6 +162,41 @@ fn security_enabled_flows_into_ruleset() {
     c.security.enabled = false;
     let rules: burnwall::security::Ruleset = (&c.security).into();
     assert!(!rules.enabled);
+}
+
+#[test]
+fn canaries_default_empty_parse_set_and_filter() {
+    // Default: no canaries.
+    let c = Config::default();
+    assert!(c.security.canaries.is_empty());
+
+    // TOML parse: the key is read alongside the rest of the security table
+    // (`canaries` itself is serde-defaulted, so older configs stay valid).
+    let parsed: Config = toml::from_str(concat!(
+        "[security]\n",
+        "enabled = true\n",
+        "deny_paths = []\n",
+        "deny_commands = []\n",
+        "block_network_mounts = true\n",
+        "detect_secrets = true\n",
+        "canaries = [\"CANARY-fake-token-001\", \"tiny\"]\n",
+    ))
+    .unwrap();
+    assert_eq!(parsed.security.canaries.len(), 2);
+
+    // The dotted-key setter accepts a comma list.
+    let mut c = Config::default();
+    config::set_dotted_key(
+        &mut c,
+        "security.canaries",
+        "CANARY-aaaa-1111, CANARY-bbbb-2222",
+    )
+    .unwrap();
+    assert_eq!(c.security.canaries.len(), 2);
+
+    // Conversion to the runtime ruleset drops sub-minimum values.
+    let rules: burnwall::security::Ruleset = (&parsed.security).into();
+    assert_eq!(rules.canaries, vec!["CANARY-fake-token-001".to_string()]);
 }
 
 #[test]
@@ -209,4 +268,76 @@ fn per_session_budget_key_and_runtime_mapping() {
     // Maps into the runtime budget config.
     let runtime: burnwall::budget::BudgetConfig = (&cfg.budget).into();
     assert!((runtime.per_session_usd - 5.0).abs() < 1e-9);
+}
+
+#[test]
+fn hourly_brake_and_fallback_keys_default_off_and_round_trip() {
+    // #2 / #18 defaults: brake disarmed, fallback empty.
+    let c = Config::default();
+    assert_eq!(c.budget.per_hour, 0.0);
+    assert!(c.budget.fallback_model.is_empty());
+
+    let mut c = Config::default();
+    config::set_dotted_key(&mut c, "budget.per_hour", "3.50").unwrap();
+    config::set_dotted_key(&mut c, "budget.fallback_model", "claude-haiku-4-5").unwrap();
+    config::set_dotted_key(&mut c, "budget.enforce_on_plan", "true").unwrap();
+    assert!((c.budget.per_hour - 3.50).abs() < 1e-9);
+    assert_eq!(c.budget.fallback_model, "claude-haiku-4-5");
+    assert!(c.budget.enforce_on_plan);
+
+    // Round-trips through TOML.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    config::save(&path, &c).unwrap();
+    let read = config::load_or_default(&path).unwrap();
+    assert!((read.budget.per_hour - 3.50).abs() < 1e-9);
+    assert_eq!(read.budget.fallback_model, "claude-haiku-4-5");
+
+    // Maps into the runtime config (#2 ceiling + #18 fallback).
+    let runtime: burnwall::budget::BudgetConfig = (&c.budget).into();
+    assert!((runtime.per_hour_usd - 3.50).abs() < 1e-9);
+    assert_eq!(runtime.fallback_model, "claude-haiku-4-5");
+}
+
+#[test]
+fn action_repeat_keys_default_and_round_trip() {
+    // #19 defaults: conservative threshold, enforcement OFF (warn-only).
+    let c = Config::default();
+    assert_eq!(c.loop_detection.action_repeat_threshold, 10);
+    assert!(!c.loop_detection.action_repeat_enforce);
+
+    let mut c = Config::default();
+    config::set_dotted_key(&mut c, "loop_detection.action_repeat_threshold", "4").unwrap();
+    config::set_dotted_key(&mut c, "loop_detection.action_repeat_enforce", "true").unwrap();
+    assert_eq!(c.loop_detection.action_repeat_threshold, 4);
+    assert!(c.loop_detection.action_repeat_enforce);
+
+    // Maps into the runtime loop config.
+    let runtime: burnwall::budget::LoopConfig = (&c.loop_detection).into();
+    assert_eq!(runtime.action_repeat_threshold, 4);
+    assert!(runtime.action_repeat_enforce);
+}
+
+#[test]
+fn older_config_without_new_keys_still_deserializes() {
+    // A config written before #2/#18/#19 (no per_hour/fallback_model/action_*
+    // keys) must still load — the new fields are serde-defaulted.
+    let toml = r#"
+[budget]
+daily = 25.0
+monthly = 0.0
+warn_percent = 80
+
+[loop_detection]
+enabled = true
+max_identical_requests = 5
+window_seconds = 300
+max_cost_per_window = 2.0
+"#;
+    let cfg: Config = toml::from_str(toml).expect("older config must still parse");
+    assert!((cfg.budget.daily - 25.0).abs() < 1e-9);
+    assert_eq!(cfg.budget.per_hour, 0.0);
+    assert!(cfg.budget.fallback_model.is_empty());
+    assert_eq!(cfg.loop_detection.action_repeat_threshold, 10);
+    assert!(!cfg.loop_detection.action_repeat_enforce);
 }

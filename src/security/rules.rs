@@ -35,6 +35,17 @@ pub struct Ruleset {
     /// exfiltration-prone data the credential denylist misses (Luhn-valid
     /// card numbers, US SSNs). Off by default — opt-in, errs toward precision.
     pub detect_egress: bool,
+    /// Credential-misdirection hard block (v0.9.16). When `true`, a recognized
+    /// provider credential found in a tool-call argument whose provider differs
+    /// from the request's *destination* provider is blocked
+    /// ([`super::ViolationKind::Misdirection`]) — e.g. an OpenAI `sk-` key in a
+    /// body forwarded to the Anthropic upstream. Off by default: it is
+    /// precision-imperfect (a request that legitimately discusses a key for
+    /// another provider inside a tool call is rare but possible), so it is
+    /// opt-in like `detect_egress`. Only the misdirection-scoped scan
+    /// ([`super::scanner::scan_request_for`]) acts on it; the provider-agnostic
+    /// entry points ignore it.
+    pub block_credential_misdirection: bool,
     /// Extra secret patterns contributed by installed rule packs (v0.6).
     /// Built-in patterns live in [`super::secrets::PATTERNS`] and are always
     /// checked first; these are *additive* and gated by `detect_secrets`.
@@ -46,6 +57,15 @@ pub struct Ruleset {
     /// response to the agent is unaffected so legitimate users still see
     /// what was blocked — only persisted data is redacted.
     pub log_redact_details: bool,
+    /// User-planted fake credentials (`[security].canaries`). Values are
+    /// opaque tripwires: if one ever appears in an outbound payload — tool
+    /// args, file content being written, or in-flight prose — the request is
+    /// hard-blocked ([`super::ViolationKind::Canary`]), because a canary has
+    /// no legitimate use anywhere. Settled conversation history is exempt so
+    /// one detected leak cannot wedge the session forever; the tripwire's job
+    /// is done at the first exfiltration attempt. Entries shorter than
+    /// [`MIN_CANARY_LEN`] are dropped at construction (see [`armed_canaries`]).
+    pub canaries: Vec<String>,
 }
 
 impl Default for Ruleset {
@@ -61,10 +81,35 @@ impl Default for Ruleset {
             block_network_mounts: true,
             detect_secrets: true,
             detect_egress: false,
+            block_credential_misdirection: false,
             secret_patterns: Vec::new(),
             log_redact_details: false,
+            canaries: Vec::new(),
         }
     }
+}
+
+/// Minimum byte length for a canary value. Shorter strings appear as
+/// substrings of ordinary traffic far too easily — a 3-char "canary" would
+/// block half the internet. Enforced at ruleset construction.
+pub const MIN_CANARY_LEN: usize = 8;
+
+/// Keep only canary values long enough to be meaningful tripwires. A dropped
+/// value is warned about (never silently): a user who planted a 5-char canary
+/// would otherwise believe they were protected when they are not.
+pub fn armed_canaries<I: IntoIterator<Item = String>>(canaries: I) -> Vec<String> {
+    canaries
+        .into_iter()
+        .filter(|c| {
+            let ok = c.len() >= MIN_CANARY_LEN;
+            if !ok && !c.is_empty() {
+                tracing::warn!(
+                    "security.canaries entry shorter than {MIN_CANARY_LEN} chars ignored (too easy to match accidentally)"
+                );
+            }
+            ok
+        })
+        .collect()
 }
 
 pub const DEFAULT_DENY_PATHS: &[&str] = &[
@@ -269,6 +314,23 @@ mod tests {
         // A genuine UNC share root IS a mount.
         assert!(is_unc_mount(r"\\fileserver\share\secret"));
         assert!(is_unc_mount(r#"{"path":"\\fileserver\share"}"#));
+    }
+
+    #[test]
+    fn armed_canaries_enforces_min_length() {
+        let armed = armed_canaries(vec![
+            "short".to_string(),                    // 5 chars — dropped
+            "".to_string(),                         // empty — dropped silently
+            "CANARY-fake-aws-key-2026".to_string(), // kept
+            "12345678".to_string(),                 // exactly MIN_CANARY_LEN — kept
+        ]);
+        assert_eq!(
+            armed,
+            vec![
+                "CANARY-fake-aws-key-2026".to_string(),
+                "12345678".to_string()
+            ]
+        );
     }
 
     #[test]

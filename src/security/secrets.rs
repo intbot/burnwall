@@ -163,6 +163,48 @@ pub fn first_match_masked(value: &str) -> Option<(&'static str, String)> {
     None
 }
 
+/// The provider a recognized built-in credential belongs to, by pattern name —
+/// `"openai"`, `"anthropic"`, or `"google"`. `None` for credentials with no
+/// LLM-provider destination (AWS, GitHub, Stripe, …), which can't be
+/// *misdirected* to a different LLM endpoint and so are out of scope for the
+/// credential-misdirection check (feature #7). Keyed on the exact built-in
+/// pattern name from [`PATTERNS`]; pack-contributed (owned-name) patterns are
+/// not mapped (they carry no provider semantics).
+pub fn provider_for_secret_name(name: &str) -> Option<&'static str> {
+    match name {
+        "OpenAI project key" | "OpenAI API key" => Some("openai"),
+        "Anthropic API key" => Some("anthropic"),
+        "Google API key" => Some("google"),
+        _ => None,
+    }
+}
+
+/// Like [`first_match_masked`] but only considers credentials that map to an
+/// LLM provider via [`provider_for_secret_name`], returning that provider
+/// alongside the pattern name and masked preview. Used by the
+/// credential-misdirection check (feature #7): a provider-tagged key whose
+/// provider differs from the request's destination is being sent to the wrong
+/// endpoint. Documentation/example credentials are exempt, as everywhere.
+pub fn first_provider_match_masked(value: &str) -> Option<(&'static str, &'static str, String)> {
+    for p in PATTERNS.iter() {
+        let name = match &p.name {
+            Cow::Borrowed(s) => *s,
+            Cow::Owned(_) => continue,
+        };
+        let Some(provider) = provider_for_secret_name(name) else {
+            continue;
+        };
+        if let Some(m) = p
+            .regex
+            .find_iter(value)
+            .find(|m| !is_example_secret(m.as_str()))
+        {
+            return Some((provider, name, mask_match(m.as_str())));
+        }
+    }
+    None
+}
+
 /// [`first_match_in`] with a masked preview of the matched value (pack patterns).
 pub fn first_match_in_masked<'a>(
     value: &str,

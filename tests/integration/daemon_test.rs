@@ -34,6 +34,14 @@ fn with_data_dir<T>(f: impl FnOnce(&Path) -> T) -> T {
 fn burnwall(data_dir: &Path) -> Command {
     let mut cmd = Command::cargo_bin("burnwall").expect("binary");
     cmd.env("BURNWALL_DATA_DIR", data_dir);
+    // Routing env files live under the ROUTING config dir (`%APPDATA%` on
+    // Windows, `$XDG_CONFIG_HOME` elsewhere), not the data dir. These tests
+    // run the real binary's `start`/`stop`, which resume/pause routing —
+    // without redirecting both vars they rewrite the DEVELOPER'S OWN shell
+    // routing files on every `cargo test` (found the hard way: test runs
+    // kept silently de-routing the dogfooding machine).
+    cmd.env("APPDATA", data_dir);
+    cmd.env("XDG_CONFIG_HOME", data_dir);
     cmd
 }
 
@@ -197,6 +205,72 @@ fn start_daemon_then_stop_lifecycle() {
 
     assert!(!pid_file.exists(), "stop clears the PID file");
     assert!(wait_until_gone(pid), "the daemon process exits after stop");
+}
+
+#[test]
+fn abnormal_exit_detector_counts_and_resets() {
+    // A leftover PID file pointing at a dead process means the prior run was
+    // killed without cleanup (crash / forced kill / antivirus quarantine).
+    // The detector flags it and counts consecutive occurrences so `start` can
+    // escalate its message; a clean shutdown resets the streak.
+    with_data_dir(|_| {
+        use burnwall::cli::daemon::{self, PriorExit};
+
+        // No PID file → nothing unclean.
+        assert_eq!(daemon::take_prior_exit_status(), PriorExit::Clean);
+
+        // Leftover PID file pointing at a definitely-dead PID → abnormal,
+        // and the streak climbs on each restart that still sees it.
+        daemon::write_pid_file(999_999_999).unwrap();
+        assert_eq!(
+            daemon::take_prior_exit_status(),
+            PriorExit::Abnormal { consecutive: 1 }
+        );
+        assert_eq!(
+            daemon::take_prior_exit_status(),
+            PriorExit::Abnormal { consecutive: 2 }
+        );
+
+        // A clean shutdown clears the escalation.
+        daemon::note_clean_exit();
+        assert_eq!(
+            daemon::take_prior_exit_status(),
+            PriorExit::Abnormal { consecutive: 1 }
+        );
+    });
+}
+
+#[test]
+fn shutdown_file_alone_stops_the_daemon_gracefully() {
+    // The graceful path `stop` relies on: a detached Windows daemon can't
+    // receive any signal, so the shutdown request FILE must be enough to
+    // bring it down on its own (drain, clean up, exit) — no hard kill.
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("burnwall.pid");
+
+    burnwall(dir.path())
+        .args(["start", "--daemon", "--port", "0"])
+        .assert()
+        .success();
+    let _cleanup = DaemonCleanup(pid_file.clone());
+
+    let pid: u32 = fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .expect("PID file holds a number");
+    assert!(daemon::process_is_alive(pid));
+
+    fs::write(dir.path().join("burnwall.shutdown"), "test request").unwrap();
+
+    assert!(
+        wait_until_gone(pid),
+        "the daemon must exit on its own after the shutdown file appears"
+    );
+    assert!(
+        !dir.path().join("burnwall.shutdown").exists(),
+        "the daemon consumes the request file"
+    );
 }
 
 #[test]

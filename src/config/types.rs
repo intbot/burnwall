@@ -30,6 +30,8 @@ pub struct Config {
     pub observability: ObservabilityConfig,
     #[serde(default)]
     pub pricing: PricingConfig,
+    #[serde(default)]
+    pub upstreams: UpstreamsConfig,
     /// Deprecated: superseded by `[tools]`. Kept for one release as a global
     /// kill switch (`enabled = false` disables all log scraping). Prefer the
     /// per-tool `[tools]` switches. Only written back when set to a
@@ -94,6 +96,14 @@ pub struct ProxyConfig {
     /// request bodies silently.
     #[serde(default)]
     pub cache_injection: bool,
+    /// Trim oversized tool/command output out of the OUTGOING request before
+    /// forwarding, keeping a generous head and tail (#17). Saves tokens on
+    /// noisy logs that re-enter context each turn. Off by default — like
+    /// `cache_injection`, it modifies the request body, so it is opt-in and
+    /// conservative (only `tool_result` blocks, only when large), and fails
+    /// open (any parse issue forwards the body unchanged).
+    #[serde(default)]
+    pub trim_tool_output: bool,
 }
 
 impl Default for ProxyConfig {
@@ -102,6 +112,7 @@ impl Default for ProxyConfig {
             port: 4100,
             host: "127.0.0.1".to_string(),
             cache_injection: false,
+            trim_tool_output: false,
         }
     }
 }
@@ -119,6 +130,14 @@ pub struct BudgetConfig {
     /// same session id share one blast-radius ceiling.
     #[serde(default)]
     pub per_session: f64,
+    /// Rolling 1-hour USD ceiling — the "emergency brake" (feature #2). `0.0` =
+    /// off (the default): the burn-rate speedometer is always surfaced in
+    /// `burnwall status`, but nothing blocks. When set, the rolling spend over
+    /// the last hour is enforced on the same plan-aware gate as the daily cap —
+    /// metered API traffic is 429'd once the hour's spend reaches the ceiling;
+    /// plan traffic only warns unless `enforce_on_plan` is set.
+    #[serde(default)]
+    pub per_hour: f64,
     /// Enforce the dollar caps on subscription (flat-rate plan) traffic too.
     /// Off by default — a Claude Pro/Max session authenticates with an OAuth
     /// token and is not metered per token, so the calculated dollar figure is
@@ -127,6 +146,18 @@ pub struct BudgetConfig {
     /// API-key traffic is always enforced.
     #[serde(default)]
     pub enforce_on_plan: bool,
+    /// Cheaper-model fallback (feature #18). When a daily/monthly/hourly dollar
+    /// cap WOULD block (the cap is exceeded AND enforcement applies) and this is
+    /// set, the outbound request's JSON `model` field is rewritten to this model
+    /// and the request is forwarded instead of returning 429 — a downgrade that
+    /// keeps work moving past the cap. Empty (the default) = off, so the cap
+    /// blocks normally. This MODIFIES the request body, so it is opt-in and
+    /// logged, like cache injection. CAVEAT: an aggressive downgrade can cost
+    /// *more* via rework — the cheaper model may produce output that has to be
+    /// redone. Choose a model whose quality is acceptable for the over-budget
+    /// tail of your work, not the cheapest possible one.
+    #[serde(default)]
+    pub fallback_model: String,
 }
 
 impl Default for BudgetConfig {
@@ -136,7 +167,9 @@ impl Default for BudgetConfig {
             monthly: 0.0,
             warn_percent: 80,
             per_session: 0.0,
+            per_hour: 0.0,
             enforce_on_plan: false,
+            fallback_model: String::new(),
         }
     }
 }
@@ -159,6 +192,37 @@ pub struct SecurityConfig {
     /// toward precision and is opt-in like other request-rewriting toggles.
     #[serde(default)]
     pub dlp: bool,
+    /// Credential-misdirection hard block. When `true`, a recognized provider
+    /// API key/token inside a tool-call argument whose provider differs from
+    /// the request's destination provider (an OpenAI key in a request bound for
+    /// Anthropic, etc.) is blocked. Off by default — precision-imperfect, so
+    /// opt-in like `dlp`. Masked preview only; the raw key is never echoed.
+    #[serde(default)]
+    pub block_credential_misdirection: bool,
+    /// Planted canary credentials — fake secrets you scatter where only an
+    /// intruder would pick them up (a fake key in `.env.example`, a decoy
+    /// `credentials` file). If one ever appears in an outbound request, the
+    /// request is hard-blocked: a canary has no legitimate use, so any
+    /// appearance is an exfiltration attempt. Values are opaque strings,
+    /// minimum 8 characters (shorter entries are ignored with a warning).
+    /// Empty by default.
+    #[serde(default)]
+    pub canaries: Vec<String>,
+    /// Paranoid / fail-CLOSED mode (#20). Burnwall's default is fail-OPEN: a
+    /// request body the scanner can't parse (and therefore can't inspect) is
+    /// forwarded anyway, so the proxy never gets in the way. When `true`, such
+    /// a body is BLOCKED instead — for users who would rather stop an
+    /// uninspectable request than let it through. Off by default so the proxy
+    /// stays invisible on the happy path; opt-in flips the trade-off (R2).
+    #[serde(default)]
+    pub paranoid: bool,
+    /// Warn (never block) when a model's reply contains an auto-rendering image
+    /// whose URL carries embedded data — a zero-click exfil beacon (#15).
+    /// Response-path, READ-ONLY: the reply is never modified and never blocked
+    /// (the fetch happens in your editor, not through us); we can only record a
+    /// `security_event` so you find out. Off by default — opt-in (R2).
+    #[serde(default)]
+    pub warn_response_exfil: bool,
 }
 
 impl Default for SecurityConfig {
@@ -177,6 +241,10 @@ impl Default for SecurityConfig {
             detect_secrets: true,
             log_redact_details: false,
             dlp: false,
+            block_credential_misdirection: false,
+            canaries: Vec::new(),
+            paranoid: false,
+            warn_response_exfil: false,
         }
     }
 }
@@ -192,6 +260,22 @@ pub struct LoopDetectionConfig {
     /// but enforcement is opt-in so a normal spend spike does not 429 the user.
     #[serde(default)]
     pub cost_spiral_enforce: bool,
+    /// How many times the same tool-call action signature may repeat within the
+    /// window before the near-duplicate "stuck repeating the same action"
+    /// detector fires (feature #19). Catches the loop the full-body hash misses
+    /// because the transcript grows each turn. Conservative default (10).
+    #[serde(default = "default_action_repeat_threshold")]
+    pub action_repeat_threshold: u32,
+    /// Block on the action-repeat detector. Off by default (R5): the detector
+    /// only WARNs unless this is `true`, so a fuzzy near-duplicate signal never
+    /// wedges a hands-off session. Even on, it does NOT tighten the existing
+    /// full-body-hash block — it is a separate, opt-in signal.
+    #[serde(default)]
+    pub action_repeat_enforce: bool,
+}
+
+fn default_action_repeat_threshold() -> u32 {
+    10
 }
 
 impl Default for LoopDetectionConfig {
@@ -202,6 +286,8 @@ impl Default for LoopDetectionConfig {
             window_seconds: 300,
             max_cost_per_window: 2.0,
             cost_spiral_enforce: false,
+            action_repeat_threshold: default_action_repeat_threshold(),
+            action_repeat_enforce: false,
         }
     }
 }
@@ -398,6 +484,27 @@ pub struct ObservabilityConfig {
     pub otel_file: String,
 }
 
+/// `[upstreams]` — gateway chaining (#9). Point Burnwall's per-provider
+/// upstream at an LLM gateway (LiteLLM / OpenRouter / Portkey / a corporate
+/// proxy) instead of the provider directly, so you keep the gateway's routing
+/// while gaining Burnwall's cross-tool spend tracking + deterministic
+/// enforcement in front of it. Each field is the base URL Burnwall forwards
+/// that provider's traffic to. Empty (the default) → the provider's own API.
+/// A `--upstream-*` flag on `burnwall start` overrides the matching field here.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct UpstreamsConfig {
+    /// Base URL for `/anthropic/*` traffic. Empty → `https://api.anthropic.com`.
+    #[serde(default)]
+    pub anthropic: String,
+    /// Base URL for `/openai/*` traffic. Empty → `https://api.openai.com`.
+    #[serde(default)]
+    pub openai: String,
+    /// Base URL for `/google/*` traffic.
+    /// Empty → `https://generativelanguage.googleapis.com`.
+    #[serde(default)]
+    pub google: String,
+}
+
 /// Convert the persistent config's budget block into the runtime
 /// [`crate::budget::BudgetConfig`] used by [`BudgetTracker`].
 impl From<&BudgetConfig> for crate::budget::BudgetConfig {
@@ -407,7 +514,9 @@ impl From<&BudgetConfig> for crate::budget::BudgetConfig {
             monthly_usd: c.monthly,
             warn_percent: c.warn_percent,
             per_session_usd: c.per_session,
+            per_hour_usd: c.per_hour,
             enforce_on_plan: c.enforce_on_plan,
+            fallback_model: c.fallback_model.clone(),
         }
     }
 }
@@ -429,10 +538,14 @@ impl From<&SecurityConfig> for crate::security::Ruleset {
             block_network_mounts: c.block_network_mounts,
             detect_secrets: c.detect_secrets,
             detect_egress: c.dlp,
+            block_credential_misdirection: c.block_credential_misdirection,
             // Pack-contributed patterns are merged in later (Phase B startup
             // wiring), like a discovered project profile.
             secret_patterns: Vec::new(),
             log_redact_details: c.log_redact_details,
+            // Too-short canaries are dropped (with a warning) so a trivial
+            // value can't block half of all traffic.
+            canaries: crate::security::rules::armed_canaries(c.canaries.clone()),
         }
     }
 }
@@ -468,6 +581,8 @@ impl From<&LoopDetectionConfig> for crate::budget::LoopConfig {
             window_seconds: c.window_seconds,
             max_cost_per_window: c.max_cost_per_window,
             cost_spiral_enforce: c.cost_spiral_enforce,
+            action_repeat_threshold: c.action_repeat_threshold,
+            action_repeat_enforce: c.action_repeat_enforce,
         }
     }
 }

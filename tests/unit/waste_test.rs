@@ -7,8 +7,8 @@ use burnwall::providers::TokenUsage;
 use burnwall::waste::{
     self, Finding, Severity, WasteRule,
     rules::{
-        CacheHitStarvation, ContextWindowSaturation, MegaSessions, ModelOverreliance,
-        ReasoningEffortOveruse, RunawayContextGrowth,
+        CacheDeadZone, CacheHitStarvation, ContextWindowSaturation, MegaSessions,
+        ModelOverreliance, ReasoningEffortOveruse, RunawayContextGrowth,
     },
 };
 
@@ -157,6 +157,96 @@ fn empty_input_yields_no_findings() {
     let findings = waste::analyze(&[]);
     assert!(findings.is_empty());
     assert_eq!(waste::total_waste_usd(&findings), 0.0);
+}
+
+// ───────────────── Cache dead-zone (#8) ─────────────────
+
+/// A dead-zone rule with low thresholds so tests don't need 20 entries.
+fn deadzone_rule() -> CacheDeadZone {
+    CacheDeadZone {
+        min_creation_tokens: 20_000,
+        min_sample: 3,
+        max_read_write_ratio: 0.05,
+    }
+}
+
+#[test]
+fn flags_cache_writes_that_are_never_read() {
+    // The dead-zone signature: every turn pays to WRITE the cache (8k creation
+    // tokens) but reads almost nothing back — a loop rebuilding context just
+    // slower than the cache lifetime, so the cache expires before reuse.
+    let entries: Vec<UsageEntry> = (0..5)
+        .map(|_| entry("claude-sonnet-4-6", 500, 8_000, 50))
+        .collect();
+
+    let f = deadzone_rule()
+        .evaluate(&waste::WasteContext { entries: &entries })
+        .expect("should flag cache dead-zone");
+    assert_eq!(f.rule_id, "cache-dead-zone");
+    assert_eq!(f.count, 5);
+    // Sonnet: cache_write $3.75, input $3.00 → premium $0.75/MTok.
+    // 5 × 8000 creation × 0.75 / 1e6 = $0.030.
+    assert!(
+        (f.observed_waste_usd - 0.030).abs() < 1e-6,
+        "waste = {}",
+        f.observed_waste_usd
+    );
+}
+
+#[test]
+fn healthy_cache_reuse_is_not_a_dead_zone() {
+    // Writes the cache once-ish but READS it heavily — the cache is paying off,
+    // so the read:write ratio is high and the rule stays quiet.
+    let entries: Vec<UsageEntry> = (0..5)
+        .map(|_| entry("claude-sonnet-4-6", 500, 8_000, 40_000))
+        .collect();
+    assert!(
+        deadzone_rule()
+            .evaluate(&waste::WasteContext { entries: &entries })
+            .is_none(),
+        "a workload that reuses its cache must not be flagged"
+    );
+}
+
+#[test]
+fn no_cache_writes_is_not_a_dead_zone() {
+    // No cache creation at all — this is plain uncached traffic (cache-hit
+    // starvation's territory), not a dead zone. The dead-zone rule only fires
+    // when money is actually being spent writing the cache.
+    let entries: Vec<UsageEntry> = (0..10)
+        .map(|_| entry("claude-sonnet-4-6", 8_000, 0, 0))
+        .collect();
+    assert!(
+        deadzone_rule()
+            .evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
+}
+
+#[test]
+fn dead_zone_below_sample_threshold_is_not_flagged() {
+    let entries: Vec<UsageEntry> = (0..2)
+        .map(|_| entry("claude-sonnet-4-6", 500, 8_000, 0))
+        .collect();
+    assert!(
+        deadzone_rule()
+            .evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
+}
+
+#[test]
+fn dead_zone_below_creation_volume_is_not_flagged() {
+    // Three qualifying entries but tiny total cache writes — under the
+    // min_creation_tokens floor, so it's not worth surfacing.
+    let entries: Vec<UsageEntry> = (0..3)
+        .map(|_| entry("claude-sonnet-4-6", 500, 100, 0))
+        .collect();
+    assert!(
+        deadzone_rule()
+            .evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 fn small_entry(model: &str) -> UsageEntry {

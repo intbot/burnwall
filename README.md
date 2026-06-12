@@ -120,6 +120,31 @@ sha256sum --ignore-missing -c sha256.sum
 
 See [`SECURITY.md`](SECURITY.md) for the full integrity + TLS-handling statement.
 
+### Windows: if Defender or SmartScreen flags it
+
+The release binaries aren't code-signed yet, so Windows SmartScreen may show an
+"unknown publisher" prompt on first run, and Defender's machine-learning
+heuristic can occasionally flag the binary as a false positive — ironically,
+partly *because* a local security proxy looks structurally like the things it
+protects against. It's a false positive; the binary is the one built by this
+repo's CI (verify it with the attestation command above).
+
+If Defender quarantines the binary while the proxy is running, your AI tools may
+start failing with `ConnectionRefused` (they're still pointed at the now-gone
+local proxy). To recover:
+
+```
+burnwall recover         # pauses routing so new terminals go direct, and tells you what to restart
+```
+
+To prevent re-quarantine, exclude Burnwall's directory in an elevated PowerShell:
+
+```powershell
+Add-MpPreference -ExclusionPath "$env:USERPROFILE\.burnwall"
+```
+
+You can report the false positive to Microsoft at <https://www.microsoft.com/wdsi>.
+
 ## How It Works
 
 Burnwall runs as a local HTTP proxy. You point your AI tools at it via environment variables:

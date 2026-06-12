@@ -105,6 +105,68 @@ pub fn running_pid() -> anyhow::Result<Option<u32>> {
     }
 }
 
+/// How the previous daemon run ended, inferred at the next start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriorExit {
+    /// No evidence of an unclean prior exit (no leftover PID file).
+    Clean,
+    /// A PID file from a previous run was left behind with no live burnwall
+    /// behind it: the last run was terminated WITHOUT running any cleanup —
+    /// a crash, a forced kill, an **antivirus quarantine of the binary**, or
+    /// an unclean shutdown/reboot. `consecutive` is how many starts in a row
+    /// have seen this (a rising count is the signature of an AV repeatedly
+    /// quarantining the binary, vs. a one-off reboot).
+    Abnormal { consecutive: u32 },
+}
+
+/// Path to the consecutive-unclean-exit counter (`<data dir>/burnwall.crashes`).
+fn crash_counter_path() -> anyhow::Result<PathBuf> {
+    Ok(data_dir()
+        .context("locating the Burnwall data directory")?
+        .join("burnwall.crashes"))
+}
+
+fn read_crash_counter() -> u32 {
+    crash_counter_path()
+        .ok()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+fn write_crash_counter(n: u32) {
+    if let Ok(p) = crash_counter_path() {
+        if let Some(parent) = p.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(p, n.to_string());
+    }
+}
+
+/// Inspect (and record) how the previous run ended, BEFORE the normal
+/// stale-PID cleanup in [`running_pid`] erases the evidence. A leftover PID
+/// file with no live burnwall behind it means the last run never ran its
+/// shutdown path. Bumps the consecutive-occurrence counter on an unclean
+/// exit so the caller can escalate its message when it keeps happening. Call
+/// once, early in `start` (before `running_pid`). Idempotent within a start:
+/// the daemon launcher removes the PID file before re-spawning, so the child
+/// sees `Clean` and the count isn't double-bumped.
+pub fn take_prior_exit_status() -> PriorExit {
+    let stale = matches!(read_pid_file(), Ok(Some(pid)) if !process_is_alive(pid));
+    if !stale {
+        return PriorExit::Clean;
+    }
+    let consecutive = read_crash_counter().saturating_add(1);
+    write_crash_counter(consecutive);
+    PriorExit::Abnormal { consecutive }
+}
+
+/// Reset the unclean-exit counter — called after a clean shutdown so a single
+/// healthy run clears the "this keeps crashing" escalation.
+pub fn note_clean_exit() {
+    write_crash_counter(0);
+}
+
 /// Re-exec `burnwall start` (without `--daemon`) as a detached background
 /// process, then wait for it to write its PID file before returning.
 pub async fn spawn_background(args: &StartArgs) -> anyhow::Result<()> {
@@ -222,9 +284,76 @@ fn resolved_port(args: &StartArgs) -> u16 {
         .unwrap_or(4100)
 }
 
+/// Absolute path to the graceful-shutdown request file:
+/// `<data dir>/burnwall.shutdown` (honors `BURNWALL_DATA_DIR`).
+///
+/// This file is the only "signal" deliverable to a detached Windows process
+/// — there is no SIGTERM equivalent that reaches a `DETACHED_PROCESS`.
+/// `stop` writes it; the running daemon polls for it and shuts down
+/// gracefully (drain in-flight requests, then exit) when it appears.
+pub fn shutdown_file_path() -> anyhow::Result<PathBuf> {
+    Ok(data_dir()
+        .context("locating the Burnwall data directory")?
+        .join("burnwall.shutdown"))
+}
+
+/// Ask a running daemon to shut down gracefully: stop accepting, drain
+/// in-flight requests (bounded — see the proxy's drain window), then exit
+/// on its own. Writes the shutdown file (works on every platform); on Unix
+/// also sends SIGTERM so the reaction is immediate instead of waiting for
+/// the next poll tick.
+pub fn request_graceful_shutdown(_pid: u32) -> anyhow::Result<()> {
+    let path = shutdown_file_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating data directory {}", parent.display()))?;
+    }
+    fs::write(&path, "graceful shutdown requested by `burnwall stop`")
+        .with_context(|| format!("writing {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        let _ = terminate_process(_pid);
+    }
+    Ok(())
+}
+
+/// Best-effort removal of the shutdown request file. Called by `stop` after
+/// the daemon is gone (a hard-killed daemon never consumes the file, and a
+/// leftover request would kill the NEXT daemon the moment it starts).
+pub fn clear_shutdown_file() {
+    if let Ok(path) = shutdown_file_path() {
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// How often the daemon checks for the shutdown request file. One `stat()`
+/// of a usually-absent file — the same budget as the pause-file check the
+/// handler already does per request.
+const SHUTDOWN_POLL: Duration = Duration::from_millis(250);
+
 /// Resolve when the process is asked to shut down: Ctrl-C on any platform,
-/// or SIGTERM on Unix (which is what `burnwall stop` sends).
+/// SIGTERM on Unix, or the shutdown request file appearing (the mechanism
+/// `burnwall stop` uses — the only one that can reach a detached Windows
+/// process). The resolved signal starts the proxy's graceful drain.
 pub async fn shutdown_signal() {
+    // Clear any stale request left behind by a crashed `stop` — without
+    // this, a leftover file would shut the daemon down the moment it starts.
+    let shutdown_file = shutdown_file_path().ok();
+    if let Some(p) = &shutdown_file {
+        let _ = fs::remove_file(p);
+    }
+    let file_request = async {
+        match shutdown_file {
+            Some(p) => loop {
+                if p.exists() {
+                    let _ = fs::remove_file(&p);
+                    return;
+                }
+                tokio::time::sleep(SHUTDOWN_POLL).await;
+            },
+            None => std::future::pending::<()>().await,
+        }
+    };
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -235,18 +364,25 @@ pub async fn shutdown_signal() {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("could not install SIGTERM handler: {e}");
-                ctrl_c.await;
+                tokio::select! {
+                    _ = ctrl_c => {}
+                    _ = file_request => {}
+                }
                 return;
             }
         };
         tokio::select! {
             _ = ctrl_c => {}
             _ = sigterm.recv() => {}
+            _ = file_request => {}
         }
     }
     #[cfg(not(unix))]
     {
-        ctrl_c.await;
+        tokio::select! {
+            _ = ctrl_c => {}
+            _ = file_request => {}
+        }
     }
 }
 

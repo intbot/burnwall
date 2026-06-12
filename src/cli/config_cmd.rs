@@ -76,6 +76,8 @@ const KNOWN_SECTIONS: &[&str] = &[
     "mcp",
     "resilience",
     "observability",
+    "pricing",
+    "upstreams",
     "log_scrape",
 ];
 
@@ -150,6 +152,20 @@ fn doctor(path: &Path) -> anyhow::Result<()> {
         writeln!(
             out,
             "⚠️  security.enabled is OFF — request scanning is disabled; nothing is blocked."
+        )?;
+    }
+    if cfg.proxy.trim_tool_output {
+        warnings += 1;
+        writeln!(
+            out,
+            "⚠️  proxy.trim_tool_output is ON — Burnwall rewrites request bodies to truncate oversized tool output."
+        )?;
+    }
+    if cfg.security.paranoid {
+        warnings += 1;
+        writeln!(
+            out,
+            "⚠️  security.paranoid is ON — requests whose bodies can't be parsed for scanning are BLOCKED (fail-closed, not the fail-open default)."
         )?;
     }
 

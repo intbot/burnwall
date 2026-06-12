@@ -10,6 +10,8 @@
 //!   Opt-in. For interop with OTel-aware tooling without leaking payloads.
 
 pub mod attribution;
+pub mod cost_export;
 pub mod digest;
 pub mod metrics;
 pub mod otel;
+pub mod wire_vs_logs;

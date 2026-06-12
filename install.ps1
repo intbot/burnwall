@@ -106,6 +106,11 @@ try {
     Step 'next steps:'
     Ok   '  burnwall init --apply    # detect AI tools and configure env vars'
     Ok   '  burnwall start           # run the proxy'
+    Info ''
+    Warn 'Heads up: the binary is not code-signed yet, so Windows Defender/SmartScreen may'
+    Warn 'flag it as a false positive. If it gets quarantined and your AI tools start showing'
+    Warn 'ConnectionRefused, run  burnwall recover  to go direct, and exclude it (elevated):'
+    Warn '  Add-MpPreference -ExclusionPath "$HOME\.burnwall"'
 } finally {
     if (Test-Path $tmpDir) {
         Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue

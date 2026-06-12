@@ -134,6 +134,103 @@ impl WasteRule for CacheHitStarvation {
     }
 }
 
+/// **Cache dead-zone** — a workload that repeatedly pays full price to *write*
+/// the cache (`cache_creation_tokens`) but almost never *reads* it back
+/// (`cache_read_tokens`). This is the signature of a loop rebuilding context
+/// just slower than the cache lifetime: every turn re-creates the cache entry
+/// at the premium write rate, the entry expires before the next turn reuses it,
+/// so the cache never pays off — it costs *extra* (writes are billed above the
+/// base input rate) for zero benefit.
+///
+/// Distinct from [`CacheHitStarvation`], which flags large prompts that simply
+/// aren't cached. This rule specifically catches the case where the caller *is*
+/// paying to cache (lots of writes) but the reads never materialize — money
+/// spent on a cache that's structurally dead.
+///
+/// Computed from real provider numbers. Trips when, across the window, there are
+/// at least `min_sample` requests that wrote cache, the total cache writes are
+/// substantial (`min_creation_tokens`), and the read:write ratio is below
+/// `max_read_write_ratio`. Advisory only (the waste engine never blocks).
+///
+/// Waste estimate: the *premium* paid on the wasted cache writes — the gap
+/// between the cache-write rate and the base input rate `(cache_write − input)`
+/// applied to the un-reused write tokens. That premium is pure overhead when the
+/// write is never read, framed (per the [`Finding`] contract) as money already
+/// spent, never a speculative saving.
+pub struct CacheDeadZone {
+    pub min_creation_tokens: u64,
+    pub min_sample: usize,
+    pub max_read_write_ratio: f64,
+}
+
+impl Default for CacheDeadZone {
+    fn default() -> Self {
+        // Conservative: needs real, repeated cache-write volume with almost no
+        // reads before it says anything.
+        Self {
+            min_creation_tokens: 20_000,
+            min_sample: 20,
+            max_read_write_ratio: 0.05,
+        }
+    }
+}
+
+impl WasteRule for CacheDeadZone {
+    fn id(&self) -> &'static str {
+        "cache-dead-zone"
+    }
+
+    fn evaluate(&self, ctx: &WasteContext<'_>) -> Option<Finding> {
+        let mut count = 0usize;
+        let mut total_creation = 0u64;
+        let mut total_read = 0u64;
+        let mut waste_usd = 0.0f64;
+
+        for e in ctx.entries {
+            // Only requests that actually paid to write the cache qualify.
+            if e.usage.cache_creation_tokens == 0 {
+                continue;
+            }
+            count += 1;
+            total_creation += e.usage.cache_creation_tokens;
+            total_read += e.usage.cache_read_tokens;
+            if let Some(p) = pricing::get_pricing(&e.model) {
+                // The write *premium* over the base input rate is the overhead
+                // that buys nothing when the write is never read back.
+                let premium = (p.cache_write_per_mtok - p.input_per_mtok) / 1_000_000.0;
+                if premium > 0.0 {
+                    waste_usd += e.usage.cache_creation_tokens as f64 * premium;
+                }
+            }
+        }
+
+        if count < self.min_sample || total_creation < self.min_creation_tokens {
+            return None;
+        }
+        let ratio = total_read as f64 / total_creation as f64;
+        if ratio > self.max_read_write_ratio || waste_usd <= 0.0 {
+            return None;
+        }
+
+        Some(Finding {
+            rule_id: "cache-dead-zone",
+            title: "Cache writes that never pay off".to_string(),
+            severity: Severity::Medium,
+            count,
+            observed_waste_usd: waste_usd,
+            detail: format!(
+                "{count} requests paid to *write* the prompt cache but read back only {:.1}% of it — \
+                 the signature of a loop rebuilding context just slower than the cache lifetime, so the \
+                 cache expires before it's reused. About ${:.2} went to the cache-write premium for nothing. \
+                 Keep cached prefixes stable and reuse them within the cache window, or stop caching content \
+                 that won't be re-read.",
+                ratio * 100.0,
+                waste_usd,
+            ),
+        })
+    }
+}
+
 /// **Model overreliance** — a flagship model (Opus, GPT-5.5) used for trivial
 /// requests (small prompt, short answer) that a cheaper model in the same
 /// family would have handled. Waste is the *real* cost difference: what the

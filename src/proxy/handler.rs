@@ -14,7 +14,7 @@ use tracing::warn;
 use crate::budget::BudgetStatus;
 use crate::storage::{RequestRecord, SecurityEvent};
 
-use super::{AppState, ProxyBody, cache_injection, forwarding, streaming};
+use super::{AppState, ProxyBody, cache_injection, forwarding, streaming, tool_trim};
 
 pub async fn handle(
     req: Request<Incoming>,
@@ -133,10 +133,30 @@ pub async fn handle(
     let session_id = session_from_headers(&parts.headers);
 
     // ─── security check ───
-    // `scan_request`, not `scan`: command-shaped rules apply only to tool-call
-    // arguments, so a system prompt or chat message that merely *mentions* a
-    // denied path/command doesn't 403 the whole session.
-    if let Some(violation) = state.security.scan_request(&body_bytes) {
+    // `scan_request_for`, not `scan`: command-shaped rules apply only to
+    // tool-call arguments, so a system prompt or chat message that merely
+    // *mentions* a denied path/command doesn't 403 the whole session. The
+    // destination `provider` is threaded in for the credential-misdirection
+    // check (opt-in) — a provider key bound for a different provider's endpoint.
+    //
+    // File-upload egress fallback (#3): `scan_request_for` parses JSON and
+    // fails open on a non-JSON body, so a multipart/form-data upload to a
+    // provider file endpoint (`/v1/files`) was never inspected. When egress
+    // detection (`security.dlp`) is on and this is a file-upload route whose
+    // body isn't JSON, scan the raw body for secrets / DLP / canaries. This is
+    // the one body inspection that is intentionally NOT tool-call-scoped — a
+    // raw upload has no prose/tool-call structure; the whole body is the egress
+    // payload (justified in `scanner::scan_raw_upload`).
+    let upload_violation = if is_file_upload_route(&rest) && !looks_like_json(&body_bytes) {
+        state.security.scan_upload(&body_bytes)
+    } else {
+        None
+    };
+    if let Some(violation) = state
+        .security
+        .scan_request_for(&body_bytes, provider)
+        .or(upload_violation)
+    {
         warn!("🛡️ BLOCKED {}: {}", provider, violation.message());
 
         // When log_redact_details is on, storage rows strip the matched-rule
@@ -177,36 +197,207 @@ pub async fn handle(
         ));
     }
 
+    // ─── paranoid mode (#20, opt-in fail-closed) ───
+    // Burnwall's default is fail-open: a non-empty body the scanner can't
+    // parse as JSON is forwarded unscanned (counted + warned periodically in
+    // the engine). With `security.paranoid = true` that blind spot closes:
+    // an uninspectable body is blocked instead of forwarded. Known
+    // file-upload routes are exempt — multipart uploads are legitimately
+    // non-JSON and already got the raw egress scan above. Off by default
+    // (R2): exotic encodings would otherwise false-positive entire tools.
+    if state.paranoid
+        && state.security.rules().enabled
+        && !body_bytes.is_empty()
+        && !is_file_upload_route(&rest)
+        && !state.security.scannable_json(&body_bytes)
+    {
+        warn!(
+            "🛡️ PARANOID BLOCKED {}: request body is not parseable JSON ({} bytes) — it cannot be scanned",
+            provider,
+            body_bytes.len()
+        );
+        let event = SecurityEvent::new(
+            "paranoid_unscannable",
+            "request body could not be parsed for scanning; paranoid mode blocks instead of forwarding unscanned",
+        )
+        .with_provider(provider, &model);
+        if let Err(e) = state.storage.insert_security_event(&event) {
+            tracing::error!("security_event insert failed: {}", e);
+        }
+        let record = RequestRecord::blocked(provider, &model, "paranoid_unscannable", None);
+        if let Err(e) = state.storage.insert_request(&record) {
+            tracing::error!("blocked-request insert failed: {}", e);
+        }
+        let what = format!(
+            "Paranoid mode is on, and this request's body ({} bytes) is not parseable JSON, so the security scanner cannot inspect it. Fail-closed means it is blocked rather than forwarded unscanned.",
+            body_bytes.len()
+        );
+        return Ok(block::build(
+            provider,
+            "paranoid_blocked",
+            StatusCode::FORBIDDEN,
+            &what,
+            block::PARANOID_REMEDIES,
+            None,
+        ));
+    }
+
     // ─── budget check ───
     // Plan-aware (B-H4): a subscription request (OAuth bearer, no API key) is
     // not metered per token, so the dollar cap is notional — we track and warn
     // but do not 429-block it unless `budget.enforce_on_plan` is set. Metered
     // API-key traffic is always enforced.
-    let metered = auth_kind(&parts.headers, provider) == AuthKind::Metered;
+    let kind = auth_kind(&parts.headers, provider);
+    let metered = kind == AuthKind::Metered;
     let enforce_dollar_cap = metered || state.budget.config().enforce_on_plan;
 
-    // Monthly cap first (the hard backstop), then daily.
+    // ─── silent-billing watchdog (#11, ALERT-ONLY, never blocks) ───
+    // Track the billing kind per session. If a session that was on a flat-rate
+    // subscription flips to metered API billing (the user's plan coverage
+    // silently lapsing — e.g. a `claude -p` request that bills the API), warn
+    // once and record one informational event. Uses the same plan-aware
+    // `auth_kind` gate as budget enforcement (R3); it never returns a 4xx.
+    if let Some(sid) = &session_id {
+        let kind_label = match kind {
+            AuthKind::Subscription => super::AUTH_SUBSCRIPTION,
+            AuthKind::Metered => super::AUTH_METERED,
+        };
+        if super::BILLING_WATCH.record(sid, kind_label) {
+            warn!(
+                "💳 billing flip on session {}: subscription → metered (plan coverage may have lapsed — this request bills the API)",
+                sid
+            );
+            let event = SecurityEvent::new(
+                "billing_flip",
+                "session switched from subscription to metered billing",
+            )
+            .with_provider(provider, &model);
+            if let Err(e) = state.storage.insert_security_event(&event) {
+                tracing::error!("billing_flip event insert failed: {}", e);
+            }
+        }
+    }
+
+    // ─── slow-drip exfiltration monitor (#16, ALERT-ONLY, never blocks) ───
+    // Best-effort: count outbound network hosts seen in this body and warn once
+    // if any single host is targeted an unusual number of times over the
+    // process lifetime. Coarse and conservative by design (a high-frequency
+    // host is far more often a legitimate API than an exfil sink), so it only
+    // ever logs + records an informational event — it does NOT gate the
+    // request. Skipped for body-less/GET requests (nothing to scan).
+    if !body_bytes.is_empty() {
+        for host in super::extract_hosts(&String::from_utf8_lossy(&body_bytes)) {
+            if super::DRIP_MONITOR.observe(&host) {
+                warn!(
+                    "🐌 slow-drip monitor: host {} targeted {}+ times this session — review for low-and-slow exfiltration",
+                    host,
+                    super::DripMonitor::THRESHOLD
+                );
+                let event = SecurityEvent::new(
+                    "slow_drip_alert",
+                    "a single outbound host was targeted an unusual number of times",
+                )
+                .with_provider(provider, &model);
+                if let Err(e) = state.storage.insert_security_event(&event) {
+                    tracing::error!("slow_drip_alert event insert failed: {}", e);
+                }
+            }
+        }
+    }
+
+    // ─── burn-rate speedometer (#2, ALWAYS-ON, warn/surface only) ───
+    // Compute a short-window burn rate (last 5 minutes, expressed as USD/hour)
+    // from the rolling-hour window the tracker keeps. Never blocks. When it
+    // spikes past the configured hourly ceiling (or, when no ceiling is set, a
+    // high absolute rate), log a warning so a runaway burn is visible in the
+    // proxy log. `status` surfaces the same number for the steady-state view.
+    {
+        const BURN_WINDOW_MINS: u32 = 5;
+        let rate = state.budget.burn_rate_per_hour(BURN_WINDOW_MINS);
+        let cap = state.budget.config().per_hour_usd;
+        // Spike threshold: 80% of the hourly ceiling when armed; otherwise a
+        // generous absolute floor so we don't warn on ordinary bursts.
+        let spike = if cap > 0.0 { cap * 0.8 } else { 20.0 };
+        if rate >= spike && rate > 0.0 {
+            warn!(
+                "🏎️ burn-rate spike: ~${:.2}/hr (last {}m){}",
+                rate,
+                BURN_WINDOW_MINS,
+                if cap > 0.0 {
+                    format!(" — hourly cap ${cap:.2}")
+                } else {
+                    String::new()
+                }
+            );
+        }
+    }
+
+    // Cheaper-model fallback target (#18). Resolved once: non-empty only when
+    // the user opted in via `budget.fallback_model`. When a dollar cap would
+    // block below AND this is set, we rewrite the request `model` instead of
+    // returning 429. Threaded to the forward-body selection further down.
+    let fallback_model = {
+        let f = state.budget.config().fallback_model.trim();
+        if f.is_empty() {
+            None
+        } else {
+            Some(f.to_string())
+        }
+    };
+    // Set true once any enforced dollar cap is exceeded — drives the fallback
+    // rewrite decision after the cap loop.
+    let mut dollar_cap_would_block = false;
+
+    // Monthly cap first (the hard backstop), then daily, then the hourly brake.
     for (status, label) in [
         (state.budget.check_monthly(), "monthly"),
         (state.budget.check(), "daily"),
+        (state.budget.check_hourly(), "hourly"),
     ] {
         match status {
             BudgetStatus::Exceeded { spent, limit } => {
                 if enforce_dollar_cap {
+                    // #18: if a fallback model is configured, don't block — fall
+                    // through to the request rewrite (logged) below. Blocking is
+                    // only the path when no fallback is set.
+                    if fallback_model.is_some() {
+                        dollar_cap_would_block = true;
+                        warn!(
+                            "💰 {} budget exceeded ${:.2}/${:.2} — downgrading to fallback model instead of blocking",
+                            label, spent, limit
+                        );
+                        // Don't `return`; keep evaluating but the rewrite below
+                        // handles forwarding. Break so we rewrite once.
+                        break;
+                    }
                     warn!("💰 {} BUDGET EXCEEDED: ${:.2}/${:.2}", label, spent, limit);
-                    let kind = if label == "monthly" {
-                        "monthly_budget_exceeded"
-                    } else {
-                        "budget_exceeded"
+                    let kind = match label {
+                        "monthly" => "monthly_budget_exceeded",
+                        "hourly" => "hourly_budget_exceeded",
+                        _ => "budget_exceeded",
                     };
                     let record = RequestRecord::blocked(provider, &model, kind, None);
                     if let Err(e) = state.storage.insert_request(&record) {
                         tracing::error!("blocked-request insert failed: {}", e);
                     }
-                    let reset = if label == "monthly" {
-                        "the 1st of next month"
-                    } else {
-                        "local midnight"
+                    let (reset, retry_after, remedies): (&str, Option<u64>, &[&str]) = match label {
+                        "monthly" => (
+                            "the 1st of next month",
+                            Some(block::seconds_until_local_midnight()),
+                            block::BUDGET_REMEDIES,
+                        ),
+                        "hourly" => (
+                            "the end of the rolling hour",
+                            // The rolling-hour window drains in at most an hour;
+                            // steer well-behaved clients to back off that long.
+                            Some(3600),
+                            block::HOURLY_BUDGET_REMEDIES,
+                        ),
+                        _ => (
+                            "local midnight",
+                            Some(block::seconds_until_local_midnight()),
+                            block::BUDGET_REMEDIES,
+                        ),
                     };
                     let what = format!(
                         "Your {label} budget of ${:.2} is used up (${:.2} spent). It resets at {reset}.",
@@ -217,8 +408,8 @@ pub async fn handle(
                         kind,
                         StatusCode::TOO_MANY_REQUESTS,
                         &what,
-                        block::BUDGET_REMEDIES,
-                        Some(block::seconds_until_local_midnight()),
+                        remedies,
+                        retry_after,
                     ));
                 } else {
                     // Subscription traffic: notional dollars, plan is the real
@@ -317,6 +508,52 @@ pub async fn handle(
                 verdict.retry_after_secs(),
             ));
         }
+
+        // ─── near-duplicate action-repeat detector (#19, WARN-only by default) ───
+        // Separate from the full-body hash above: the body hash deliberately
+        // ignores the growing transcript, so an agent that keeps re-issuing the
+        // *same tool-call action* every turn (a different body each time) slips
+        // past it. This detector fingerprints just the latest assistant turn's
+        // action and counts repeats in the window. By default it only WARNs (R5);
+        // it blocks only when `loop_detection.action_repeat_enforce` is on, and
+        // even then it never tightens the existing full-body-hash block.
+        let action_verdict = state.loop_detector.check_action_repeat(&body_bytes);
+        if let crate::budget::LoopVerdict::ActionRepeat {
+            count, enforced, ..
+        } = action_verdict
+        {
+            warn!(
+                "🔁 action loop {}: same tool call repeated {} times in {}s{}",
+                provider,
+                count,
+                state.loop_detector.config().window_seconds,
+                if enforced {
+                    " — blocking (action_repeat_enforce)"
+                } else {
+                    " — warn-only"
+                }
+            );
+            if action_verdict.is_blocking() {
+                let mut record =
+                    RequestRecord::blocked(provider, &model, &action_verdict.message(), None);
+                record.request_hash = Some(request_hash_hex.clone());
+                if let Err(e) = state.storage.insert_request(&record) {
+                    tracing::error!("blocked-request insert failed: {}", e);
+                }
+                let what = format!(
+                    "{}. Your agent appears stuck repeating the same tool call; it clears once the window drains.",
+                    action_verdict.message()
+                );
+                return Ok(block::build(
+                    provider,
+                    "action_loop_detected",
+                    StatusCode::TOO_MANY_REQUESTS,
+                    &what,
+                    block::LOOP_REMEDIES,
+                    action_verdict.retry_after_secs(),
+                ));
+            }
+        }
     }
 
     // ─── cost-spiral enforcement (opt-in) ───
@@ -340,6 +577,71 @@ pub async fn handle(
             block::COST_SPIRAL_REMEDIES,
             spiral.retry_after_secs(),
         ));
+    }
+
+    // ─── budget → cheaper-model fallback (#18, opt-in request rewrite) ───
+    // When an enforced dollar cap WOULD have blocked above and
+    // `budget.fallback_model` is set, rewrite the request's JSON `model` to the
+    // fallback and forward — a downgrade that keeps work moving past the cap
+    // instead of returning 429. Provider-correct + fail-safe: only the JSON
+    // `model` field is touched; if the body isn't JSON or has no `model`, we
+    // can't safely downgrade, so we fall back to BLOCKING (never corrupt the
+    // body). Modifies the request, so it is logged like cache injection.
+    let mut body_bytes = body_bytes;
+    if dollar_cap_would_block {
+        match fallback_model
+            .as_ref()
+            .and_then(|fm| rewrite_model_field(&body_bytes, fm).map(|b| (b, fm.clone())))
+        {
+            Some((rewritten, fm)) => {
+                tracing::info!(
+                    "💰→🪙 budget cap reached: downgraded {} → {} (model rewrite) and forwarding",
+                    model,
+                    fm
+                );
+                body_bytes = rewritten;
+            }
+            None => {
+                // Fallback set but un-rewritable (non-JSON / no model field):
+                // block rather than forward an over-budget request unchanged.
+                warn!(
+                    "💰 budget cap reached and fallback model could not be applied (body not JSON or no model field) — blocking"
+                );
+                let record = RequestRecord::blocked(provider, &model, "budget_exceeded", None);
+                if let Err(e) = state.storage.insert_request(&record) {
+                    tracing::error!("blocked-request insert failed: {}", e);
+                }
+                let what =
+                    "Your budget is used up and the cheaper-model fallback could not be applied to this request.".to_string();
+                return Ok(block::build(
+                    provider,
+                    "budget_exceeded",
+                    StatusCode::TOO_MANY_REQUESTS,
+                    &what,
+                    block::BUDGET_REMEDIES,
+                    Some(block::seconds_until_local_midnight()),
+                ));
+            }
+        }
+    }
+
+    // ─── tool-output trim (#17, opt-in request rewrite) ───
+    // Oversized tool results (a dump of a huge file, a verbose test run) get
+    // re-sent on every turn of an agent loop and quietly dominate input cost.
+    // When `proxy.trim_tool_output` is on, middle-truncate tool-result blocks
+    // beyond a keep-head/keep-tail window before forwarding, with an explicit
+    // in-band marker so the model knows content was elided. Only tool outputs
+    // are touched — never prose, system prompts, or user messages. Fail-open:
+    // a body that doesn't parse is forwarded unchanged.
+    if state.trim_tool_output {
+        let outcome = tool_trim::trim(&body_bytes, tool_trim::DEFAULT_KEEP);
+        if outcome.modified {
+            tracing::info!(
+                "✂️ trimmed {} bytes of oversized tool output before forwarding (proxy.trim_tool_output)",
+                outcome.saved_bytes
+            );
+            body_bytes = outcome.body;
+        }
     }
 
     // ─── cache injection (Anthropic only, opt-in) ───
@@ -498,6 +800,12 @@ pub(crate) mod block {
         "Pause all protection briefly — UNPROTECTED:  burnwall pause   (auto-resumes in 5m; restore early with: burnwall resume)",
         "Turn Burnwall off entirely — UNPROTECTED:  burnwall stop",
     ];
+    pub const PARANOID_REMEDIES: &[&str] = &[
+        "This block exists because security.paranoid is ON — Burnwall could not inspect this request body, and paranoid mode refuses to forward what it cannot scan.",
+        "Let just this next request through, then auto-restore:  burnwall allow-once",
+        "Return to the fail-open default:  burnwall config set security.paranoid false",
+        "Pause all protection briefly — UNPROTECTED:  burnwall pause   (auto-resumes in 5m)",
+    ];
     pub const BUDGET_REMEDIES: &[&str] = &[
         "See today's spend:  burnwall status",
         "Raise or remove the cap:  burnwall config set budget.daily <usd>   (0 = unlimited)",
@@ -506,6 +814,13 @@ pub(crate) mod block {
     ];
     pub const SESSION_REMEDIES: &[&str] = &[
         "Raise or turn off the per-session cap:  burnwall config set budget.per_session <usd>   (0 = off)",
+        "Pause all protection briefly — UNPROTECTED:  burnwall pause   (auto-resumes in 5m)",
+    ];
+    pub const HOURLY_BUDGET_REMEDIES: &[&str] = &[
+        "See the current burn rate:  burnwall status",
+        "Raise or turn off the hourly brake:  burnwall config set budget.per_hour <usd>   (0 = off)",
+        "Keep working past the cap on a cheaper model instead of blocking:  burnwall config set budget.fallback_model <model>",
+        "On a flat-rate plan? The dollar cap is notional — plan traffic isn't blocked by default (budget.enforce_on_plan).",
         "Pause all protection briefly — UNPROTECTED:  burnwall pause   (auto-resumes in 5m)",
     ];
     pub const LOOP_REMEDIES: &[&str] = &[
@@ -588,12 +903,64 @@ pub(crate) mod block {
     }
 }
 
+/// Is `rest` (the upstream path, prefix already stripped) a provider
+/// file-upload endpoint? Anthropic and OpenAI both expose `/v1/files`, which
+/// accepts a `multipart/form-data` body — non-JSON, so the JSON scanner fails
+/// open on it. Used to gate the raw-body egress scan (#3). Matches the exact
+/// path and any subpath/query (`/v1/files`, `/v1/files?…`, `/v1/files/…`).
+fn is_file_upload_route(rest: &str) -> bool {
+    let path = rest.split('?').next().unwrap_or(rest);
+    path == "/v1/files" || path.starts_with("/v1/files/")
+}
+
+/// Cheap check: does `body` look like a JSON document? A multipart upload
+/// starts with a boundary marker (`--…`), never `{`/`[`, so this distinguishes
+/// a JSON chat/files-metadata body (handled by the JSON scanner) from a raw
+/// file upload (handled by the raw egress scan). Skips a leading UTF-8 BOM and
+/// ASCII whitespace before looking at the first significant byte.
+fn looks_like_json(body: &[u8]) -> bool {
+    let body = body.strip_prefix(b"\xef\xbb\xbf").unwrap_or(body);
+    let first = body.iter().copied().find(|b| !b.is_ascii_whitespace());
+    matches!(first, Some(b'{') | Some(b'['))
+}
+
 /// Best-effort extraction of the `model` field from a request body. Used
 /// to populate `RequestRecord.model` even when the request was blocked.
 fn extract_model(body: &[u8]) -> Option<String> {
     let body = body.strip_prefix(b"\xef\xbb\xbf").unwrap_or(body);
     let val: serde_json::Value = serde_json::from_slice(body).ok()?;
     val.get("model").and_then(|m| m.as_str()).map(String::from)
+}
+
+/// Provider-correct, fail-safe rewrite of the JSON `model` field to
+/// `new_model`, used by the budget→cheaper-model fallback (#18). Returns the
+/// rewritten body, or `None` when the rewrite must NOT be applied:
+///
+/// - the body is not valid JSON (e.g. a multipart upload),
+/// - the top-level value is not a JSON object,
+/// - there is no existing string `model` field, or
+/// - re-serialization fails.
+///
+/// Returning `None` is the fail-safe signal — the caller blocks rather than
+/// forward an over-budget request, never corrupting the body. Only the `model`
+/// field is changed; every other byte of structure is preserved. This is the
+/// same field all three providers (Anthropic / OpenAI / Google REST) name
+/// `model`, so it is provider-correct.
+fn rewrite_model_field(body: &[u8], new_model: &str) -> Option<bytes::Bytes> {
+    let stripped = body.strip_prefix(b"\xef\xbb\xbf").unwrap_or(body);
+    let mut value: serde_json::Value = serde_json::from_slice(stripped).ok()?;
+    let obj = value.as_object_mut()?;
+    // Only rewrite when a string `model` field is actually present — a body
+    // with no model (or a non-string model) is one we can't safely downgrade.
+    match obj.get("model") {
+        Some(serde_json::Value::String(_)) => {}
+        _ => return None,
+    }
+    obj.insert(
+        "model".to_string(),
+        serde_json::Value::String(new_model.to_string()),
+    );
+    serde_json::to_vec(&value).ok().map(bytes::Bytes::from)
 }
 
 /// Cheap 200 OK response for `/healthz` probes.

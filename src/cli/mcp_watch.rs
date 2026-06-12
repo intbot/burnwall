@@ -139,6 +139,13 @@ pub async fn run_cmd(args: McpWatchArgs) -> anyhow::Result<()> {
         .build()
         .context("building upstream HTTP client")?;
 
+    // Per-project MCP server allowlist (`.burnwall.yaml` → mcp_allowed_servers).
+    // Empty when no profile / field is set, which means "no restriction".
+    let allowed_servers = project_profile
+        .as_ref()
+        .map(|(_, p)| p.mcp_allowed_servers.clone())
+        .unwrap_or_default();
+
     let state = WatchState {
         upstream: args.upstream.clone().unwrap_or_default(),
         servers,
@@ -148,6 +155,7 @@ pub async fn run_cmd(args: McpWatchArgs) -> anyhow::Result<()> {
         security,
         auto_approve: user_config.mcp.auto_approve.clone(),
         auto_deny: user_config.mcp.auto_deny.clone(),
+        allowed_servers,
     };
 
     let listener = tokio::net::TcpListener::bind(addr)

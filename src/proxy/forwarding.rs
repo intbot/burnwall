@@ -25,7 +25,7 @@ use tracing::{debug, error, warn};
 
 use crate::pricing;
 use crate::providers::{ParsedResponse, TokenUsage, anthropic, google, openai};
-use crate::storage::RequestRecord;
+use crate::storage::{RequestRecord, SecurityEvent};
 
 use super::{AppState, BoxError, ProxyBody, streaming};
 
@@ -190,6 +190,7 @@ pub async fn forward(
     let provider_str = provider.to_string();
     let hash_hex = request_hash_hex;
     let session_for_tee = session_id.clone();
+    let warn_exfil = state.warn_response_exfil;
 
     let teed = streaming::tee_stream(upstream_resp.bytes_stream(), move |chunks, aborted| {
         // Record a loop-detector arrival only for a forwarded 2xx (B-C2): a
@@ -222,6 +223,40 @@ pub async fn forward(
         let mut total = Vec::with_capacity(chunks.iter().map(|b| b.len()).sum());
         for b in &chunks {
             total.extend_from_slice(b);
+        }
+
+        // Image/link exfil warning (#15, opt-in, WARN-ONLY): a reply that
+        // embeds a data-carrying image URL (the classic markdown-image
+        // exfiltration channel — render the image, leak the query string)
+        // gets a log line + one security event. Strictly read-only: the
+        // response path never modifies or blocks (core principle), and the
+        // event names only the host + carrier, never the payload.
+        // Deduped per host for the process lifetime: agent clients resend
+        // the conversation every turn, so the same link would otherwise
+        // re-warn on every response — the first sighting is the signal.
+        if warn_exfil {
+            if let Some(w) = super::response_exfil::scan_reply(&total) {
+                static EXFIL_WARNED: LazyLock<Mutex<HashSet<String>>> =
+                    LazyLock::new(|| Mutex::new(HashSet::new()));
+                let mut warned = EXFIL_WARNED.lock().unwrap_or_else(|p| p.into_inner());
+                if warned.insert(w.host.clone()) {
+                    warn!(
+                        "🖼️ model reply embeds a data-carrying {} URL to {} — possible exfiltration channel (security.warn_response_exfil)",
+                        w.carrier, w.host
+                    );
+                    let event = SecurityEvent::new(
+                        "response_exfil_warning",
+                        &format!(
+                            "model reply embedded a data-carrying {} URL to {}",
+                            w.carrier, w.host
+                        ),
+                    )
+                    .with_provider(&provider_str, "");
+                    if let Err(e) = storage.insert_security_event(&event) {
+                        error!("response_exfil_warning insert failed: {}", e);
+                    }
+                }
+            }
         }
 
         match parse_for_provider(&provider_str, &total) {

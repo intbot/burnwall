@@ -454,6 +454,26 @@ fn write_table(
             today_cost
         )?;
     }
+    // Burn-rate speedometer (#2): today's average spend per hour over the local
+    // day so far, with the hourly brake's status. Always shown; never blocks.
+    // (The live short-window spike alert runs in the proxy hot path; here we
+    // show the steady-state rate computed from recorded spend.)
+    let burn = burn_rate_today(today_cost);
+    if burn > 0.0 {
+        if bcfg.per_hour_usd > 0.0 {
+            writeln!(
+                w,
+                "   🏎️  Burn rate: ~${:.2}/hr today  (hourly brake at ${:.2}/hr)",
+                burn, bcfg.per_hour_usd
+            )?;
+        } else {
+            writeln!(
+                w,
+                "   🏎️  Burn rate: ~${:.2}/hr today  (no hourly brake — set budget.per_hour to arm it)",
+                burn
+            )?;
+        }
+    }
     writeln!(
         w,
         "   🛡️  Security: {} blocked attempt{}",
@@ -647,6 +667,11 @@ fn write_json(
         "budget": {
             "daily_limit_usd": bcfg.daily_usd,
             "spent_today_usd": today_cost,
+            // Burn-rate speedometer (#2): today's average $/hour and the hourly
+            // brake ceiling (0 = brake off). Lets the IDE extension show a live
+            // speedometer next to the daily budget.
+            "burn_rate_per_hour_usd": burn_rate_today(today_cost),
+            "hourly_limit_usd": bcfg.per_hour_usd,
         },
         "breakdown": breakdown.iter().map(|r| json!({
             "provider": r.provider,
@@ -711,6 +736,23 @@ fn model_cost_without_cache(row: &ModelBreakdown) -> f64 {
     pricing::get_pricing(&row.model)
         .map(|p| pricing::cost_without_cache(&row_usage(row), p))
         .unwrap_or(0.0)
+}
+
+/// Today's average spend per hour over the local day so far — the steady-state
+/// burn-rate speedometer (#2). `today_cost` divided by the local-day hours
+/// elapsed (floored at a few minutes so the small hours after midnight don't
+/// produce a wild per-hour figure from a single early request). `0.0` when
+/// nothing has been spent yet.
+fn burn_rate_today(today_cost: f64) -> f64 {
+    if today_cost <= 0.0 {
+        return 0.0;
+    }
+    use chrono::Timelike;
+    let secs = chrono::Local::now().num_seconds_from_midnight() as f64;
+    // Floor at 5 minutes of elapsed time to avoid a huge extrapolation right
+    // after midnight.
+    let hours = (secs / 3600.0).max(5.0 / 60.0);
+    today_cost / hours
 }
 
 fn truncate(s: &str, n: usize) -> String {

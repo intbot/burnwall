@@ -15,6 +15,14 @@ use crate::proxy::{AppState, serve_with_shutdown};
 use crate::security::SecurityEngine;
 use crate::storage::Storage;
 
+/// Built-in provider endpoints. A CLI `--upstream-*` flag that differs from
+/// these wins; otherwise a non-empty `[upstreams]` config value applies; the
+/// built-in is the fallback. Lets Burnwall chain in front of another local
+/// gateway or a corporate egress proxy without losing scanning or tracking.
+pub const DEFAULT_UPSTREAM_ANTHROPIC: &str = "https://api.anthropic.com";
+pub const DEFAULT_UPSTREAM_OPENAI: &str = "https://api.openai.com";
+pub const DEFAULT_UPSTREAM_GOOGLE: &str = "https://generativelanguage.googleapis.com";
+
 #[derive(Args, Debug)]
 pub struct StartArgs {
     /// TCP port to listen on. Overrides `proxy.port` from config.
@@ -27,14 +35,14 @@ pub struct StartArgs {
     /// written to `<data dir>/burnwall.pid`; stop it with `burnwall stop`.
     #[arg(long)]
     pub daemon: bool,
-    /// Override the Anthropic upstream URL (useful for testing).
-    #[arg(long, default_value = "https://api.anthropic.com")]
+    /// Override the Anthropic upstream URL (beats `upstreams.anthropic`).
+    #[arg(long, default_value = DEFAULT_UPSTREAM_ANTHROPIC)]
     pub upstream_anthropic: String,
-    /// Override the OpenAI upstream URL.
-    #[arg(long, default_value = "https://api.openai.com")]
+    /// Override the OpenAI upstream URL (beats `upstreams.openai`).
+    #[arg(long, default_value = DEFAULT_UPSTREAM_OPENAI)]
     pub upstream_openai: String,
-    /// Override the Google Gemini upstream URL.
-    #[arg(long, default_value = "https://generativelanguage.googleapis.com")]
+    /// Override the Google Gemini upstream URL (beats `upstreams.google`).
+    #[arg(long, default_value = DEFAULT_UPSTREAM_GOOGLE)]
     pub upstream_google: String,
     /// Auto-inject Anthropic `cache_control` markers on outbound requests.
     /// Overrides `proxy.cache_injection` from config when present.
@@ -52,7 +60,21 @@ pub struct StartArgs {
 }
 
 pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
+    // Diagnose an unclean prior exit (crash / forced kill / antivirus
+    // quarantine) BEFORE anything cleans up the stale PID file. The usual
+    // cause on Windows is Defender quarantining the unsigned binary, which
+    // silently kills the daemon and strands every routed shell on a dead
+    // port — naming it turns a baffling `ConnectionRefused` into a fix. Read
+    // once here so the daemon launcher surfaces it on the user's terminal
+    // (the detached child logs to a file nobody is watching).
+    let prior_exit = daemon::take_prior_exit_status();
+
     if args.daemon {
+        if let daemon::PriorExit::Abnormal { consecutive } = prior_exit {
+            for line in unclean_prior_exit_lines(consecutive) {
+                println!("{line}");
+            }
+        }
         return daemon::spawn_background(&args).await;
     }
 
@@ -70,6 +92,19 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
         None
     };
     init_tracing(log_file, &user_config.logging.level);
+    install_panic_hook();
+    tracing::info!("panic capture armed — a crash in any background task will be logged here");
+
+    // Foreground start (a user running `burnwall start` directly — the daemon
+    // CHILD sees `Clean` here because the launcher already consumed the
+    // signal): surface the unclean prior exit both on stdout and through
+    // tracing so it lands in the log too.
+    if let daemon::PriorExit::Abnormal { consecutive } = prior_exit {
+        for line in unclean_prior_exit_lines(consecutive) {
+            println!("{line}");
+        }
+        tracing::warn!("previous run exited uncleanly ({consecutive} in a row)");
+    }
 
     // Refuse to start a second proxy on top of a running one — `bind` below
     // is the real backstop, but this gives a clearer message in the common
@@ -144,6 +179,26 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
 
     let cache_injection = args.rewrite_anthropic_cache || user_config.proxy.cache_injection;
 
+    // Gateway chaining (#9): resolve each provider's effective upstream —
+    // explicit CLI flag, else `[upstreams]` config, else the provider's own
+    // API. Resolved in place so the banner and AppState agree on the truth.
+    let mut args = args;
+    args.upstream_anthropic = resolve_upstream(
+        &args.upstream_anthropic,
+        DEFAULT_UPSTREAM_ANTHROPIC,
+        &user_config.upstreams.anthropic,
+    );
+    args.upstream_openai = resolve_upstream(
+        &args.upstream_openai,
+        DEFAULT_UPSTREAM_OPENAI,
+        &user_config.upstreams.openai,
+    );
+    args.upstream_google = resolve_upstream(
+        &args.upstream_google,
+        DEFAULT_UPSTREAM_GOOGLE,
+        &user_config.upstreams.google,
+    );
+
     // Resilience: same-model endpoint failover + circuit breaking. Disabled
     // unless `[resilience]` is configured.
     let resilience = Arc::new(user_config.resilience.to_runtime());
@@ -196,6 +251,9 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
         loop_detector,
         storage,
         cache_injection,
+        trim_tool_output: user_config.proxy.trim_tool_output,
+        paranoid: user_config.security.paranoid,
+        warn_response_exfil: user_config.security.warn_response_exfil,
         resilience,
         #[cfg(feature = "observe")]
         otel,
@@ -228,11 +286,55 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
 
     let result = serve_with_shutdown(listener, Arc::new(state), daemon::shutdown_signal()).await;
     daemon::remove_pid_file().ok();
+    // We reached the end of `serve` on our own terms (signal / shutdown file),
+    // so this run is exiting cleanly — clear the unclean-exit escalation.
+    daemon::note_clean_exit();
     if !args.no_routing || args.pause_routing_on_exit {
         super::stop::pause_and_report();
     }
     result.context("proxy serve")?;
     Ok(())
+}
+
+/// Lines explaining an unclean prior exit, with platform-specific antivirus
+/// guidance. Escalates wording once it has happened repeatedly — a single
+/// occurrence is often a reboot; a streak is almost always AV quarantining
+/// the unsigned binary. Returned as lines so the daemon launcher can print
+/// them to the terminal and the foreground path can log them.
+fn unclean_prior_exit_lines(consecutive: u32) -> Vec<String> {
+    let mut out = Vec::new();
+    if consecutive >= 2 {
+        out.push(format!(
+            "⚠️  Burnwall has failed to shut down cleanly {consecutive} times in a row."
+        ));
+        out.push(
+            "    This is almost always an antivirus quarantining the (unsigned) binary."
+                .to_string(),
+        );
+    } else {
+        out.push(
+            "⚠️  Burnwall did not shut down cleanly last time (crash, forced kill, antivirus, or an unclean reboot)."
+                .to_string(),
+        );
+    }
+    #[cfg(windows)]
+    {
+        out.push(
+            "    If it keeps happening, exclude Burnwall in an elevated PowerShell:".to_string(),
+        );
+        out.push(
+            "      Add-MpPreference -ExclusionPath \"$env:USERPROFILE\\.burnwall\"".to_string(),
+        );
+    }
+    #[cfg(not(windows))]
+    {
+        out.push(
+            "    If it keeps happening, an antivirus or the OOM killer may be terminating it; check your security tool's quarantine/logs."
+                .to_string(),
+        );
+    }
+    out.push("    Recover stranded shells with:  burnwall recover".to_string());
+    out
 }
 
 /// Re-enable shell routing now that the proxy is serving, honoring an
@@ -302,6 +404,52 @@ pub(crate) fn resolved_log_path(
         return dirs::home_dir().map(|h| h.join(rest));
     }
     Some(std::path::PathBuf::from(raw))
+}
+
+/// Effective upstream for one provider: an explicitly-passed CLI flag (any
+/// value differing from the built-in default) wins; else a non-empty
+/// `[upstreams]` config entry (trailing slash trimmed so path joins stay
+/// clean); else the built-in provider endpoint. A flag explicitly set *to*
+/// the default is indistinguishable from unset — and means the default, so
+/// the ambiguity is harmless.
+fn resolve_upstream(cli_value: &str, builtin_default: &str, configured: &str) -> String {
+    if cli_value != builtin_default {
+        return cli_value.to_string();
+    }
+    let configured = configured.trim();
+    if !configured.is_empty() {
+        return configured.trim_end_matches('/').to_string();
+    }
+    builtin_default.to_string()
+}
+
+/// Route panics through `tracing` so they land in the configured log even
+/// when stderr is detached — the daemon child runs with stdio null, so
+/// without this a panic in a background task (the response tee, a
+/// connection task) vanishes without a trace and an abruptly-closed socket
+/// is undiagnosable. The request pipeline's own panic catcher converts
+/// handler panics to logged 502s; this hook covers everything outside it.
+/// Chains the default hook so foreground runs still print to stderr.
+/// Logs the panic's message and location only — never request content.
+pub(crate) fn install_panic_hook() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}", l.file(), l.line()))
+                .unwrap_or_else(|| "unknown location".to_string());
+            let msg = info
+                .payload()
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("non-string panic payload");
+            tracing::error!("panic at {location}: {msg}");
+            default_hook(info);
+        }));
+    });
 }
 
 fn init_tracing(log_file: Option<std::path::PathBuf>, level: &str) {
@@ -469,4 +617,81 @@ fn print_banner(
         println!("   OTel:     GenAI spans → {}", w.path().display());
     }
     println!("   {}", sty.green("🟢 Ready. Press Ctrl-C to stop."));
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    /// `MakeWriter` capturing into a shared buffer, so the test can assert
+    /// on what the panic hook emitted through tracing.
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+        type Writer = Capture;
+        fn make_writer(&'a self) -> Capture {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn panics_are_routed_into_tracing() {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(Capture(buf.clone()))
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            super::install_panic_hook();
+            // The hook runs on the panicking thread, where the scoped
+            // subscriber is active; catch_unwind keeps the test alive. The
+            // chained default hook prints to (libtest-captured) stderr.
+            let _ = std::panic::catch_unwind(|| panic!("sentinel-panic-for-log"));
+        });
+        let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("panic at"), "panic was logged: {text}");
+        assert!(text.contains("sentinel-panic-for-log"), "{text}");
+        assert!(text.contains("start.rs"), "location captured: {text}");
+    }
+
+    #[test]
+    fn unclean_prior_exit_lines_escalate_and_point_to_recover() {
+        // One-off reads as a soft "didn't shut down cleanly"; a streak
+        // escalates to "almost always antivirus". Both route the user to the
+        // recovery command, and on Windows name the exclusion fix.
+        let one = super::unclean_prior_exit_lines(1).join("\n");
+        assert!(one.contains("did not shut down cleanly"), "{one}");
+        assert!(one.contains("burnwall recover"), "{one}");
+
+        let many = super::unclean_prior_exit_lines(4).join("\n");
+        assert!(many.contains("4 times in a row"), "{many}");
+        assert!(many.contains("antivirus"), "{many}");
+        assert!(many.contains("burnwall recover"), "{many}");
+        #[cfg(windows)]
+        assert!(many.contains("Add-MpPreference"), "{many}");
+    }
+
+    #[test]
+    fn upstream_resolution_precedence() {
+        // CLI flag (≠ default) wins; else non-empty config; else built-in.
+        let d = super::DEFAULT_UPSTREAM_ANTHROPIC;
+        assert_eq!(
+            super::resolve_upstream("http://flag:1", d, "http://cfg:2"),
+            "http://flag:1"
+        );
+        assert_eq!(
+            super::resolve_upstream(d, d, "http://cfg:2/"),
+            "http://cfg:2"
+        );
+        assert_eq!(super::resolve_upstream(d, d, "  "), d);
+    }
 }

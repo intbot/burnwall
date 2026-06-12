@@ -11,6 +11,7 @@ use std::thread;
 
 use burnwall::budget::{
     BudgetConfig, BudgetStatus, BudgetTracker, LoopConfig, LoopDetector, LoopVerdict, check_daily,
+    check_hourly,
 };
 use burnwall::providers::TokenUsage;
 use burnwall::storage::{RequestRecord, Storage};
@@ -21,7 +22,9 @@ fn cfg(daily: f64, warn: u8) -> BudgetConfig {
         monthly_usd: 0.0,
         warn_percent: warn,
         per_session_usd: 0.0,
+        per_hour_usd: 0.0,
         enforce_on_plan: false,
+        fallback_model: String::new(),
     }
 }
 
@@ -31,7 +34,21 @@ fn cfg_session(per_session: f64) -> BudgetConfig {
         monthly_usd: 0.0,
         warn_percent: 80,
         per_session_usd: per_session,
+        per_hour_usd: 0.0,
         enforce_on_plan: false,
+        fallback_model: String::new(),
+    }
+}
+
+fn cfg_hourly(per_hour: f64) -> BudgetConfig {
+    BudgetConfig {
+        daily_usd: 0.0, // isolate the hourly brake
+        monthly_usd: 0.0,
+        warn_percent: 80,
+        per_session_usd: 0.0,
+        per_hour_usd: per_hour,
+        enforce_on_plan: false,
+        fallback_model: String::new(),
     }
 }
 
@@ -45,7 +62,9 @@ fn cfg_monthly(monthly: f64) -> BudgetConfig {
         monthly_usd: monthly,
         warn_percent: 80,
         per_session_usd: 0.0,
+        per_hour_usd: 0.0,
         enforce_on_plan: false,
+        fallback_model: String::new(),
     }
 }
 
@@ -77,7 +96,9 @@ fn record_accumulates_into_both_day_and_month() {
         monthly_usd: 0.0,
         warn_percent: 80,
         per_session_usd: 0.0,
+        per_hour_usd: 0.0,
         enforce_on_plan: false,
+        fallback_model: String::new(),
     });
     t.record(3.0);
     t.record(4.0);
@@ -95,6 +116,70 @@ fn reset_zeroes_day_but_not_month() {
         (t.month_spent() - 5.0).abs() < EPS,
         "month untouched by daily reset"
     );
+}
+
+// ──────────────── Hourly brake + burn-rate speedometer (#2) ────────────────
+
+#[test]
+fn hourly_cap_unlimited_when_zero() {
+    // Brake disarmed (per_hour_usd = 0) → always Ok, regardless of spend.
+    let t = BudgetTracker::new(cfg_hourly(0.0));
+    t.record(1_000.0);
+    assert!(matches!(t.check_hourly(), BudgetStatus::Ok));
+    // Pure check agrees.
+    assert_eq!(check_hourly(1_000.0, &cfg_hourly(0.0)), BudgetStatus::Ok);
+}
+
+#[test]
+fn hourly_cap_blocks_when_exceeded() {
+    let t = BudgetTracker::new(cfg_hourly(5.0));
+    t.record(3.0);
+    assert!(matches!(t.check_hourly(), BudgetStatus::Ok));
+    t.record(2.5); // 5.5 > 5.0
+    assert!(
+        matches!(t.check_hourly(), BudgetStatus::Exceeded { .. }),
+        "hourly brake should block once the rolling hour exceeds the ceiling"
+    );
+    // The daily check is independent (unlimited here).
+    assert!(matches!(t.check(), BudgetStatus::Ok));
+}
+
+#[test]
+fn hourly_cap_pure_check_boundary() {
+    // `>=` ceiling blocks, under it is Ok.
+    let c = cfg_hourly(10.0);
+    assert!(matches!(check_hourly(9.99, &c), BudgetStatus::Ok));
+    assert!(matches!(
+        check_hourly(10.0, &c),
+        BudgetStatus::Exceeded { .. }
+    ));
+    assert!(matches!(
+        check_hourly(11.0, &c),
+        BudgetStatus::Exceeded { .. }
+    ));
+}
+
+#[test]
+fn burn_rate_scales_short_window_to_hourly() {
+    // $0.50 spent "now" read over a 5-minute window should extrapolate to
+    // ~$6.00/hour (×12). The window holds everything just recorded.
+    let t = BudgetTracker::new(cfg_hourly(0.0));
+    t.record(0.50);
+    let rate = t.burn_rate_per_hour(5);
+    assert!(
+        (rate - 6.0).abs() < 1e-6,
+        "expected ~$6.00/hr, got ${rate:.4}"
+    );
+    // Over the full hour window the same $0.50 reads as $0.50/hr (×1).
+    let hourly = t.burn_rate_per_hour(60);
+    assert!((hourly - 0.50).abs() < 1e-6, "got ${hourly:.4}");
+}
+
+#[test]
+fn burn_rate_is_zero_with_no_spend() {
+    let t = BudgetTracker::new(cfg_hourly(0.0));
+    assert_eq!(t.burn_rate_per_hour(5), 0.0);
+    assert_eq!(t.hour_spent(), 0.0);
 }
 
 // ───────────────────────────── Pure check ─────────────────────────────
@@ -324,6 +409,8 @@ fn loop_cfg(max_identical: u32, window: u32, max_cost: f64) -> LoopConfig {
         window_seconds: window,
         max_cost_per_window: max_cost,
         cost_spiral_enforce: false,
+        action_repeat_threshold: 10,
+        action_repeat_enforce: false,
     }
 }
 

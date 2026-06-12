@@ -164,3 +164,43 @@ fn sarif_results_carry_synthetic_locations() {
         "GitHub's SARIF validator wants a region next to the artifactLocation"
     );
 }
+
+// ── file mode: `burnwall scan` SARIF carries real file/line locations ────────
+
+#[test]
+fn sarif_file_findings_carry_real_locations_and_levels() {
+    use burnwall::security::filescan;
+
+    let findings = filescan::scan_text(
+        ".claude\\settings.json",
+        "{\"key\": \"sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}\nok\nhi\u{200B}\u{200B}there\n",
+    );
+    assert_eq!(findings.len(), 2, "one secret + one invisible-text finding");
+
+    let log = sarif::build_file_findings(&findings);
+    let results = log["runs"][0]["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+
+    let secret = &results[0];
+    assert_eq!(secret["ruleId"], "secret_in_file");
+    assert_eq!(secret["level"], "error");
+    let loc = &secret["locations"][0]["physicalLocation"];
+    // Real file + line, with Windows separators normalized for SARIF.
+    assert_eq!(loc["artifactLocation"]["uri"], ".claude/settings.json");
+    assert_eq!(loc["region"]["startLine"], 1);
+    // Masked: the key body must not be echoed into the report.
+    assert!(
+        !secret["message"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("AAAAAAAAAAAAAAAA")
+    );
+
+    let invisible = &results[1];
+    assert_eq!(invisible["ruleId"], "invisible_text");
+    assert_eq!(invisible["level"], "warning");
+    assert_eq!(
+        invisible["locations"][0]["physicalLocation"]["region"]["startLine"],
+        3
+    );
+}

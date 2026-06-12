@@ -80,6 +80,49 @@ fn report_text_and_json() {
 }
 
 #[test]
+fn audit_spdx_outputs_spdx3() {
+    let dir = tempfile::tempdir().unwrap();
+    bin(dir.path())
+        .args(["audit", "spdx", "--days", "7"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("SPDX-3.0"))
+        .stdout(predicate::str::contains("@graph"));
+}
+
+#[test]
+fn audit_coverage_table_and_json() {
+    let dir = tempfile::tempdir().unwrap();
+    bin(dir.path())
+        .args(["audit", "coverage"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("EVENT TYPE"))
+        .stdout(predicate::str::contains("path_blocked"))
+        .stdout(predicate::str::contains("EU AI Act"));
+    bin(dir.path())
+        .args(["audit", "coverage", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"coverage\""))
+        .stdout(predicate::str::contains("\"control_id\""))
+        .stdout(predicate::str::contains("ASI-T"));
+}
+
+#[test]
+fn audit_evidence_groups_by_framework() {
+    let dir = tempfile::tempdir().unwrap();
+    bin(dir.path())
+        .args(["audit", "evidence"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"frameworks\""))
+        .stdout(predicate::str::contains("SOC 2"))
+        .stdout(predicate::str::contains("FINRA 17a-4"))
+        .stdout(predicate::str::contains("ISO/IEC 42001"));
+}
+
+#[test]
 fn audit_pack_writes_evidence_bundle() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("evidence");

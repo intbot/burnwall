@@ -26,6 +26,33 @@
 
 use serde_json::Value;
 
+/// Whether MCP server `server` is permitted by a per-project allowlist
+/// (`.burnwall.yaml` → `mcp_allowed_servers`).
+///
+/// Deny-by-omission applies *only* when `allowlist` is non-empty: an empty
+/// list means "no per-project restriction" and always returns `true`, so a
+/// user who never opts in is never blocked. `server` is matched **exactly**
+/// against the configured names — the same routed server name the watcher's
+/// router derives from the request path. This is the pure decision the MCP
+/// handler calls; kept here so it is unit-testable without a live server.
+pub fn server_allowed(allowlist: &[String], server: &str) -> bool {
+    allowlist.is_empty() || allowlist.iter().any(|s| s == server)
+}
+
+/// Whether a `tools/call` routed to `server` is **blocked** by a per-project
+/// allowlist. The allowlist scopes by server *name*, which is only meaningful
+/// when named multi-server routing is configured (`[[mcp.servers]]`) — pass
+/// `multi_server = true` in that case. In single-upstream mode there are no
+/// named servers, so every call routes to the synthetic `"default"`; a list of
+/// real names would then block *every* call, wedging a user who set the list
+/// without the routing it scopes. So when `multi_server` is false the allowlist
+/// does not apply and nothing is blocked. (FP-review Part 2, 2026-06-11: naming
+/// servers is meaningless without `[[mcp.servers]]`.) An empty allowlist is
+/// never a block regardless, via [`server_allowed`].
+pub fn server_blocked(allowlist: &[String], server: &str, multi_server: bool) -> bool {
+    multi_server && !server_allowed(allowlist, server)
+}
+
 /// One tool advertised in an MCP `tools/list` response.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AdvertisedTool {

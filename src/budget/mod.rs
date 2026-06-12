@@ -25,6 +25,8 @@
 //! never wired up, so a multi-day daemon accumulated forever and eventually
 //! 429'd all traffic against the daily cap (B-C1).
 
+use std::collections::VecDeque;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use chrono::Datelike;
@@ -32,7 +34,9 @@ use chrono::Datelike;
 pub mod limits;
 pub mod loop_detector;
 
-pub use limits::{BudgetConfig, BudgetStatus, check_daily, check_monthly, check_session};
+pub use limits::{
+    BudgetConfig, BudgetStatus, check_daily, check_hourly, check_monthly, check_session,
+};
 pub use loop_detector::{LoopConfig, LoopDetector, LoopVerdict};
 
 use crate::storage::Storage;
@@ -65,6 +69,12 @@ pub struct BudgetTracker {
     /// Per-session/swarm spend (microcents), keyed on the opt-in
     /// `x-burnwall-session` header. Only populated when a session id is present.
     session_microcents: dashmap::DashMap<String, u64>,
+    /// Rolling window of `(timestamp, cost_usd)` for the hourly brake +
+    /// speedometer (feature #2). Sliding 1-hour window held in memory only, so
+    /// the pre-forward check stays sub-millisecond and restart-resets cleanly.
+    /// Always tracked (the speedometer is always-on); enforcement is opt-in via
+    /// `per_hour_usd`.
+    hour_history: Mutex<VecDeque<(chrono::DateTime<chrono::Utc>, f64)>>,
     config: BudgetConfig,
 }
 
@@ -76,6 +86,7 @@ impl BudgetTracker {
             day_stamp: AtomicI64::new(local_epoch_day()),
             month_stamp: AtomicI64::new(local_epoch_month()),
             session_microcents: dashmap::DashMap::new(),
+            hour_history: Mutex::new(VecDeque::new()),
             config,
         }
     }
@@ -129,8 +140,10 @@ impl BudgetTracker {
         }
     }
 
-    /// Add a request's cost to the day + month counters. Lock-free.
-    /// Negative inputs are clamped to zero — costs are always non-negative.
+    /// Add a request's cost to the day + month counters AND the rolling-hour
+    /// window. Lock-free for the day/month atomics; the hour window takes a
+    /// short mutex. Negative / non-finite inputs are clamped to zero — costs
+    /// are always non-negative.
     pub fn record(&self, cost_usd: f64) {
         if !cost_usd.is_finite() || cost_usd <= 0.0 {
             return;
@@ -139,6 +152,62 @@ impl BudgetTracker {
         let units = (cost_usd * MICROCENTS_PER_USD).round() as u64;
         self.today_microcents.fetch_add(units, Ordering::Relaxed);
         self.month_microcents.fetch_add(units, Ordering::Relaxed);
+
+        // Feed the rolling-hour window (speedometer + emergency brake, #2).
+        let now = chrono::Utc::now();
+        let mut hist = self.hour_history.lock().unwrap_or_else(|p| p.into_inner());
+        Self::prune_hour(&mut hist, now);
+        hist.push_back((now, cost_usd));
+    }
+
+    /// Drop entries older than one hour from the rolling-hour window.
+    fn prune_hour(
+        hist: &mut VecDeque<(chrono::DateTime<chrono::Utc>, f64)>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) {
+        let cutoff = now - chrono::Duration::hours(1);
+        while let Some(front) = hist.front() {
+            if front.0 < cutoff {
+                hist.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Rolling spend (USD) over the last hour — the denominator of the hourly
+    /// brake and the basis for the burn-rate speedometer.
+    pub fn hour_spent(&self) -> f64 {
+        let now = chrono::Utc::now();
+        let mut hist = self.hour_history.lock().unwrap_or_else(|p| p.into_inner());
+        Self::prune_hour(&mut hist, now);
+        hist.iter().map(|(_, c)| c).sum()
+    }
+
+    /// Burn rate over the last `minutes` minutes, expressed as **USD/hour** so a
+    /// short-window reading is comparable to the hourly cap (#2 speedometer).
+    /// E.g. $0.50 spent in the last 5 minutes reads as $6.00/hour. Always-on and
+    /// read-only — never blocks. `minutes` is clamped to `[1, 60]` (the window
+    /// only holds an hour of data).
+    pub fn burn_rate_per_hour(&self, minutes: u32) -> f64 {
+        let minutes = minutes.clamp(1, 60);
+        let now = chrono::Utc::now();
+        let win_start = now - chrono::Duration::minutes(minutes as i64);
+        let mut hist = self.hour_history.lock().unwrap_or_else(|p| p.into_inner());
+        Self::prune_hour(&mut hist, now);
+        let recent: f64 = hist
+            .iter()
+            .filter(|(t, _)| *t >= win_start)
+            .map(|(_, c)| c)
+            .sum();
+        // Scale the windowed spend up to an hourly rate.
+        recent * (60.0 / minutes as f64)
+    }
+
+    /// Classify rolling-hour spend against the configured hourly ceiling.
+    /// `Ok` when the brake is disarmed (`per_hour_usd <= 0.0`).
+    pub fn check_hourly(&self) -> BudgetStatus {
+        check_hourly(self.hour_spent(), &self.config)
     }
 
     /// Classify the current state against the configured daily limit.
