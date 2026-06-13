@@ -127,6 +127,128 @@ impl Styler {
     }
 }
 
+// ───────────────────────────── stat cards ─────────────────────────────
+//
+// A small dashboard-header primitive: a row of bordered "tiles", each with a
+// label, a headline value, and a sub-line (often a bar). Used by `burnwall
+// status` so the glanceable numbers read like a modern CLI dashboard. All width
+// maths is done on the *plain* text, so the colour escapes never shift the box
+// borders out of alignment.
+
+/// A single stat tile. Keep `value`/`sub` to single-cell glyphs (ASCII, plus
+/// the `▓`/`░` bar cells) — the layout pads on `chars().count()`, which only
+/// equals the display width when every glyph is one column wide.
+pub struct Card {
+    pub label: String,
+    pub value: String,
+    pub sub: String,
+    /// Colour for the headline value (label/sub stay default unless set).
+    pub value_color: Option<Color>,
+    /// Colour for the sub-line (e.g. a bar).
+    pub sub_color: Option<Color>,
+}
+
+impl Card {
+    pub fn new(label: &str, value: &str, sub: &str) -> Self {
+        Self {
+            label: label.to_string(),
+            value: value.to_string(),
+            sub: sub.to_string(),
+            value_color: None,
+            sub_color: None,
+        }
+    }
+
+    /// Builder: colour the headline value.
+    pub fn with_value_color(mut self, c: Color) -> Self {
+        self.value_color = Some(c);
+        self
+    }
+
+    /// Builder: colour the sub-line.
+    pub fn with_sub_color(mut self, c: Color) -> Self {
+        self.sub_color = Some(c);
+        self
+    }
+}
+
+/// Render a horizontal row of stat cards as a four-line block (top border
+/// carrying the label, value, sub, bottom border). `inner` is each tile's
+/// interior column width; `indent` is the left margin. Tiles are laid out
+/// left-to-right separated by a single space.
+pub fn render_cards(cards: &[Card], inner: usize, indent: usize, sty: &Styler) -> String {
+    let pad = " ".repeat(indent);
+    let mut tops = Vec::with_capacity(cards.len());
+    let mut vals = Vec::with_capacity(cards.len());
+    let mut subs = Vec::with_capacity(cards.len());
+    let mut bots = Vec::with_capacity(cards.len());
+    for c in cards {
+        // The label rides in the top border: `┌ Label ──────┐`.
+        let label = format!(" {} ", c.label);
+        let dashes = inner.saturating_sub(label.chars().count());
+        tops.push(format!("┌{}{}┐", label, "─".repeat(dashes)));
+        bots.push(format!("└{}┘", "─".repeat(inner)));
+        vals.push(card_cell(&c.value, inner, c.value_color, sty));
+        subs.push(card_cell(&c.sub, inner, c.sub_color, sty));
+    }
+    let join = |segs: &[String]| format!("{pad}{}", segs.join(" "));
+    format!(
+        "{}\n{}\n{}\n{}",
+        join(&tops),
+        join(&vals),
+        join(&subs),
+        join(&bots)
+    )
+}
+
+/// One `│ centred-text │` interior cell: the (truncated) text centred in
+/// `inner` columns, padded on the plain string then optionally coloured so the
+/// ANSI escapes don't count toward the width.
+fn card_cell(text: &str, inner: usize, color: Option<Color>, sty: &Styler) -> String {
+    let shown = truncate_display(text, inner);
+    let slack = inner.saturating_sub(shown.chars().count());
+    let left = slack / 2;
+    let right = slack - left;
+    let painted = match color {
+        Some(c) => sty.paint(&shown, c),
+        None => shown.clone(),
+    };
+    format!("│{}{}{}│", " ".repeat(left), painted, " ".repeat(right))
+}
+
+/// A `cells`-wide fill bar (`▓` filled, `░` empty) for `pct` in 0..=100. Plain
+/// text — colour at the call site (or via [`Card::with_sub_color`]).
+pub fn fill_bar(pct: f64, cells: usize) -> String {
+    let p = pct.clamp(0.0, 100.0);
+    let filled = (((p / 100.0) * cells as f64).round() as usize).min(cells);
+    format!("{}{}", "▓".repeat(filled), "░".repeat(cells - filled))
+}
+
+/// Threshold hue for a "higher is worse" gauge (e.g. budget used): green under
+/// 60%, yellow under 85%, red at or above.
+pub fn gauge_hue(pct: f64) -> Color {
+    if pct < 60.0 {
+        Color::Green
+    } else if pct < 85.0 {
+        Color::Yellow
+    } else {
+        Color::Red
+    }
+}
+
+/// Truncate `s` to at most `max` display columns, marking the cut with `…`.
+fn truncate_display(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut out: String = s.chars().take(max - 1).collect();
+    out.push('…');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +275,44 @@ mod tests {
         // toggle a real TTY in a test, so exercise the decision function.
         // (Env is process-global; assert the pure branch instead.)
         assert!(!color_enabled(false));
+    }
+
+    #[test]
+    fn fill_bar_clamps_and_fills() {
+        assert_eq!(fill_bar(0.0, 8), "░░░░░░░░");
+        assert_eq!(fill_bar(100.0, 8), "▓▓▓▓▓▓▓▓");
+        assert_eq!(fill_bar(50.0, 8), "▓▓▓▓░░░░");
+        // Out-of-range clamps rather than panicking.
+        assert_eq!(fill_bar(250.0, 4), "▓▓▓▓");
+        assert_eq!(fill_bar(-5.0, 4), "░░░░");
+    }
+
+    #[test]
+    fn render_cards_rows_share_one_width() {
+        // Every line of the block must be the same display width, regardless of
+        // value length or colour — otherwise the borders shear. Use a no-colour
+        // styler so the bytes are the visible glyphs.
+        let sty = Styler::with_enabled(false);
+        let cards = [
+            Card::new("Spend", "$4.20", "37 req"),
+            Card::new("Budget", "21%", &fill_bar(21.0, 8)),
+            Card::new("Blocked", "2", "153 alerts"),
+        ];
+        let block = render_cards(&cards, 11, 2, &sty);
+        let widths: Vec<usize> = block.lines().map(|l| l.chars().count()).collect();
+        assert!(
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "lines must align: {widths:?}\n{block}"
+        );
+        // Four lines (top, value, sub, bottom) even with colour enabled.
+        let colored = render_cards(&cards, 11, 2, &Styler::with_enabled(true));
+        assert_eq!(colored.lines().count(), 4);
+    }
+
+    #[test]
+    fn cards_colour_only_wraps_when_enabled() {
+        let card = [Card::new("Cache", "88%", "hit").with_value_color(Color::Green)];
+        assert!(!render_cards(&card, 9, 0, &Styler::with_enabled(false)).contains("\x1b["));
+        assert!(render_cards(&card, 9, 0, &Styler::with_enabled(true)).contains("\x1b["));
     }
 }

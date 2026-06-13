@@ -10,6 +10,7 @@ use anyhow::Context;
 use clap::Args;
 
 use crate::storage::Storage;
+use crate::term::{Card, Color, Styler, render_cards};
 
 #[derive(Args, Debug)]
 pub struct SecurityArgs {
@@ -49,10 +50,7 @@ pub fn run_cmd(args: SecurityArgs) -> anyhow::Result<()> {
     let mut out = std::io::stdout().lock();
 
     if args.summary && !args.json {
-        if canaries_armed > 0 {
-            writeln!(out, "🐤 Canary tripwires armed: {canaries_armed}")?;
-        }
-        return print_summary(&mut out, &events, args.days);
+        return print_summary(&mut out, &events, args.days, canaries_armed);
     }
     if args.json {
         let value = serde_json::json!({
@@ -72,26 +70,55 @@ pub fn run_cmd(args: SecurityArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let sty = Styler::stdout();
     writeln!(
         out,
-        "🛡️  Security events (last {} day{})",
+        "🔥 {} · Security events · last {} day{}",
+        sty.bold("Burnwall"),
         args.days,
         if args.days == 1 { "" } else { "s" }
     )?;
-    if canaries_armed > 0 {
-        writeln!(out, "   🐤 Canary tripwires armed: {canaries_armed}")?;
-    }
+    writeln!(out)?;
+
     if events.is_empty() {
-        writeln!(out, "   (none)")?;
+        if canaries_armed > 0 {
+            writeln!(
+                out,
+                "  🐤 {} canary tripwire{} armed.",
+                canaries_armed,
+                if canaries_armed == 1 { "" } else { "s" }
+            )?;
+        }
+        writeln!(out, "  (none)")?;
         return Ok(());
     }
 
+    // Honest split: enforcement blocks vs advisory alerts (never conflated),
+    // plus the armed-canary count — the glanceable receipt above the log.
+    let (blocked, alerts) = events.iter().fold((0i64, 0i64), |(b, a), e| {
+        if crate::security::catalog::is_advisory(&e.event_type) {
+            (b, a + 1)
+        } else {
+            (b + 1, a)
+        }
+    });
+    let cards = [
+        Card::new("Blocked", &blocked.to_string(), "stopped")
+            .with_value_color(if blocked > 0 { Color::Red } else { Color::Green }),
+        Card::new("Alerts", &alerts.to_string(), "advisory")
+            .with_value_color(if alerts > 0 { Color::Yellow } else { Color::Green }),
+        Card::new("Canaries", &canaries_armed.to_string(), "armed")
+            .with_value_color(if canaries_armed > 0 { Color::Green } else { Color::Blue }),
+    ];
+    writeln!(out, "{}", render_cards(&cards, 11, 2, &sty))?;
+    writeln!(out)?;
+
     writeln!(
         out,
-        "   {:<19}  {:<17}  {:<28}  Detail",
+        "  {:<19}  {:<17}  {:<28}  Detail",
         "Time", "Type", "Provider/Model"
     )?;
-    writeln!(out, "   {}", "-".repeat(85))?;
+    writeln!(out, "  {}", "─".repeat(84))?;
     for e in &events {
         let provider_model = match (&e.provider, &e.model) {
             (Some(p), Some(m)) => format!("{}/{}", p, m),
@@ -100,20 +127,20 @@ pub fn run_cmd(args: SecurityArgs) -> anyhow::Result<()> {
         };
         writeln!(
             out,
-            "   {:<19}  {:<17}  {:<28}  {}",
+            "  {:<19}  {:<17}  {:<28}  {}",
             // Stored UTC, displayed in the user's local time.
             e.timestamp
                 .with_timezone(&chrono::Local)
                 .format("%Y-%m-%d %H:%M:%S"),
             e.event_type,
             truncate(&provider_model, 28),
-            truncate(&e.details, 60),
+            truncate(&e.details, 58),
         )?;
     }
     writeln!(out)?;
     writeln!(
         out,
-        "   Total: {} event{}",
+        "  Total: {} event{}",
         events.len(),
         if events.len() == 1 { "" } else { "s" }
     )?;
@@ -143,6 +170,12 @@ fn friendly_type(event_type: &str) -> &str {
         "destructive_blocked" => "catastrophic command",
         "obfuscation_blocked" => "invisible-character obfuscation",
         "canary_triggered" => "canary tripwire (planted credential)",
+        // Advisory alerts (request still flowed; informational).
+        "slow_drip_alert" => "slow data-drip alert",
+        "billing_flip" => "subscription→metered switch",
+        "response_exfil_warning" => "data-carrying URL in response",
+        "mcp_tool_poisoning" => "poisoned MCP tool description",
+        "mcp_tool_changed" => "MCP tool definition drift",
         other => other,
     }
 }
@@ -153,18 +186,40 @@ fn print_summary<W: Write>(
     out: &mut W,
     events: &[crate::storage::SecurityEvent],
     days: i64,
+    canaries_armed: usize,
 ) -> anyhow::Result<()> {
+    let sty = Styler::stdout();
     let window = if days == 1 {
         "today".to_string()
     } else {
         format!("the last {days} days")
     };
+    writeln!(out, "🔥 {} · Security · {}", sty.bold("Burnwall"), window)?;
+    writeln!(out)?;
+
+    let canary_line = |out: &mut W| -> anyhow::Result<()> {
+        if canaries_armed > 0 {
+            writeln!(
+                out,
+                "  🐤 {} canary tripwire{} armed.",
+                canaries_armed,
+                if canaries_armed == 1 { "" } else { "s" }
+            )?;
+        }
+        Ok(())
+    };
+
     if events.is_empty() {
-        writeln!(out, "🛡️  All clear — Burnwall blocked nothing {window}.")?;
         writeln!(
             out,
-            "   (No news is good news; protection is running silently.)"
+            "  {} All clear — nothing blocked {window}.",
+            sty.green("✓")
         )?;
+        writeln!(
+            out,
+            "  (No news is good news; protection is running silently.)"
+        )?;
+        canary_line(out)?;
         return Ok(());
     }
 
@@ -186,23 +241,36 @@ fn print_summary<W: Write>(
         "mount_blocked",
     ];
 
+    // "Caught" (not "blocked"): the window may include advisory alerts that
+    // nothing was stopped for — the bullet hue keeps the distinction (red =
+    // enforcement block, yellow = advisory alert).
     writeln!(
         out,
-        "🛡️  Burnwall blocked {} attempt{} {}:",
+        "  🛡️  Burnwall caught {} event{} {}:",
         events.len(),
         if events.len() == 1 { "" } else { "s" },
         window
     )?;
+    writeln!(out)?;
+    let bullet = |key: &str| {
+        let hue = if crate::security::catalog::is_advisory(key) {
+            Color::Yellow
+        } else {
+            Color::Red
+        };
+        sty.paint("●", hue)
+    };
     for key in order {
         if let Some(n) = counts.remove(key) {
-            writeln!(out, "   • {n:>3}  {}", friendly_type(key))?;
+            writeln!(out, "  {} {n:>3}  {}", bullet(key), friendly_type(key))?;
         }
     }
     // Any event types not in the canonical order (e.g. future kinds).
     let mut rest: Vec<(&str, usize)> = counts.into_iter().collect();
     rest.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     for (key, n) in rest {
-        writeln!(out, "   • {:>3}  {}", n, friendly_type(key))?;
+        writeln!(out, "  {} {:>3}  {}", bullet(key), n, friendly_type(key))?;
     }
+    canary_line(out)?;
     Ok(())
 }

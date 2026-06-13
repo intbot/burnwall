@@ -32,6 +32,7 @@ use clap::Args;
 
 use crate::security::{filescan, secrets};
 use crate::storage::Storage;
+use crate::term::{Card, Color, Styler, render_cards};
 
 #[derive(Args, Debug)]
 pub struct DoctorArgs {
@@ -507,51 +508,112 @@ fn protection_mark(p: &Protection) -> &'static str {
 
 /// The short, human health readout (`burnwall doctor` with no `--export`).
 fn print_health(out: &mut impl Write, i: &DoctorInput) -> anyhow::Result<()> {
-    writeln!(out, "🩺 Burnwall doctor — quick health check")?;
-    writeln!(out, "   version: {} ({}/{})", i.version, i.os, i.arch)?;
-    let proxy = match (i.proxy_running, i.paused) {
-        (true, true) => "running, but PROTECTION PAUSED (relaying unchecked)".to_string(),
-        (true, false) => match i.proxy_pid {
-            Some(pid) => format!("running (pid {pid})"),
-            None => "running".to_string(),
-        },
-        (false, _) => "not running — start with `burnwall start`".to_string(),
-    };
-    writeln!(out, "   proxy:   {proxy}")?;
-    let routing = match (i.routing, i.routed_proxy_alive) {
-        ("proxied", Some(false)) => "routed here, but NOTHING answers on that port (dead proxy)",
-        ("proxied", _) => "this shell routes through the proxy",
-        ("direct", _) => "NOT routed — traffic goes straight to the provider (no scan, no cost)",
-        ("bypassed", _) => "BURNWALL_BYPASS is set — relaying without scanning",
-        _ => "unknown",
-    };
-    writeln!(out, "   routing: {routing}")?;
+    let sty = Styler::stdout();
+    writeln!(out, "🔥 {} · Doctor", sty.bold("Burnwall"))?;
+    writeln!(out)?;
 
-    // The headline verdict: am I actually protected right now, and if not, the
-    // one command that fixes it (or, for a deliberate off-state, no nag).
+    // The headline verdict — the single answer to "am I protected right now?".
+    // ✓ protected (green), • a deliberate off-state (calm), ⚠ unintended (red).
     let p = assess_protection(i);
-    writeln!(out, "   protection: {} {}", protection_mark(&p), p.headline)?;
-    if let Some(fix) = &p.fix {
-        writeln!(out, "      → {fix}")?;
-    }
-
-    if !i.security_enabled {
-        writeln!(out, "   ⚠️  security.enabled is OFF — nothing is being blocked.")?;
-    }
-    if let Some(age) = i.pricing_age_days {
-        if age > 30 {
-            writeln!(out, "   ⚠️  pricing data is {age} days old (>30) — update Burnwall.")?;
-        }
-    }
+    let (mark, hue) = if p.ok {
+        ("✓", Color::Green)
+    } else if p.chosen {
+        ("•", Color::Blue)
+    } else {
+        ("⚠", Color::Red)
+    };
     writeln!(
         out,
-        "   last {} day(s): ${:.2} over {} request(s), {} block(s), {} alert(s).",
-        i.days, i.total_cost, i.total_requests, i.blocked_events, i.alert_events
+        "  {}",
+        sty.paint(&format!("{} {}", mark, p.headline), hue)
     )?;
+    if let Some(fix) = &p.fix {
+        writeln!(out, "    → {fix}")?;
+    }
+    writeln!(out)?;
+
+    // Health tiles: proxy / routing / security / pricing at a glance.
+    let proxy = match (i.proxy_running, i.paused) {
+        (true, true) => Card::new("Proxy", "paused", "relaying").with_value_color(Color::Yellow),
+        (true, false) => {
+            let sub = i
+                .proxy_pid
+                .map(|pid| format!("pid {pid}"))
+                .unwrap_or_else(|| "running".into());
+            Card::new("Proxy", "live", &sub).with_value_color(Color::Green)
+        }
+        (false, _) => Card::new("Proxy", "down", "stopped").with_value_color(Color::Red),
+    };
+    let routing = match (i.routing, i.routed_proxy_alive) {
+        ("proxied", Some(false)) => {
+            Card::new("Routing", "dead", "no answer").with_value_color(Color::Red)
+        }
+        ("proxied", _) => {
+            Card::new("Routing", "routed", "this shell").with_value_color(Color::Green)
+        }
+        ("direct", _) => {
+            Card::new("Routing", "direct", "unprotected").with_value_color(Color::Red)
+        }
+        ("bypassed", _) => {
+            Card::new("Routing", "bypass", "no scan").with_value_color(Color::Yellow)
+        }
+        _ => Card::new("Routing", "unknown", "?"),
+    };
+    let security = if i.security_enabled {
+        let sub = if i.canaries_armed > 0 {
+            format!("{} canary", i.canaries_armed)
+        } else {
+            "scanning".into()
+        };
+        Card::new("Security", "armed", &sub).with_value_color(Color::Green)
+    } else {
+        Card::new("Security", "OFF", "not blocking").with_value_color(Color::Red)
+    };
+    let pricing = match i.pricing_age_days {
+        Some(age) if age > 30 => {
+            Card::new("Pricing", "stale", &format!("{age} days")).with_value_color(Color::Yellow)
+        }
+        Some(age) => {
+            Card::new("Pricing", "fresh", &format!("{age} days")).with_value_color(Color::Green)
+        }
+        None => Card::new("Pricing", "n/a", "no data"),
+    };
+    writeln!(
+        out,
+        "{}",
+        render_cards(&[proxy, routing, security, pricing], 11, 2, &sty)
+    )?;
+    writeln!(out)?;
+
+    // The security-OFF case is unprotected-in-a-different-way — call it out in
+    // words too, not just the red tile.
+    if !i.security_enabled {
+        writeln!(
+            out,
+            "  {} security.enabled is OFF — nothing is being blocked.",
+            sty.red("⚠")
+        )?;
+        writeln!(out)?;
+    }
+
+    let bs = |n: i64| if n == 1 { "" } else { "s" };
+    let window = format!("Last {} day{}", i.days, bs(i.days));
+    writeln!(
+        out,
+        "  {:<14}${:.2} · {} req · {} block{} · {} alert{}",
+        window,
+        i.total_cost,
+        i.total_requests,
+        i.blocked_events,
+        bs(i.blocked_events),
+        i.alert_events,
+        bs(i.alert_events)
+    )?;
+    writeln!(out, "  {:<14}{} ({}/{})", "Version", i.version, i.os, i.arch)?;
     writeln!(out)?;
     writeln!(
         out,
-        "   For a redacted bundle to attach to a bug report:  burnwall doctor --export"
+        "  Bug-report bundle (redacted, nothing sent):  burnwall doctor --export"
     )?;
     Ok(())
 }

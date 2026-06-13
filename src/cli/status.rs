@@ -16,7 +16,7 @@ use crate::logscrape::{self, ScrapeBreakdown};
 use crate::pricing;
 use crate::providers::TokenUsage;
 use crate::storage::{ModelBreakdown, Storage};
-use crate::term::Styler;
+use crate::term::{Card, Color, Styler, fill_bar, gauge_hue, render_cards};
 
 #[derive(Args, Debug)]
 pub struct StatusArgs {
@@ -408,30 +408,91 @@ fn write_table(
     mcp_events: i64,
     waste_per_day: f64,
 ) -> std::io::Result<()> {
-    writeln!(w, "📊 Today ({})", date)?;
-    writeln!(
-        w,
-        "   Total: ${:.2} across {} request{}",
-        today_cost,
-        total_requests,
-        if total_requests == 1 { "" } else { "s" }
-    )?;
+    let sty = Styler::stdout();
+    let pretty = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .map(|d| d.format("%a %b %d").to_string())
+        .unwrap_or_else(|_| date.to_string());
+    writeln!(w, "🔥 {} · Today ({})", sty.bold("Burnwall"), pretty)?;
     writeln!(w)?;
 
+    // Aggregate cache-hit rate across today's models, for the Cache tile —
+    // cache reads as a share of all prompt-side tokens (input + creation + read).
+    let (mut cache_read, mut prompt_total) = (0u64, 0u64);
+    for b in breakdown {
+        cache_read += b.cache_read_tokens;
+        prompt_total += b.input_tokens + b.cache_creation_tokens + b.cache_read_tokens;
+    }
+    let cache_hit = if prompt_total > 0 {
+        cache_read as f64 / prompt_total as f64 * 100.0
+    } else {
+        0.0
+    };
+
+    let bcfg = budget.config();
+    // A subscriber's dollar figure is notional (what metered API would have
+    // cost), and on a flat-rate plan the cap isn't enforced — so a "120% of
+    // budget" tile would be misleading. The Budget tile shows "notional" in that
+    // case; the explanatory line is printed further down. (`freshest_any` is
+    // `Some` once any plan window was ever captured — the subscription tell.)
+    let subscriber = crate::plan::freshest_any().is_some();
+
+    // Headline stat tiles (Variant 1 — native cards): the glanceable four.
+    let mut cards = vec![Card::new(
+        "Spend",
+        &format!("${:.2}", today_cost),
+        &format!("{} req", total_requests),
+    )];
+    cards.push(if subscriber && !bcfg.enforce_on_plan {
+        Card::new("Budget", "notional", "not billed").with_value_color(Color::Yellow)
+    } else if bcfg.daily_usd > 0.0 {
+        let pct = (today_cost / bcfg.daily_usd) * 100.0;
+        Card::new("Budget", &format!("{:.0}%", pct), &fill_bar(pct, 8))
+            .with_value_color(gauge_hue(pct))
+            .with_sub_color(gauge_hue(pct))
+    } else {
+        Card::new("Budget", "no cap", &format!("${:.2}", today_cost))
+    });
+    cards.push(
+        Card::new("Cache", &format!("{:.0}%", cache_hit), &fill_bar(cache_hit, 8))
+            .with_value_color(Color::Green)
+            .with_sub_color(Color::Green),
+    );
+    cards.push({
+        let sub = if security_alerts > 0 {
+            format!(
+                "{} alert{}",
+                security_alerts,
+                if security_alerts == 1 { "" } else { "s" }
+            )
+        } else {
+            "0 alerts".to_string()
+        };
+        Card::new("Blocked", &security_blocked.to_string(), &sub).with_value_color(
+            if security_blocked > 0 {
+                Color::Red
+            } else {
+                Color::Green
+            },
+        )
+    });
+    writeln!(w, "{}", render_cards(&cards, 11, 2, &sty))?;
+    writeln!(w)?;
+
+    writeln!(w, "  {}", sty.bold("Cost by model"))?;
     if breakdown.is_empty() {
-        writeln!(w, "   (no requests yet)")?;
+        writeln!(w, "  (no requests yet)")?;
     } else {
         writeln!(
             w,
-            "   {:<32}  {:>8}  {:>8}  {:>9}",
+            "  {:<32}  {:>8}  {:>8}  {:>9}",
             "Provider / Model", "Cost", "Requests", "Cache Hit"
         )?;
-        writeln!(w, "   {}", "─".repeat(63))?;
+        writeln!(w, "  {}", "─".repeat(63))?;
         for row in breakdown {
             let label = format!("{}/{}", row.provider, row.model);
             writeln!(
                 w,
-                "   {:<32}  ${:>7.2}  {:>8}  {:>8.0}%",
+                "  {:<32}  ${:>7.2}  {:>8}  {:>8.0}%",
                 truncate(&label, 32),
                 row.cost,
                 row.requests,
@@ -443,21 +504,21 @@ fn write_table(
 
     #[cfg(feature = "logscrape")]
     if let Some(rows) = log_scrape {
-        writeln!(w, "   Tracked via local session logs")?;
+        writeln!(w, "  {}", sty.bold("Tracked via local session logs"))?;
         if rows.is_empty() {
-            writeln!(w, "   (no Claude Code or Codex activity today)")?;
+            writeln!(w, "  (no Claude Code or Codex activity today)")?;
         } else {
             writeln!(
                 w,
-                "   {:<32}  {:>8}  {:>8}  {:>9}",
+                "  {:<32}  {:>8}  {:>8}  {:>9}",
                 "Tool / Model", "Cost", "Turns", "Cache Hit"
             )?;
-            writeln!(w, "   {}", "─".repeat(63))?;
+            writeln!(w, "  {}", "─".repeat(63))?;
             for row in rows {
                 let label = format!("{}/{}", row.tool, row.model);
                 writeln!(
                     w,
-                    "   {:<32}  ${:>7.2}  {:>8}  {:>8.0}%",
+                    "  {:<32}  ${:>7.2}  {:>8}  {:>8.0}%",
                     truncate(&label, 32),
                     row.cost,
                     row.turns,
@@ -465,8 +526,8 @@ fn write_table(
                 )?;
             }
             let log_subtotal = logscrape::subtotal(rows);
-            writeln!(w, "   {}", "─".repeat(63))?;
-            writeln!(w, "   Log-file subtotal: ${:.2}", log_subtotal)?;
+            writeln!(w, "  {}", "─".repeat(63))?;
+            writeln!(w, "  Log-file subtotal: ${:.2}", log_subtotal)?;
             writeln!(w)?;
             // X4: a proxied tool's traffic shows up in BOTH buckets (a proxy DB
             // row and a session-log row), so a naive proxied+logs sum read ~2×
@@ -477,13 +538,13 @@ fn write_table(
             if (combined - (today_cost + log_subtotal)).abs() > 0.005 {
                 writeln!(
                     w,
-                    "   Combined today: ${:.2}  (proxied + unproxied logs; overlapping tool logs excluded)",
+                    "  Combined today: ${:.2}  (proxied + unproxied logs; overlapping tool logs excluded)",
                     combined
                 )?;
             } else {
                 writeln!(
                     w,
-                    "   Combined today (proxied + log files): ${:.2}",
+                    "  Combined today (proxied + log files): ${:.2}",
                     combined
                 )?;
             }
@@ -491,42 +552,26 @@ fn write_table(
         writeln!(w)?;
     }
 
-    let bcfg = budget.config();
-    // A subscriber's dollar figure is notional (what metered API would have
-    // cost), and on a flat-rate plan the cap isn't enforced — so framing today's
-    // notional spend as a "$60 / $50 (120%)" budget breach is misleading. Show
-    // it as notional spend instead, unless they've opted into enforcing the cap
-    // on plan traffic. (`freshest_any` is `Some` once any plan window was ever
-    // captured — the subscription discriminator.)
-    let subscriber = crate::plan::freshest_any().is_some();
+    // Budget nuance the tile can't carry: the notional-spend caveat for a
+    // flat-rate subscriber, or a soft alert when an API user crosses the warn
+    // threshold (the tile shows the percentage; this explains it).
     if subscriber && !bcfg.enforce_on_plan {
         writeln!(
             w,
-            "   💰 Notional spend today: ${:.2}  (flat-rate subscription — not billed; the daily cap isn't enforced on plan traffic)",
+            "  💰 Notional spend ${:.2} today — flat-rate subscription (not billed; the daily cap isn't enforced on plan traffic).",
             today_cost
         )?;
     } else if bcfg.daily_usd > 0.0 {
         let pct = (today_cost / bcfg.daily_usd) * 100.0;
-        writeln!(
-            w,
-            "   💰 Budget: ${:.2} / ${:.2} ({:.1}%)",
-            today_cost, bcfg.daily_usd, pct
-        )?;
         // Soft alert (v0.9.1): a non-blocking heads-up once spend crosses the
         // configured warn threshold but is still under the hard daily limit.
         if bcfg.warn_percent > 0 && pct >= bcfg.warn_percent as f64 && pct < 100.0 {
             writeln!(
                 w,
-                "   ⚠️  Soft alert: {:.0}% of today's budget used (warns at {}%).",
-                pct, bcfg.warn_percent
+                "  ⚠️  Soft alert: {:.0}% of today's ${:.2} budget used (warns at {}%).",
+                pct, bcfg.daily_usd, bcfg.warn_percent
             )?;
         }
-    } else {
-        writeln!(
-            w,
-            "   💰 Budget: ${:.2} (no daily limit configured)",
-            today_cost
-        )?;
     }
     // Burn-rate speedometer (#2): today's average spend per hour over the local
     // day so far, with the hourly brake's status. Always shown; never blocks.
@@ -537,83 +582,74 @@ fn write_table(
         if bcfg.per_hour_usd > 0.0 {
             writeln!(
                 w,
-                "   🏎️  Burn rate: ~${:.2}/hr today  (hourly brake at ${:.2}/hr)",
+                "  🏎️  Burn rate ~${:.2}/hr today (hourly brake at ${:.2}/hr).",
                 burn, bcfg.per_hour_usd
             )?;
         } else {
             writeln!(
                 w,
-                "   🏎️  Burn rate: ~${:.2}/hr today  (no hourly brake — set budget.per_hour to arm it)",
+                "  🏎️  Burn rate ~${:.2}/hr today (no hourly brake — set budget.per_hour to arm it).",
                 burn
             )?;
         }
     }
-    writeln!(w, "   {}", security_line(security_blocked, security_alerts))?;
+    // The Blocked tile carries the counts; this line keeps the block/alert split
+    // honest (an advisory alert is never called a block) and points at the
+    // drill-down command on an alert-heavy day.
+    writeln!(w, "  {}", security_line(security_blocked, security_alerts))?;
     // `blocked` counts every stopped request regardless of reason (security,
     // budget cap, loop detector). Surface it when it exceeds the security
     // blocks — the difference is budget/loop interventions.
     if blocked > security_blocked {
-        writeln!(
-            w,
-            "   🚫 Requests stopped (incl. budget/loop): {}",
-            blocked
-        )?;
+        writeln!(w, "  🚫 Requests stopped (incl. budget/loop): {}", blocked)?;
     }
-    writeln!(w)?;
     if cache_savings > 0.0 {
-        writeln!(w, "   Cache savings today: ${:.2}", cache_savings)?;
         writeln!(
             w,
-            "   (without caching, today would have cost ${:.2})",
-            cost_without_cache
+            "  💚 Cache saved ${:.2} today (≈ ${:.2} without caching).",
+            cache_savings, cost_without_cache
         )?;
     }
     if projected_savings > 0.0 {
         writeln!(
             w,
-            "   💡 Cache injection (off): est. ${:.2} foregone today",
+            "  💡 Cache injection (off): est. ${:.2} foregone today — enable with `burnwall config set proxy.cache_injection true`.",
             projected_savings
-        )?;
-        writeln!(
-            w,
-            "      Enable with `burnwall config set proxy.cache_injection true`."
         )?;
     }
     if waste_per_day >= 0.01 {
         writeln!(
             w,
-            "   💡 ~${:.2}/day of avoidable spend — run `burnwall waste`",
+            "  💡 ~${:.2}/day of avoidable spend — run `burnwall waste`.",
             waste_per_day
         )?;
     }
     if let Some(age) = pricing_age_days {
         if age > 30 {
-            writeln!(w)?;
             writeln!(
                 w,
-                "   ⚠️  Pricing data is {} days old (>30). Update Burnwall, or override prices locally with `burnwall pricing path --init`.",
+                "  ⚠️  Pricing data is {} days old (>30). Update Burnwall, or override prices locally with `burnwall pricing path --init`.",
                 age
             )?;
         }
     }
     let override_count = crate::pricing::overrides::count();
     if override_count > 0 {
-        writeln!(w)?;
         writeln!(
             w,
-            "   💲 {} local price override(s) active (burnwall pricing list).",
+            "  💲 {} local price override(s) active (`burnwall pricing list`).",
             override_count
         )?;
     }
     writeln!(w)?;
     writeln!(
         w,
-        "   ℹ️  Scope: Burnwall guards LLM API traffic. MCP tool calls flow through unfiltered."
+        "  ℹ️  Scope: Burnwall guards LLM API traffic. MCP tool calls flow through unfiltered."
     )?;
     if mcp_events > 0 {
         writeln!(
             w,
-            "      MCP tools/call recorded by `mcp-watch`: {} today",
+            "     MCP tools/call recorded by `mcp-watch`: {} today",
             mcp_events
         )?;
     }
