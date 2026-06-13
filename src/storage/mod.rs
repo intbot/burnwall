@@ -155,6 +155,18 @@ CREATE TABLE IF NOT EXISTS audit_receipts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_receipts_timestamp ON audit_receipts(timestamp);
+
+-- Generic local key/value store for small bits of CLI state that aren't worth
+-- a dedicated table — e.g. the once/day gate for the `burnwall status` usage
+-- nudge (last-shown date + which finding was last shown, so it rotates).
+-- Metadata only: keys and values are short ASCII tokens set by Burnwall itself,
+-- never prompt content. Additive + downgrade-safe (an older binary just ignores
+-- a table it doesn't read).
+CREATE TABLE IF NOT EXISTS meta (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 "#;
 
 #[derive(Debug, thiserror::Error)]

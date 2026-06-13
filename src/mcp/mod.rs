@@ -12,7 +12,7 @@ pub mod firewall;
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -63,6 +63,16 @@ pub struct WatchState {
     /// deny-by-omission: a `tools/call` routed to a server *not* on the list
     /// is blocked (403). Checked *after* `auto_deny` — auto_deny still wins.
     pub allowed_servers: Vec<String>,
+    /// Last description seen per advertised tool, keyed by `<server>/<tool>`.
+    /// Per-watcher (not a process-global): two watcher instances must never
+    /// see each other's sightings — a global keyed by upstream URL could
+    /// collide when an ephemeral port is reused by a different server (and did,
+    /// as cross-test leakage). In-memory on purpose: the *persisted* state is
+    /// the schema fingerprint in `mcp_tools`, which drives enforce-mode
+    /// re-pending; this map only powers the advisory description-drift warning
+    /// (M-C2), so losing it on restart costs one missed warning, never an
+    /// enforcement change.
+    pub seen_descriptions: Arc<dashmap::DashMap<String, String>>,
 }
 
 impl WatchState {
@@ -85,6 +95,7 @@ impl WatchState {
             auto_approve: Vec::new(),
             auto_deny: Vec::new(),
             allowed_servers: Vec::new(),
+            seen_descriptions: Arc::new(dashmap::DashMap::new()),
         }
     }
 
@@ -552,7 +563,7 @@ async fn handle(
     let body = if is_tools_list {
         match tokio::time::timeout(Duration::from_secs(20), upstream_resp.bytes()).await {
             Ok(Ok(bytes)) => {
-                inspect_tools_list(&bytes, &state, &route.server, &route.upstream);
+                inspect_tools_list(&bytes, &state, &route.server);
                 streaming::full(bytes)
             }
             Ok(Err(e)) => {
@@ -592,22 +603,12 @@ async fn handle(
     Ok(response.body(body).expect("response: build failed"))
 }
 
-/// Last description seen per advertised tool, keyed by
-/// `<upstream>|<server>/<tool>` (the upstream URL disambiguates watchers that
-/// share a server name, e.g. several single-upstream instances in one
-/// process). Process-local on purpose: the *persisted* state is the schema
-/// fingerprint in `mcp_tools`, which drives enforce-mode re-pending; this map
-/// only powers the advisory description-drift warning (M-C2), so losing it on
-/// restart costs one missed warning, never an enforcement change.
-static SEEN_DESCRIPTIONS: LazyLock<dashmap::DashMap<String, String>> =
-    LazyLock::new(dashmap::DashMap::new);
-
 /// Inspect a buffered `tools/list` reply for poisoned or silently-changed
 /// tool definitions. Read-only: findings are recorded as `security_events`
 /// (so `burnwall security` surfaces them) and the caller forwards the
 /// response bytes unchanged. Fail-open — a non-`tools/list` body yields no
 /// tools and no findings.
-fn inspect_tools_list(body: &[u8], state: &WatchState, server: &str, upstream: &str) {
+fn inspect_tools_list(body: &[u8], state: &WatchState, server: &str) {
     for tool in firewall::parse_tools_list(body) {
         // 1. Prompt-injection tells in the advertised name + description.
         let surface = format!("{} {}", tool.name, tool.description);
@@ -658,8 +659,11 @@ fn inspect_tools_list(body: &[u8], state: &WatchState, server: &str, upstream: &
         //    and warned about — descriptions are prompt-visible, so a swap is
         //    worth an operator's eyes — but it does NOT revoke approval. A
         //    routine version bump in prose must not re-pend every tool.
-        let desc_key = format!("{upstream}|{server}/{}", tool.name);
-        if let Some(prev) = SEEN_DESCRIPTIONS.insert(desc_key, tool.description.clone()) {
+        let desc_key = format!("{server}/{}", tool.name);
+        if let Some(prev) = state
+            .seen_descriptions
+            .insert(desc_key, tool.description.clone())
+        {
             if prev != tool.description && !schema_changed {
                 warn!(
                     "MCP tool '{}' on server '{}' changed its description \

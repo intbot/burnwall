@@ -563,6 +563,24 @@ impl Storage {
         })
     }
 
+    /// Per-`event_type` security-event counts on the given date. Lets surfaces
+    /// partition enforcement blocks from advisory alerts (via
+    /// `security::catalog::is_advisory`) instead of presenting one conflated
+    /// number as "blocked".
+    pub fn security_event_type_counts_for_date(&self, date: &str) -> Result<Vec<(String, i64)>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT event_type, COUNT(*) FROM security_events
+                 WHERE DATE(timestamp, 'localtime') = ?1
+                 GROUP BY event_type",
+            )?;
+            let rows: rusqlite::Result<Vec<(String, i64)>> = stmt
+                .query_map(params![date], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect();
+            Ok(rows?)
+        })
+    }
+
     /// All security events from the last `days` local days, newest first.
     /// `days = 1` = today only.
     pub fn security_events_since_days(&self, days: i64) -> Result<Vec<SecurityEvent>> {
@@ -818,6 +836,32 @@ impl Storage {
                 .query_map(params![date], row_to_security_event)?
                 .collect();
             Ok(rows?)
+        })
+    }
+
+    /// Read a value from the generic `meta` key/value store. `None` when the
+    /// key was never set. Used for small CLI state (e.g. the once/day nudge
+    /// gate) — metadata only, never prompt content.
+    pub fn meta_get(&self, key: &str) -> Result<Option<String>> {
+        self.with_conn(|conn| {
+            let v = conn
+                .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
+                    r.get::<_, String>(0)
+                })
+                .optional()?;
+            Ok(v)
+        })
+    }
+
+    /// Upsert a value into the generic `meta` key/value store.
+    pub fn meta_set(&self, key: &str, value: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO meta(key, value, updated_at) VALUES (?1, ?2, datetime('now'))
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
+                params![key, value],
+            )?;
+            Ok(())
         })
     }
 }

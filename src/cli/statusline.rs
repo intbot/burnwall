@@ -87,13 +87,54 @@ pub fn run_cmd(args: StatuslineArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Map Claude Code's input (+ DB enrichment) to a [`Ribbon`]. Pure given the
-/// input and the enrichment closure, so it's unit-testable without a DB.
+/// Resolve the raw model id from Claude Code's payload — prefer the stable
+/// `id`, fall back to the human `display_name`. Used both to pick the provider
+/// for routing and to build the short display label.
+fn cc_model_id(cc: &CcInput) -> String {
+    cc.model
+        .as_ref()
+        .map(|m| {
+            if !m.id.is_empty() {
+                m.id.clone()
+            } else {
+                m.display_name.clone().unwrap_or_default()
+            }
+        })
+        .unwrap_or_default()
+}
+
+/// Gather the impure enrichment — the per-session turn-delta file, the proxy
+/// DB, the plan snapshot, the routing/env probe — and hand it to the pure
+/// [`assemble_ribbon`].
 fn build_ribbon(cc: &CcInput) -> Ribbon {
     let sess = cc.cost.as_ref().map(|c| c.total_cost_usd).unwrap_or(0.0);
     let msg = session_msg_delta(cc.session_id.as_deref(), sess);
+    let (today, blocks) = db_enrichment();
+    let routing = routing_state(&cc_model_id(cc));
+    assemble_ribbon(cc, msg, today, blocks, plan_limits(), routing)
+}
+
+/// Pure assembly of the ribbon from Claude Code's stdin plus already-gathered
+/// enrichment. No DB, env, clock, or filesystem here — every impure input is a
+/// parameter — so the field mapping, and every routing/plan/block-count
+/// behavior the status line shows, is unit-testable in isolation.
+fn assemble_ribbon(
+    cc: &CcInput,
+    msg: Option<f64>,
+    today: f64,
+    blocks: u64,
+    plan: Option<ribbon::PlanLimits>,
+    routing: ribbon::Routing,
+) -> Ribbon {
+    let sess = cc.cost.as_ref().map(|c| c.total_cost_usd).unwrap_or(0.0);
 
     // "up" is the true prompt size: uncached input + cache writes + cache reads.
+    // Both ↑↓ and the context gauge come straight from the tool's stdin, NOT the
+    // proxy. So while a Claude Code sub-agent runs — the main turn's context is
+    // unchanged — these stay frozen, by design: the sub-agent has its own
+    // context window the tool doesn't report here. The proxy still meters the
+    // sub-agent's real API calls into the cost DB; they just don't move these
+    // tool-reported numbers.
     let usage = cc
         .context_window
         .as_ref()
@@ -110,23 +151,10 @@ fn build_ribbon(cc: &CcInput) -> Ribbon {
         None => Ctx::Hidden,
     };
 
-    let (today, blocks) = db_enrichment();
     let today_usd = if today > 0.0 { Some(today) } else { None };
 
-    let model_id = cc
-        .model
-        .as_ref()
-        .map(|m| {
-            if !m.id.is_empty() {
-                m.id.clone()
-            } else {
-                m.display_name.clone().unwrap_or_default()
-            }
-        })
-        .unwrap_or_default();
-
     Ribbon {
-        model: ribbon::short_model(&model_id),
+        model: ribbon::short_model(&cc_model_id(cc)),
         tool: None, // rendered inside Claude Code's own line — no tool label needed
         up,
         down,
@@ -134,8 +162,8 @@ fn build_ribbon(cc: &CcInput) -> Ribbon {
         sess_usd: Some(sess),
         today_usd,
         blocks_today: blocks,
-        plan: plan_limits(),
-        routing: routing_state(&model_id),
+        plan,
+        routing,
         ctx,
     }
 }
@@ -176,8 +204,34 @@ fn routing_state(model_id: &str) -> ribbon::Routing {
                 }
             }
         }
-        crate::cli::routing::EnvRouting::Direct => ribbon::Routing::Direct,
+        crate::cli::routing::EnvRouting::Direct => direct_state(),
         crate::cli::routing::EnvRouting::Bypassed => ribbon::Routing::Bypassed,
+    }
+}
+
+/// Tell a *chosen* direct apart from a *degraded* one. Direct means the tool's
+/// base-URL var isn't pointing at the proxy — but that happens for two very
+/// different reasons, and only one deserves a fix nag:
+///
+/// - **Chosen**: routing is disabled (`disable-routing`) or was never set up.
+///   The user opted out; we warn but suggest nothing.
+/// - **Degraded**: the env file is *active* (the user configured routing), yet
+///   this shell still went direct — the proxy was down when the shell launched
+///   (the `env.ps1` guard skips the export if the port is dead), or the shell
+///   predates routing. That's a fixable misconfiguration, so it earns the
+///   `burnwall doctor` hint.
+///
+/// The discriminator is the on-disk env file for this shell — the same signal
+/// `enable-routing` / `disable-routing` write. Reading it costs one small file
+/// read, and only on the (already unhappy) direct path.
+fn direct_state() -> ribbon::Routing {
+    let active = crate::cli::init::Shell::detect()
+        .and_then(crate::cli::routing::env_file_state)
+        == Some(crate::cli::routing::EnvFileState::Active);
+    if active {
+        ribbon::Routing::DirectDegraded
+    } else {
+        ribbon::Routing::Direct
     }
 }
 
@@ -273,8 +327,16 @@ fn sanitize(s: &str) -> String {
         .collect()
 }
 
-/// Today's cross-tool spend and security-block count from the proxy DB. Returns
-/// zeros if the DB can't be opened (e.g. proxy never run yet) — never fatal.
+/// Today's cross-tool spend and *blocked-request* count from the proxy DB.
+/// Returns zeros if the DB can't be opened (e.g. proxy never run yet) — never
+/// fatal.
+///
+/// The block count is `blocked_count_for_date` (requests we actually stopped),
+/// NOT `security_event_count_for_date` (every row in `security_events`). The
+/// latter also holds informational alerts — e.g. `slow_drip_alert` cost
+/// warnings — so labelling it `🚫 N blocked` overstated the count wildly (the
+/// firewall stopping a handful of requests, rendered as scores of "blocks").
+/// The chip claims requests were *blocked*, so it must count only blocks.
 fn db_enrichment() -> (f64, u64) {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let Ok(storage) = crate::storage::Storage::open_default() else {
@@ -282,7 +344,7 @@ fn db_enrichment() -> (f64, u64) {
     };
     let cost = storage.total_cost_for_date(&today).unwrap_or(0.0);
     let blocks = storage
-        .security_event_count_for_date(&today)
+        .blocked_count_for_date(&today)
         .unwrap_or(0)
         .max(0) as u64;
     (cost, blocks)
@@ -342,5 +404,104 @@ mod tests {
     fn sanitize_strips_path_separators() {
         assert_eq!(sanitize("abc-123_DEF"), "abc-123_DEF");
         assert_eq!(sanitize("../../etc"), "______etc");
+    }
+
+    // ── assemble_ribbon: the pure core, tested without a DB/env/clock ──────────
+
+    fn cc_from(json: &str) -> CcInput {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn blocks_chip_reflects_the_count_it_is_given() {
+        // db_enrichment now feeds `blocked_count_for_date` (real blocks), not the
+        // whole `security_events` table (which also holds informational alerts
+        // like slow_drip_alert). assemble_ribbon passes that count straight to
+        // the chip, so 3 real blocks render as "3 blocked" — never an inflated
+        // all-events total.
+        let cc = CcInput::default();
+        let r = assemble_ribbon(&cc, None, 0.0, 3, None, ribbon::Routing::Proxied);
+        assert_eq!(r.blocks_today, 3);
+        assert!(r.render(false).contains("🚫 3 blocked"));
+        // Zero blocks → no chip at all (the renderer drops it).
+        let z = assemble_ribbon(&cc, None, 0.0, 0, None, ribbon::Routing::Proxied);
+        assert!(!z.render(false).contains("blocked"));
+    }
+
+    #[test]
+    fn subagent_turn_keeps_tokens_and_ctx_frozen() {
+        // ↑↓ and ctx come from the tool's stdin, so an unchanged payload — the
+        // main turn idling while a sub-agent runs — yields identical numbers.
+        // This documents the user-observed "tokens/context don't move during
+        // sub-agents": the proxy still meters the sub-agent's calls into the
+        // cost DB, but these tool-reported fields are main-session only.
+        let json = r#"{"model":{"id":"claude-opus-4-8"},
+            "context_window":{"used_percentage":31.0,
+            "current_usage":{"input_tokens":1000,"output_tokens":200,
+            "cache_creation_input_tokens":0,"cache_read_input_tokens":4000}}}"#;
+        let a = assemble_ribbon(&cc_from(json), None, 0.0, 0, None, ribbon::Routing::Proxied);
+        let b = assemble_ribbon(&cc_from(json), None, 0.0, 0, None, ribbon::Routing::Proxied);
+        assert_eq!((a.up, a.down, a.ctx), (b.up, b.down, b.ctx));
+        assert_eq!(a.up, 5000); // 1000 + 0 + 4000
+        assert_eq!(a.down, 200);
+        assert_eq!(a.ctx, Ctx::Exact(31.0));
+    }
+
+    #[test]
+    fn proxied_plan_mode_shows_window_headroom_with_reset_not_dollars() {
+        // Fresh, live reading: subscription headroom replaces the dollar segment,
+        // and the binding window carries a live reset countdown ("(44m)") — the
+        // actionable "when does my 5h refresh" answer.
+        let cc = cc_from(r#"{"model":{"id":"claude-opus-4-8"},"cost":{"total_cost_usd":12.0}}"#);
+        let plan = Some(ribbon::PlanLimits {
+            primary_label: "5h".into(),
+            primary_pct: 15.0,
+            primary_reset_in: Some(44 * 60),
+            secondary: Some(("7d".into(), 58.0)),
+            throttled: false,
+            stale: false,
+        });
+        let s = assemble_ribbon(&cc, None, 0.0, 0, plan, ribbon::Routing::Proxied).render(false);
+        assert!(s.contains("5h ["), "got: {s}");
+        assert!(s.contains("15% (44m)"), "binding window shows live reset: {s}");
+        assert!(s.contains("7d 58%"), "got: {s}");
+        assert!(!s.contains("sess"), "subscription mode hides notional dollars: {s}");
+    }
+
+    #[test]
+    fn direct_routing_suppresses_stale_plan_and_blocks_end_to_end() {
+        // Sibling of the plan.rs fix, at the status-line level: a DIRECT
+        // (unprotected) shell captures nothing, so even a present (stale) plan
+        // snapshot and a block count must NOT paint — the proxy isn't in path.
+        // Only the loud warning + tool-sourced token/ctx segments remain.
+        let cc = cc_from(
+            r#"{"model":{"id":"claude-opus-4-8"},"cost":{"total_cost_usd":5.0},
+                "context_window":{"used_percentage":20.0,
+                "current_usage":{"input_tokens":900,"output_tokens":100}}}"#,
+        );
+        let plan = Some(ribbon::PlanLimits {
+            primary_label: "5h".into(),
+            primary_pct: 100.0,
+            primary_reset_in: None,
+            secondary: None,
+            throttled: false,
+            stale: true,
+        });
+        let s = assemble_ribbon(&cc, None, 9.0, 156, plan, ribbon::Routing::Direct).render(false);
+        assert!(s.contains("DIRECT (unprotected)"), "got: {s}");
+        assert!(s.contains("ctx ["), "tool-sourced context stays: {s}");
+        assert!(!s.contains("5h"), "no stale plan window when direct: {s}");
+        assert!(!s.contains("blocked"), "no block chip when direct: {s}");
+        assert!(!s.contains("today"), "no today spend when direct: {s}");
+    }
+
+    #[test]
+    fn cc_model_id_prefers_id_then_display_name() {
+        assert_eq!(cc_model_id(&cc_from(r#"{"model":{"id":"claude-opus-4-8"}}"#)), "claude-opus-4-8");
+        assert_eq!(
+            cc_model_id(&cc_from(r#"{"model":{"id":"","display_name":"Opus"}}"#)),
+            "Opus"
+        );
+        assert_eq!(cc_model_id(&CcInput::default()), "");
     }
 }

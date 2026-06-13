@@ -156,6 +156,7 @@ pub async fn run_cmd(args: McpWatchArgs) -> anyhow::Result<()> {
         auto_approve: user_config.mcp.auto_approve.clone(),
         auto_deny: user_config.mcp.auto_deny.clone(),
         allowed_servers,
+        seen_descriptions: Arc::new(dashmap::DashMap::new()),
     };
 
     let listener = tokio::net::TcpListener::bind(addr)

@@ -554,6 +554,7 @@ fn enforce_state(upstream: String, storage: Arc<Storage>) -> WatchState {
         auto_approve: Vec::new(),
         auto_deny: Vec::new(),
         allowed_servers: Vec::new(),
+        seen_descriptions: Arc::new(dashmap::DashMap::new()),
     }
 }
 
@@ -707,6 +708,7 @@ async fn auto_denied_block_is_a_jsonrpc_error_with_string_id_echo() {
         auto_approve: Vec::new(),
         auto_deny: vec!["default/evil_*".to_string()],
         allowed_servers: Vec::new(),
+        seen_descriptions: Arc::new(dashmap::DashMap::new()),
     };
     let addr = spawn_watcher(state).await;
 
@@ -903,6 +905,7 @@ fn allowlist_state(
         auto_approve: Vec::new(),
         auto_deny: Vec::new(),
         allowed_servers,
+        seen_descriptions: Arc::new(dashmap::DashMap::new()),
     }
 }
 

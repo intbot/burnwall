@@ -275,6 +275,10 @@ verifiable, not by asking for trust:
 - **Zero telemetry.** No analytics, no phone-home, no tracking. Ever.
 - **No prompt logging.** Only metadata is stored (model, tokens, cost, timestamp).
 - **No API key storage.** Keys pass through in headers and are never written to disk.
+- **Your data, portable.** All metadata lives in a single SQLite file under
+  `~/.burnwall` (`burnwall.db`). Back it up by copying that one file; export it
+  any time with `burnwall export --format csv|json`. See
+  [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 - **Read-only on responses.** Burnwall inspects responses to compute cost and
   **never modifies them** — your tool gets the provider's bytes unchanged.
 - **Single binary, signed releases.** Install from a checksummed, signed release

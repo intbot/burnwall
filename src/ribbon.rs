@@ -43,9 +43,20 @@ pub enum Ctx {
 pub enum Routing {
     /// Confirmed routed through the proxy. Renders nothing (no clutter).
     Proxied,
-    /// Going straight to the provider — Burnwall sees nothing: no security
-    /// scanning, no cost capture. Rendered as a loud warning.
+    /// Going straight to the provider *by choice* (routing disabled, or never
+    /// set up) — Burnwall sees nothing: no security scanning, no cost capture.
+    /// Rendered as a loud warning, but with NO fix suggestion: the user opted
+    /// out, and nagging a deliberate choice just trains them to ignore the chip.
     Direct,
+    /// Going straight to the provider *unintentionally*: routing IS configured
+    /// (the env file is active), but this shell fell through to direct — the
+    /// proxy was down when the shell launched, or the shell predates routing.
+    /// Same "unprotected" surface as [`Routing::Direct`], but here it's a
+    /// fixable misconfiguration, so the chip points at `burnwall doctor`. This
+    /// is the same failure as [`Routing::ProxyDown`] reached by a different
+    /// timing (shell started while the proxy was already down, so the base-URL
+    /// var was never set rather than set-then-orphaned).
+    DirectDegraded,
     /// Routed, but the `BURNWALL_BYPASS` kill switch makes the proxy a pure
     /// relay (checks off). Rendered as a softer caution.
     Bypassed,
@@ -135,6 +146,21 @@ impl Ribbon {
                     warn_segment("⚠ DIRECT (unprotected)", color, Hue::Red)
                 );
             }
+            Routing::DirectDegraded => {
+                // Same loud warning, plus the one command that diagnoses and
+                // fixes it. We point at `doctor` (not `start`) because the right
+                // fix is timing-dependent — start the proxy, open a new shell,
+                // or both — and `doctor` works that out and can auto-repair.
+                let _ = write!(
+                    s,
+                    " · {}",
+                    warn_segment(
+                        "⚠ DIRECT (unprotected) — run `burnwall doctor`",
+                        color,
+                        Hue::Red
+                    )
+                );
+            }
             Routing::Bypassed => {
                 let _ = write!(s, " · {}", warn_segment("⚠ bypass", color, Hue::Yellow));
             }
@@ -162,13 +188,27 @@ impl Ribbon {
             Routing::Proxied | Routing::Unknown => {}
         }
         let _ = write!(s, " · ↑{} ↓{}", human_k(self.up), human_k(self.down));
-        // When the proxy is down, nothing is being captured — so cost, plan
-        // headroom, today's spend, and the block count would all be stale.
-        // Showing them next to a "PROXY DOWN" warning whispers "all fine" while
-        // shouting "broken". Suppress them: a broken state should *look* broken.
-        // The token (↑↓) and context segments stay — those come from the tool's
-        // own stdin, not the proxy, so they remain true.
-        if self.routing != Routing::ProxyDown {
+        // When the proxy isn't in the request path — it's down, or the tool is
+        // routed DIRECT — nothing is being captured, so cost, plan headroom,
+        // today's spend, and the block count are frozen at a last-known value
+        // that can be flatly wrong (e.g. a 5h window that has since reset still
+        // shown as `~100%`). Worse, the stale `⏸ idle` chip claims the reading
+        // refreshes "when you resume" — but in DIRECT it never will, because the
+        // traffic never reaches the proxy. Showing those next to a "DIRECT
+        // (unprotected)" / "PROXY DOWN" warning whispers "all fine" while
+        // shouting "unprotected". Suppress them: a state where Burnwall can't see
+        // the traffic should *look* like it. The token (↑↓) and context segments
+        // stay — those come from the tool's own stdin, not the proxy, so they
+        // remain true.
+        //
+        // PAUSED is deliberately excluded: the proxy is alive and was capturing
+        // right up to the (short, auto-resuming) pause, so its numbers are real,
+        // just briefly frozen.
+        let proxy_capturing = !matches!(
+            self.routing,
+            Routing::ProxyDown | Routing::Direct | Routing::DirectDegraded
+        );
+        if proxy_capturing {
             // Subscription mode replaces the (notional) dollar cost with real plan
             // headroom; otherwise show the dollar cost + today's spend.
             match &self.plan {
@@ -738,6 +778,71 @@ mod tests {
         assert!(!s.contains("sess"), "no session cost when down: {s}");
         assert!(!s.contains("today"), "no today spend when down: {s}");
         assert!(!s.contains("blocked"), "no block count when down: {s}");
+    }
+
+    #[test]
+    fn direct_suppresses_stale_capture_metrics() {
+        // DIRECT means the tool isn't routed through the proxy, so it captures
+        // nothing for this traffic — plan headroom, today's spend, and the block
+        // count are frozen at a last-known value that can be flatly wrong (the
+        // user-reported `5h ~100%` on a window that has since reset). Same
+        // epistemics as PROXY DOWN: keep the loud warning + tool-sourced
+        // segments only, drop everything the proxy would have to be in-path to
+        // know.
+        let mut r = base();
+        r.routing = Routing::Direct;
+        r.blocks_today = 156;
+        r.plan = Some(PlanLimits {
+            primary_label: "5h".to_string(),
+            primary_pct: 100.0,
+            primary_reset_in: None,
+            secondary: Some(("7d".to_string(), 56.0)),
+            throttled: false,
+            stale: true,
+        });
+        let s = r.render(false);
+        assert!(s.contains("⚠ DIRECT (unprotected)"), "got: {s}");
+        assert!(s.contains("↑13k ↓615"), "token counts stay: {s}");
+        assert!(s.contains("ctx ["), "context stays: {s}");
+        assert!(!s.contains("5h"), "no stale plan window when direct: {s}");
+        assert!(!s.contains("idle"), "no idle chip when direct: {s}");
+        assert!(!s.contains('$'), "no dollar figures when direct: {s}");
+        assert!(!s.contains("blocked"), "no block count when direct: {s}");
+    }
+
+    #[test]
+    fn degraded_direct_points_at_doctor_and_suppresses_metrics() {
+        // Routing IS configured but this shell fell through to direct: warn AND
+        // hand the user the fix command — unlike a deliberate `Direct`, which
+        // gets no suggestion. Capture metrics are still suppressed (the proxy
+        // isn't in the path either way).
+        let mut r = base();
+        r.routing = Routing::DirectDegraded;
+        r.blocks_today = 156;
+        r.plan = Some(PlanLimits {
+            primary_label: "5h".to_string(),
+            primary_pct: 100.0,
+            primary_reset_in: None,
+            secondary: None,
+            throttled: false,
+            stale: true,
+        });
+        let s = r.render(false);
+        assert!(s.contains("⚠ DIRECT (unprotected)"), "got: {s}");
+        assert!(s.contains("burnwall doctor"), "degraded must hint a fix: {s}");
+        assert!(s.contains("↑13k ↓615"), "token counts stay: {s}");
+        assert!(!s.contains("5h"), "no stale plan window when unprotected: {s}");
+        assert!(!s.contains("blocked"), "no block count when unprotected: {s}");
+    }
+
+    #[test]
+    fn plain_direct_gives_no_fix_suggestion() {
+        // The deliberate-choice case must NOT nag with a fix command.
+        let mut r = base();
+        r.routing = Routing::Direct;
+        let s = r.render(false);
+        assert!(s.contains("⚠ DIRECT (unprotected)"), "got: {s}");
+        assert!(!s.contains("doctor"), "chosen direct must not suggest a fix: {s}");
     }
 
     #[test]

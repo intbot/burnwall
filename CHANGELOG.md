@@ -2,7 +2,7 @@
 
 All notable changes to Burnwall.
 
-## [0.10.0] — 2026-06-11
+## [0.10.0] — 2026-06-12
 
 A large release: a wave of security, cost, and compliance features, plus an
 availability-hardening pass driven by dogfooding — so the proxy stays safe to run
@@ -57,6 +57,19 @@ hands-off even when something outside Burnwall (an antivirus, a crash) takes it 
 - **`burnwall guard`** — a watchdog that auto-pauses routing if the proxy dies while
   routed, so a crash or quarantine can't strand new shells.
 
+**Diagnostics & data**
+- **`burnwall doctor`** — a one-glance health check that names what's wrong and the exact
+  fix, with `burnwall doctor --export` writing a redacted, metadata-only bundle that
+  self-scans for secrets before it's written (and refuses to write if anything
+  secret-shaped survives) — the thing to attach to a bug report.
+- **`burnwall explain <id>`** — explain any block in plain language: what rule fired, a
+  masked preview of what matched, why that class is blocked, and how to proceed.
+- **`burnwall export --format csv|json`** — a portable copy of your metadata, on your
+  machine, any time.
+- **Rule reference + troubleshooting docs.** Every block carries a stable rule id that
+  resolves to a `docs/RULES.md` entry (mirrored by `burnwall explain`), plus a
+  symptom→fix `docs/TROUBLESHOOTING.md` and a diagnostic-first bug-report template.
+
 ### Changed
 - **Graceful drain on stop.** `burnwall stop` (and `upgrade`) now let in-flight requests
   finish before exiting instead of cutting them mid-stream.
@@ -66,6 +79,12 @@ hands-off even when something outside Burnwall (an antivirus, a crash) takes it 
   are now written to the log instead of vanishing silently.
 - **Status-line block count** reads `🚫 N blocked` and no longer renders the digit on top
   of the shield glyph in some terminals.
+- **Status-line context reads true.** The context gauge no longer snaps toward ~100% off
+  a stale plan window — it shows the tool's own headroom figure (the one `/usage` reports)
+  and marks it stale rather than implying the conversation is nearly full.
+- **Blocks and alerts are reported separately.** A warn-only security alert is no longer
+  counted as a block: `burnwall status` shows the two side by side, and the nudge line
+  reads "blocked N request(s)" versus "raised N security alert(s)" honestly.
 - **Windows install note.** The README and the installer now explain the
   Defender/SmartScreen false positive and how to recover from it.
 
@@ -75,6 +94,10 @@ hands-off even when something outside Burnwall (an antivirus, a crash) takes it 
   summary), an editor tool writing a key into a local test fixture, a search query that
   mentions a sensitive path, and a tool's non-command metadata field no longer 403 —
   while a genuine credential or dangerous command inside an actual tool call still blocks.
+- **MCP watcher description-drift state is now per-watcher.** The advisory "a tool changed
+  its description" memory was process-global, so two watchers — or an ephemeral upstream
+  port reused by a different server — could leak sightings into each other (a flaky test
+  surfaced it). It's now scoped to each watcher instance; enforcement was never affected.
 
 ## [0.9.15] — 2026-06-10
 

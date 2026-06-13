@@ -78,12 +78,16 @@ impl PlanSnapshot {
     /// Like [`Self::to_ribbon_limits`] but tolerates a stale reading. With
     /// `stale = false` it is identical (and hides a window whose own reset has
     /// passed — U-M7). With `stale = true` it instead *keeps* surfacing the
-    /// last-known utilizations — marked stale, with no live countdown — rather
-    /// than returning `None`. The status line uses this so a subscriber who has
-    /// been idle, or whose proxy was briefly down, always sees "subscription"
+    /// utilizations — marked stale, with no live countdown — rather than
+    /// returning `None`. The status line uses this so a subscriber who has been
+    /// idle, or whose proxy was briefly down, always sees "subscription"
     /// headroom instead of falling back to a notional dollar figure that reads
     /// as real money (the dogfooding report: "seeing sess $ instead of
     /// subscription").
+    ///
+    /// A stale window whose reset has *already passed* is the one exception: it
+    /// has provably rolled, so its last-known % is shown as 0 rather than the
+    /// stale-high value (a freshly-reset 5h window must not read `~100%`).
     pub fn to_ribbon_limits_stale_aware(
         &self,
         now: i64,
@@ -92,13 +96,28 @@ impl PlanSnapshot {
         let primary = self.windows.first()?;
         // A fresh reading whose binding window already reset is self-describedly
         // expired — show nothing (U-M7). A stale reading is *already* known to be
-        // old, so its passed reset is no new information: keep the last-known %.
+        // old, so its passed reset is no new information: keep the segment.
         if !stale && primary.reset <= now {
             return None;
         }
+        // In a *stale* reading, a window whose provider-reported reset has
+        // already passed has provably rolled: its last-known utilization no
+        // longer holds. A stale snapshot means no request has been observed
+        // since (any request refreshes it), so the rolled window restarted at
+        // zero and has stayed there — render 0%, not the stale-high value. This
+        // fixes the user-reported `5h ~100%` shown on a window that reset hours
+        // ago, while still keeping a known subscriber in plan mode (they must
+        // never drop back to a notional `$ sess`). `reset == 0` means "unknown",
+        // not "passed", so such a window keeps its last-known %. A window still
+        // inside its period (e.g. the 7d while only the 5h rolled) is untouched.
+        let display_pct = |w: &LimitWindow| -> f64 {
+            let rolled = stale && w.reset > 0 && w.reset <= now;
+            let util = if rolled { 0.0 } else { w.utilization };
+            (util * 100.0).clamp(0.0, 100.0)
+        };
         Some(crate::ribbon::PlanLimits {
             primary_label: primary.label.clone(),
-            primary_pct: (primary.utilization * 100.0).clamp(0.0, 100.0),
+            primary_pct: display_pct(primary),
             primary_reset_in: if stale {
                 None
             } else {
@@ -107,7 +126,7 @@ impl PlanSnapshot {
             secondary: self
                 .windows
                 .get(1)
-                .map(|w| (w.label.clone(), (w.utilization * 100.0).clamp(0.0, 100.0))),
+                .map(|w| (w.label.clone(), display_pct(w))),
             // Only a positively-throttling status renders the ⛔ chip. Anthropic
             // emits warning-grade intermediates (e.g. `allowed_warning`) near
             // the limit while requests still succeed — "anything ≠ allowed"
@@ -382,16 +401,15 @@ mod tests {
     }
 
     #[test]
-    fn stale_aware_keeps_last_known_headroom_marked_stale() {
+    fn stale_within_period_keeps_last_known_headroom_marked_stale() {
         let snap = parse_limits("anthropic", &unified(), 1780951905).unwrap();
-        // Long past both reset times: a FRESH reading vanishes (U-M7)…
-        let way_later = 1781150400 + 10_000;
-        assert!(snap.to_ribbon_limits(way_later).is_none());
-        // …but a STALE reading keeps surfacing last-known headroom — marked
-        // stale, with no live countdown and no throttle claim — so a subscriber
-        // stays in plan mode instead of seeing a notional dollar figure.
+        // A stale reading whose windows are still WITHIN their periods (idle a
+        // short while, nothing reset yet) keeps last-known headroom — marked
+        // stale, no live countdown, no throttle claim — so a subscriber stays in
+        // plan mode instead of seeing a notional dollar figure.
+        let still_live = 1780951905 + 60; // before either reset
         let rl = snap
-            .to_ribbon_limits_stale_aware(way_later, true)
+            .to_ribbon_limits_stale_aware(still_live, true)
             .expect("stale reading still renders");
         assert!(rl.stale);
         assert_eq!(rl.primary_reset_in, None);
@@ -399,6 +417,62 @@ mod tests {
         assert_eq!(rl.primary_label, "5h");
         assert!((rl.primary_pct - 11.0).abs() < 1e-9);
         assert_eq!(rl.secondary, Some(("7d".to_string(), 10.0)));
+    }
+
+    #[test]
+    fn stale_reading_zeroes_only_the_rolled_window() {
+        // The user's actual bug: idle across a 5h boundary. The 5h window has
+        // rolled (reset passed) but the 7d window is still live. A stale reading
+        // must show the 5h as ~0% (it provably reset — `~100%` was the bug), and
+        // KEEP the 7d at its last-known %.
+        let snap = parse_limits("anthropic", &unified(), 1780951905).unwrap();
+        let after_5h_reset = 1780960800 + 60; // past 5h reset, before 7d reset
+        let rl = snap
+            .to_ribbon_limits_stale_aware(after_5h_reset, true)
+            .expect("known subscriber stays in plan mode");
+        assert!(rl.stale);
+        assert_eq!(rl.primary_label, "5h");
+        assert_eq!(rl.primary_pct, 0.0, "a rolled 5h window must read 0%, not ~100%");
+        // 7d is still inside its period → last-known value preserved.
+        assert_eq!(rl.secondary, Some(("7d".to_string(), 10.0)));
+    }
+
+    #[test]
+    fn stale_reading_after_both_windows_reset_stays_in_plan_mode_at_zero() {
+        let snap = parse_limits("anthropic", &unified(), 1780951905).unwrap();
+        // Long past BOTH reset times (idle > a week): a FRESH reading vanishes…
+        let way_later = 1781150400 + 10_000;
+        assert!(snap.to_ribbon_limits(way_later).is_none());
+        // …but a STALE reading still renders (no scary `$ sess` fallback for a
+        // known subscriber) with every rolled window zeroed — never the
+        // stale-high last-known values.
+        let rl = snap
+            .to_ribbon_limits_stale_aware(way_later, true)
+            .expect("stale reading still renders for a known subscriber");
+        assert!(rl.stale);
+        assert_eq!(rl.primary_reset_in, None);
+        assert!(!rl.throttled);
+        assert_eq!(rl.primary_label, "5h");
+        assert_eq!(rl.primary_pct, 0.0);
+        assert_eq!(rl.secondary, Some(("7d".to_string(), 0.0)));
+    }
+
+    #[test]
+    fn idle_across_5h_boundary_via_composition_never_shows_stale_high() {
+        // End-to-end on the exact path `ribbon_limits` takes: a FRESH snapshot
+        // (is_stale == false) whose 5h window has rolled. The composition's
+        // first call hits U-M7 (None); the `.or_else(stale=true)` must then yield
+        // a 5h reading of 0%, not the resurrected last-known 11%.
+        let snap = parse_limits("anthropic", &unified(), 1780951905).unwrap();
+        let after_5h_reset = 1780960800 + 60;
+        assert!(!snap.is_stale(after_5h_reset, 12 * 3600), "snapshot itself is fresh");
+        let rl = snap
+            .to_ribbon_limits_stale_aware(after_5h_reset, false)
+            .or_else(|| snap.to_ribbon_limits_stale_aware(after_5h_reset, true))
+            .expect("known subscriber stays in plan mode");
+        assert!(rl.stale);
+        assert_eq!(rl.primary_label, "5h");
+        assert_eq!(rl.primary_pct, 0.0, "must not resurrect the pre-reset 11%");
     }
 
     #[test]

@@ -103,6 +103,7 @@ tempfile = "3"
 wiremock = "0.6"                     # Mock HTTP server for integration tests
 assert_cmd = "2"                     # CLI testing
 predicates = "3"                     # Assertion helpers
+dashmap = "6"                        # Construct WatchState literals in tests
 
 [[test]]
 name = "proxy_test"

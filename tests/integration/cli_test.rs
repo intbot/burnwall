@@ -33,9 +33,14 @@ fn seed_storage(dir: &PathBuf) {
     r.timestamp = Utc::now();
     storage.insert_request(&r).unwrap();
 
+    // One enforcement block + one advisory alert, so surfaces must show the
+    // split (an alert presented as a "block" was a real dogfooding bug).
     let evt = SecurityEvent::new("path_blocked", "~/.ssh/id_rsa")
         .with_provider("anthropic", "claude-sonnet-4-6");
     storage.insert_security_event(&evt).unwrap();
+    let alert = SecurityEvent::new("slow_drip_alert", "host targeted unusually often")
+        .with_provider("anthropic", "claude-sonnet-4-6");
+    storage.insert_security_event(&alert).unwrap();
 }
 
 // ─────────────────────────────── status ───────────────────────────────
@@ -53,7 +58,7 @@ fn status_table_shows_seeded_data() {
         .stdout(predicate::str::contains("Today ("))
         .stdout(predicate::str::contains("anthropic/claude-sonnet-4-6"))
         .stdout(predicate::str::contains("$0.01"))
-        .stdout(predicate::str::contains("Security: 1 blocked attempt"));
+        .stdout(predicate::str::contains("Security: 1 request blocked · 1 alert"));
 }
 
 #[test]
@@ -70,7 +75,10 @@ fn status_json_emits_valid_structure() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
     assert!(v["total_cost_usd"].as_f64().unwrap() > 0.0);
-    assert_eq!(v["security_events"], 1);
+    // Total kept for compatibility; the split fields carry the honest story.
+    assert_eq!(v["security_events"], 2);
+    assert_eq!(v["security_blocked"], 1);
+    assert_eq!(v["security_alerts"], 1);
     assert_eq!(v["breakdown"][0]["provider"], "anthropic");
 }
 
@@ -367,9 +375,10 @@ fn security_command_lists_seeded_event() {
         .success()
         .stdout(predicate::str::contains("Security events"))
         .stdout(predicate::str::contains("path_blocked"))
+        .stdout(predicate::str::contains("slow_drip_alert"))
         .stdout(predicate::str::contains("anthropic/claude-sonnet-4-6"))
         .stdout(predicate::str::contains("~/.ssh/id_rsa"))
-        .stdout(predicate::str::contains("Total: 1 event"));
+        .stdout(predicate::str::contains("Total: 2 event"));
 }
 
 #[test]
@@ -384,9 +393,15 @@ fn security_command_json_emits_array() {
         .expect("run");
     assert!(output.status.success());
     let v: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(v["count"], 1);
-    assert_eq!(v["events"][0]["event_type"], "path_blocked");
-    assert_eq!(v["events"][0]["details"], "~/.ssh/id_rsa");
+    assert_eq!(v["count"], 2);
+    let types: Vec<&str> = v["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["event_type"].as_str().unwrap())
+        .collect();
+    assert!(types.contains(&"path_blocked"), "got: {types:?}");
+    assert!(types.contains(&"slow_drip_alert"), "got: {types:?}");
 }
 
 #[test]
@@ -512,7 +527,7 @@ fn digest_table_shows_bill_of_materials() {
         .success()
         .stdout(predicate::str::contains("Agent Bill of Materials"))
         .stdout(predicate::str::contains("anthropic/claude-sonnet-4-6"))
-        .stdout(predicate::str::contains("Security checks fired: 1"));
+        .stdout(predicate::str::contains("Security checks fired: 2"));
 }
 
 #[test]
@@ -681,12 +696,23 @@ fn statusline_renders_ribbon_from_claude_code_json() {
 
     burnwall(&path)
         .args(["statusline", "--no-color"])
+        // Force the unprotected/direct path deterministically: if `cargo test`
+        // is run from a burnwall-routed shell, a leaked ANTHROPIC_BASE_URL would
+        // otherwise flip the ribbon to proxied and change what renders.
+        .env_remove("ANTHROPIC_BASE_URL")
+        .env_remove("OPENAI_BASE_URL")
+        .env_remove("BURNWALL_BYPASS")
         .write_stdin(json)
         .assert()
         .success()
         .stdout(predicate::str::contains("🔥 burnwall · sonnet-4.6"))
         .stdout(predicate::str::contains("↑13k ↓615")) // input buckets summed
-        .stdout(predicate::str::contains("$0.16 sess"))
+        // Direct = the proxy isn't in the path, so the cost/plan cluster is
+        // suppressed (it would be stale). Both the plain and degraded direct
+        // variants share this substring; the stdin-derived token + context
+        // segments stay because they don't depend on the proxy.
+        .stdout(predicate::str::contains("DIRECT (unprotected)"))
+        .stdout(predicate::str::contains("sess").not())
         .stdout(predicate::str::contains("ctx [▓▓"))
         .stdout(predicate::str::contains("22%"));
 }

@@ -13,9 +13,12 @@ pub mod daemon;
 #[cfg(feature = "observe")]
 pub mod digest;
 pub mod disable_routing;
+pub mod doctor;
 pub mod enable_routing;
+pub mod explain;
 #[cfg(feature = "logscrape")]
 pub mod explore;
+pub mod export;
 pub mod guard;
 pub mod history;
 pub mod init;
@@ -25,6 +28,7 @@ pub mod mcp;
 pub mod mcp_watch;
 #[cfg(feature = "observe")]
 pub mod metrics;
+pub mod nudge;
 pub mod pause;
 pub mod pricing;
 pub mod recover;
@@ -89,6 +93,15 @@ pub enum Command {
     Init(init::InitArgs),
     /// Inspect security events (blocked attempts).
     Security(security::SecurityArgs),
+    /// Explain one recorded security block: which rule fired, on what (masked),
+    /// why, and how to proceed (from `burnwall security --json` ids).
+    Explain(explain::ExplainArgs),
+    /// Health check; with `--export`, write a redacted, metadata-only, self-
+    /// scanned diagnostic bundle that is safe to attach to a bug report.
+    Doctor(doctor::DoctorArgs),
+    /// Export your own cost/usage rows (CSV or JSON) for backup, a spreadsheet,
+    /// or a machine migration — your data, stays on your machine.
+    Export(export::ExportArgs),
     /// Scan agent config files on disk for committed credentials and hidden
     /// instructions (CI / pre-commit file mode — not live traffic).
     Scan(scan::ScanArgs),
@@ -176,6 +189,9 @@ impl Cli {
             Command::Config(args) => config_cmd::run_cmd(args),
             Command::Init(args) => init::run_cmd(args),
             Command::Security(args) => security::run_cmd(args),
+            Command::Explain(args) => explain::run_cmd(args),
+            Command::Doctor(args) => doctor::run_cmd(args).await,
+            Command::Export(args) => export::run_cmd(args),
             Command::Scan(args) => scan::run_cmd(args),
             Command::ReportBug(args) => report_bug::run_cmd(args),
             Command::Completions(args) => completions::run_cmd(args),

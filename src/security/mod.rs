@@ -17,6 +17,7 @@
 //! user's workflow is worse than missing one scan, and non-JSON bodies are
 //! typically non-chat endpoints (e.g. health checks).
 
+pub mod catalog;
 pub mod destructive;
 pub mod dlp;
 pub mod evasion;

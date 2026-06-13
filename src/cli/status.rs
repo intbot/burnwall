@@ -9,6 +9,7 @@ use anyhow::Context;
 use clap::Args;
 
 use crate::budget::BudgetTracker;
+use crate::cli::nudge::{self, NudgeState};
 use crate::config;
 #[cfg(feature = "logscrape")]
 use crate::logscrape::{self, ScrapeBreakdown};
@@ -37,7 +38,10 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
     let breakdown = storage.breakdown_for_date(&today)?;
     let total_requests = storage.request_count_for_date(&today)?;
     let blocked_count = storage.blocked_count_for_date(&today)?;
-    let security_events = storage.security_event_count_for_date(&today)?;
+    // Enforcement blocks vs advisory alerts — one conflated count rendered as
+    // "blocked" overstated interventions ~50× on an alert-heavy day.
+    let (security_blocked, security_alerts) =
+        partition_security_counts(&storage.security_event_type_counts_for_date(&today)?);
     let today_cost = storage.total_cost_for_date(&today)?;
     let pricing_age = pricing::pricing_age_days(now_local.date_naive());
     let projected_savings = storage.cache_projection_for_date(&today)?;
@@ -71,7 +75,8 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
             &breakdown,
             total_requests,
             blocked_count,
-            security_events,
+            security_blocked,
+            security_alerts,
             today_cost,
             &budget,
             cache_savings_total,
@@ -91,7 +96,8 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
             &breakdown,
             total_requests,
             blocked_count,
-            security_events,
+            security_blocked,
+            security_alerts,
             today_cost,
             &budget,
             cache_savings_total,
@@ -174,6 +180,73 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
         write_routing(&mut out, &sty)?;
 
         write_coverage(&mut out, &coverage, &sty)?;
+
+        // Contextual usage nudge (v0.11): at most one data-driven line, gated
+        // to once/day. Drawn from the user's own data; quiet when there's no
+        // real finding. Never on the glanceable status line.
+        let _ = maybe_emit_nudge(&mut out, &storage, budget.config().daily_usd, &today);
+    }
+    Ok(())
+}
+
+/// Append at most one data-driven nudge, once per local day. The gate + finding
+/// rotation live in the `meta` table (`nudge_last_date` / `nudge_last_kind`);
+/// the finding selection is the pure [`nudge::select`]. Best-effort: any
+/// storage hiccup just means no nudge this run.
+fn maybe_emit_nudge(
+    out: &mut impl Write,
+    storage: &Storage,
+    daily_budget_usd: f64,
+    today: &str,
+) -> std::io::Result<()> {
+    // Already nudged today → stay quiet.
+    if storage.meta_get("nudge_last_date").ok().flatten().as_deref() == Some(today) {
+        return Ok(());
+    }
+
+    const WINDOW_DAYS: i64 = 7;
+    let win = storage.breakdown_since_days(WINDOW_DAYS).unwrap_or_default();
+    let prompt_tokens: u64 = win
+        .iter()
+        .map(|b| b.input_tokens + b.cache_creation_tokens + b.cache_read_tokens)
+        .sum();
+    let cache_read: u64 = win.iter().map(|b| b.cache_read_tokens).sum();
+    let cache_hit_rate = if prompt_tokens == 0 {
+        0.0
+    } else {
+        cache_read as f64 / prompt_tokens as f64
+    };
+    // Same block/alert partition as the headline security line — the receipt
+    // must not claim alert rows as blocked requests.
+    let (blocked_window, alerts_window) = storage
+        .security_events_since_days(WINDOW_DAYS)
+        .map(|v| {
+            v.iter().fold((0i64, 0i64), |(b, a), e| {
+                if crate::security::catalog::is_advisory(&e.event_type) {
+                    (b, a + 1)
+                } else {
+                    (b + 1, a)
+                }
+            })
+        })
+        .unwrap_or((0, 0));
+    let state = NudgeState {
+        daily_budget_usd,
+        has_spend: win.iter().any(|b| b.cost > 0.0),
+        cache_hit_rate,
+        prompt_tokens,
+        security_blocked_window: blocked_window,
+        security_alerts_window: alerts_window,
+        window_days: WINDOW_DAYS,
+    };
+
+    let last_kind = storage.meta_get("nudge_last_kind").ok().flatten();
+    if let Some(n) = nudge::select(&state, last_kind.as_deref()) {
+        writeln!(out)?;
+        writeln!(out, "   👉 {}", n.message)?;
+        // Record so we don't repeat today, and so tomorrow rotates onward.
+        let _ = storage.meta_set("nudge_last_date", today);
+        let _ = storage.meta_set("nudge_last_kind", n.kind);
     }
     Ok(())
 }
@@ -323,7 +396,8 @@ fn write_table(
     breakdown: &[ModelBreakdown],
     total_requests: i64,
     blocked: i64,
-    security_events: i64,
+    security_blocked: i64,
+    security_alerts: i64,
     today_cost: f64,
     budget: &BudgetTracker,
     cache_savings: f64,
@@ -474,14 +548,16 @@ fn write_table(
             )?;
         }
     }
-    writeln!(
-        w,
-        "   🛡️  Security: {} blocked attempt{}",
-        security_events,
-        if security_events == 1 { "" } else { "s" }
-    )?;
-    if blocked > security_events {
-        writeln!(w, "   🚫 Blocked requests (any reason): {}", blocked)?;
+    writeln!(w, "   {}", security_line(security_blocked, security_alerts))?;
+    // `blocked` counts every stopped request regardless of reason (security,
+    // budget cap, loop detector). Surface it when it exceeds the security
+    // blocks — the difference is budget/loop interventions.
+    if blocked > security_blocked {
+        writeln!(
+            w,
+            "   🚫 Requests stopped (incl. budget/loop): {}",
+            blocked
+        )?;
     }
     writeln!(w)?;
     if cache_savings > 0.0 {
@@ -551,7 +627,8 @@ fn write_json(
     breakdown: &[ModelBreakdown],
     total_requests: i64,
     blocked: i64,
-    security_events: i64,
+    security_blocked: i64,
+    security_alerts: i64,
     today_cost: f64,
     budget: &BudgetTracker,
     cache_savings: f64,
@@ -655,7 +732,10 @@ fn write_json(
         "total_cost_usd": today_cost,
         "total_requests": total_requests,
         "blocked_requests": blocked,
-        "security_events": security_events,
+        // Total kept for compatibility; the split is what surfaces should use.
+        "security_events": security_blocked + security_alerts,
+        "security_blocked": security_blocked,
+        "security_alerts": security_alerts,
         "cache_savings_usd": cache_savings,
         "cost_without_cache_usd": cost_without_cache,
         "projected_cache_savings_usd": projected_savings,
@@ -765,6 +845,37 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
+/// Partition per-`event_type` counts into `(enforcement blocks, advisory
+/// alerts)` using the security catalog's classification.
+fn partition_security_counts(counts: &[(String, i64)]) -> (i64, i64) {
+    counts.iter().fold((0, 0), |(b, a), (et, n)| {
+        if crate::security::catalog::is_advisory(et) {
+            (b, a + n)
+        } else {
+            (b + n, a)
+        }
+    })
+}
+
+/// The one-line security summary, blocks and alerts named separately so an
+/// informational alert is never presented as a blocked request.
+fn security_line(blocked: i64, alerts: i64) -> String {
+    let s = |n: i64| if n == 1 { "" } else { "s" };
+    match (blocked, alerts) {
+        (0, 0) => "🛡️  Security: no events today".to_string(),
+        (b, 0) => format!("🛡️  Security: {b} request{} blocked", s(b)),
+        (0, a) => format!(
+            "🛡️  Security: {a} alert{} (nothing blocked) — `burnwall security --summary`",
+            s(a)
+        ),
+        (b, a) => format!(
+            "🛡️  Security: {b} request{} blocked · {a} alert{} — `burnwall security --summary`",
+            s(b),
+            s(a)
+        ),
+    }
+}
+
 /// Collect today's cross-tool log-scrape rows plus the 7-day avoidable-spend
 /// teaser. Returns `(None, 0.0)` when scraping is disabled; the waste teaser is
 /// additionally gated behind the `waste` feature (returns 0.0 when compiled out).
@@ -799,4 +910,48 @@ fn collect_logscrape_and_waste(
     };
 
     (Some(today_rows), per_day)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn counts(pairs: &[(&str, i64)]) -> Vec<(String, i64)> {
+        pairs.iter().map(|(t, n)| (t.to_string(), *n)).collect()
+    }
+
+    #[test]
+    fn partition_separates_blocks_from_alerts() {
+        // The user-reported day: 3 real blocks drowned in 153 drip alerts.
+        let (b, a) = partition_security_counts(&counts(&[
+            ("slow_drip_alert", 153),
+            ("path_blocked", 2),
+            ("secret_detected", 1),
+        ]));
+        assert_eq!((b, a), (3, 153));
+        // Unknown (pack-authored) types count as enforcement.
+        let (b, a) = partition_security_counts(&counts(&[("pack_rule_x", 2)]));
+        assert_eq!((b, a), (2, 0));
+        assert_eq!(partition_security_counts(&[]), (0, 0));
+    }
+
+    #[test]
+    fn security_line_never_calls_an_alert_a_block() {
+        assert_eq!(security_line(0, 0), "🛡️  Security: no events today");
+        assert_eq!(security_line(1, 0), "🛡️  Security: 1 request blocked");
+        assert_eq!(security_line(3, 0), "🛡️  Security: 3 requests blocked");
+        let alerts_only = security_line(0, 153);
+        assert!(alerts_only.contains("153 alerts"), "got: {alerts_only}");
+        assert!(
+            alerts_only.contains("nothing blocked"),
+            "alert-only day must say so explicitly: {alerts_only}"
+        );
+        let mixed = security_line(3, 153);
+        assert!(mixed.contains("3 requests blocked"), "got: {mixed}");
+        assert!(mixed.contains("153 alerts"), "got: {mixed}");
+        assert!(
+            !mixed.contains("156"),
+            "the conflated total must never render: {mixed}"
+        );
+    }
 }
