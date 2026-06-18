@@ -2,7 +2,7 @@
 
 All notable changes to Burnwall.
 
-## [0.11.0] — 2026-06-17
+## [0.11.0] — 2026-06-18
 
 A dashboard-polish release: clearer, more glanceable surfaces, plus two new
 cost views and a security hardening — all built on data Burnwall already
@@ -37,6 +37,15 @@ captures on the wire. Still zero telemetry, still a single local binary.
   migrated in place: an already-approved tool is re-pinned to the new format
   silently and is **not** re-prompted by the format change alone — only a genuine
   change to the tool still resets approval.
+
+### Fixed
+
+- **Fewer false blocks on compound shell commands.** The catastrophic-delete
+  guard now judges each command in a compound line (split on `;`, `&&`, `|`, and
+  newlines) on its own, so a command substitution or a bare path belonging to a
+  *different* command can no longer combine with an unrelated, scoped `rm` and
+  trip a false block. Genuine recursive force-deletes still trip — including when
+  they follow a benign command on the same line.
 
 ## [0.10.0] — 2026-06-12
 
