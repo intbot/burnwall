@@ -39,8 +39,8 @@ impl Storage {
                     timestamp, provider, model,
                     input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
                     cost_usd, blocked, block_reason, session_id, request_hash,
-                    latency_ms, http_status
-                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                    latency_ms, http_status, tags
+                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
                 params![
                     r.timestamp,
                     r.provider,
@@ -56,6 +56,7 @@ impl Storage {
                     r.request_hash,
                     r.latency_ms,
                     r.http_status,
+                    r.tags,
                 ],
             )?;
             Ok(conn.last_insert_rowid())
@@ -105,6 +106,21 @@ impl Storage {
                         "UPDATE mcp_tools SET last_seen = datetime('now')
                          WHERE server = ?1 AND tool_name = ?2",
                         params![server, tool_name],
+                    )?;
+                    Ok(McpToolObservation::Unchanged)
+                }
+                Some(prev) if prev.len() == 16 && fingerprint.len() == 64 => {
+                    // Fingerprint *format* upgrade across a binary version —
+                    // legacy FNV-1a (16-hex) → SHA-256 (64-hex), not a tool
+                    // change. Silently re-pin to the new format WITHOUT touching
+                    // `trust_state`: a format migration must never look like a
+                    // rug pull or re-pend an already-approved tool. Real
+                    // SHA-256 content changes are 64→64 and fall through to the
+                    // `Changed` arm below.
+                    conn.execute(
+                        "UPDATE mcp_tools SET fingerprint = ?1, last_seen = datetime('now')
+                         WHERE server = ?2 AND tool_name = ?3",
+                        params![fingerprint, server, tool_name],
                     )?;
                     Ok(McpToolObservation::Unchanged)
                 }
@@ -259,7 +275,7 @@ impl Storage {
                     "SELECT id, timestamp, provider, model,
                             input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
                             cost_usd, blocked, block_reason, session_id, request_hash,
-                            latency_ms, http_status
+                            latency_ms, http_status, tags
                      FROM requests WHERE id = ?1",
                     params![id],
                     row_to_request,
@@ -309,7 +325,7 @@ impl Storage {
                     "SELECT id, timestamp, provider, model,
                             input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
                             cost_usd, blocked, block_reason, session_id, request_hash,
-                            latency_ms, http_status
+                            latency_ms, http_status, tags
                      FROM requests WHERE blocked = 0
                      ORDER BY timestamp DESC LIMIT 1",
                     [],
@@ -369,7 +385,7 @@ impl Storage {
                 "SELECT id, timestamp, provider, model,
                         input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
                         cost_usd, blocked, block_reason, session_id, request_hash,
-                        latency_ms, http_status
+                        latency_ms, http_status, tags
                  FROM requests
                  WHERE DATE(timestamp, 'localtime') = ?1
                  ORDER BY timestamp ASC",
@@ -488,6 +504,28 @@ impl Storage {
             )?;
             let rows: rusqlite::Result<Vec<ModelBreakdown>> = stmt
                 .query_map(params![offset], row_to_model_breakdown)?
+                .collect();
+            Ok(rows?)
+        })
+    }
+
+    /// Per-request `(tags_json, cost_usd)` for forwarded rows that carry
+    /// attribution tags, over the last `days` local days. Drives the
+    /// `burnwall tags` report, which parses each JSON object and rolls spend up
+    /// by key/value in Rust (so we don't depend on SQLite's JSON1 extension).
+    /// Blocked rows are excluded — they cost nothing.
+    pub fn tag_rows_since_days(&self, days: i64) -> Result<Vec<(String, f64)>> {
+        self.with_conn(|conn| {
+            let offset = format!("-{} days", days - 1);
+            let mut stmt = conn.prepare(
+                "SELECT tags, COALESCE(cost_usd, 0.0)
+                 FROM requests
+                 WHERE DATE(timestamp, 'localtime') >= DATE('now', 'localtime', ?1)
+                   AND blocked = 0
+                   AND tags IS NOT NULL AND tags <> ''",
+            )?;
+            let rows: rusqlite::Result<Vec<(String, f64)>> = stmt
+                .query_map(params![offset], |row| Ok((row.get(0)?, row.get(1)?)))?
                 .collect();
             Ok(rows?)
         })
@@ -726,7 +764,7 @@ impl Storage {
                 "SELECT id, timestamp, provider, model,
                         input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
                         cost_usd, blocked, block_reason, session_id, request_hash,
-                        latency_ms, http_status
+                        latency_ms, http_status, tags
                  FROM requests
                  WHERE id NOT IN (SELECT source_id FROM audit_receipts WHERE source = 'request')
                  ORDER BY id ASC",
@@ -912,6 +950,7 @@ fn row_to_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<RequestRecord> {
         request_hash: row.get(12)?,
         latency_ms: row.get(13)?,
         http_status: row.get(14)?,
+        tags: row.get(15)?,
     })
 }
 

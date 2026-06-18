@@ -43,6 +43,22 @@ fn fingerprint_is_stable_and_change_sensitive() {
 }
 
 #[test]
+fn fingerprint_is_sha256_hex() {
+    // The fingerprint is SHA-256 (64 lowercase hex chars), not the legacy
+    // 16-hex FNV-1a — the length is what the storage migration keys on.
+    let body = tools_list(r#"[{"name":"t","description":"d","inputSchema":{"type":"object"}}]"#);
+    let tool = &parse_tools_list(body.as_bytes())[0];
+    assert_eq!(tool.fingerprint.len(), 64, "SHA-256 hex is 64 chars");
+    assert!(
+        tool.fingerprint.chars().all(|c| c.is_ascii_hexdigit()),
+        "fingerprint must be hex: {}",
+        tool.fingerprint
+    );
+    // The schema-only fingerprint is independently SHA-256 too.
+    assert_eq!(tool.schema_fingerprint.len(), 64);
+}
+
+#[test]
 fn parses_sse_framed_response() {
     // MCP streamable HTTP can wrap the JSON-RPC reply in SSE `data:` framing.
     let inner = tools_list(r#"[{"name":"ok","description":"fine"}]"#);

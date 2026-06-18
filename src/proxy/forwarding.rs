@@ -91,6 +91,9 @@ pub async fn forward(
 ) -> Result<Response<ProxyBody>, BoxError> {
     // Opt-in session/swarm id for per-session attribution + budget recording.
     let session_id = super::handler::session_from_headers(&req_headers);
+    // Opt-in attribution tags (feature / agent-run / client / prompt-version),
+    // recorded on the forwarded row for `burnwall tags`. Metadata only.
+    let tags = super::handler::tags_from_headers(&req_headers);
 
     let outbound_headers = tracked_outbound_headers(&req_headers);
 
@@ -190,6 +193,7 @@ pub async fn forward(
     let provider_str = provider.to_string();
     let hash_hex = request_hash_hex;
     let session_for_tee = session_id.clone();
+    let tags_for_tee = tags.clone();
     let warn_exfil = state.warn_response_exfil;
 
     let teed = streaming::tee_stream(upstream_resp.bytes_stream(), move |chunks, aborted| {
@@ -268,7 +272,8 @@ pub async fn forward(
                     &p.usage,
                     cost,
                     session_for_tee.clone(),
-                );
+                )
+                .with_tags(tags_for_tee.clone());
                 record.request_hash = Some(hash_hex.clone());
                 record.latency_ms = Some(latency_ms);
                 // 499 (client closed request) marks a partial response the user

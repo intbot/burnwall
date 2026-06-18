@@ -2,6 +2,42 @@
 
 All notable changes to Burnwall.
 
+## [0.11.0] — 2026-06-17
+
+A dashboard-polish release: clearer, more glanceable surfaces, plus two new
+cost views and a security hardening — all built on data Burnwall already
+captures on the wire. Still zero telemetry, still a single local binary.
+
+### Added
+
+**Cost**
+- **`burnwall accuracy`** — contrast your real on-the-wire, cache-aware cost with
+  a naive token tally (every prompt token charged at the base input rate, the
+  shortcut a log-only estimator takes when it ignores cache reads). For
+  cache-heavy coding sessions the naive tally can overstate the bill by a wide
+  margin; this shows by how much, per model.
+- **`burnwall tags`** — attribute spend by your own labels. Set the opt-in
+  `x-burnwall-tags` header (e.g. `feature=auth,agent-run=run42,client=acme`) and
+  Burnwall rolls spend up by key → value, locally, with cost and request counts.
+
+**Surfaces**
+- **Delta-vs-previous chips** on the stat cards: `burnwall status` compares to
+  yesterday, `burnwall history` to the prior window, coloured by whether the move
+  is good or bad (spend up = caution, cache up = good).
+- **Share-of-spend bars** in the cost-by-model tables, so the dominant model is
+  obvious at a glance.
+- **Daily-spend sparkline** in `burnwall history`, and a 7-day spend trend on
+  `burnwall status`.
+- **VS Code panel:** a spend-trend chart, delta chips, and share bars — rendered
+  with a baked, script-free SVG so it works under the panel's locked-down webview
+  and adapts to your editor theme.
+
+**Security**
+- **MCP tool fingerprints now use SHA-256** (collision-resistant). The upgrade is
+  migrated in place: an already-approved tool is re-pinned to the new format
+  silently and is **not** re-prompted by the format change alone — only a genuine
+  change to the tool still resets approval.
+
 ## [0.10.0] — 2026-06-12
 
 A large release: a wave of security, cost, and compliance features, plus an

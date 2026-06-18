@@ -28,6 +28,10 @@ pub struct RequestRecord {
     pub block_reason: Option<String>,
     /// Optional client-supplied session identifier (forwarded request header).
     pub session_id: Option<String>,
+    /// Optional attribution tags as a compact JSON object — user-set labels
+    /// (feature / agent-run / client / prompt-version / …) from the
+    /// `x-burnwall-tags` request header. Metadata only; never prompt content.
+    pub tags: Option<String>,
     /// Optional content hash for loop detection (v0.2). Always `None` in v0.1.
     pub request_hash: Option<String>,
     /// Upstream round-trip latency in ms (v0.7). `None` for blocked rows
@@ -59,10 +63,19 @@ impl RequestRecord {
             blocked: false,
             block_reason: None,
             session_id,
+            tags: None,
             request_hash: None,
             latency_ms: None,
             http_status: None,
         }
+    }
+
+    /// Attach attribution tags (a compact JSON object from `x-burnwall-tags`).
+    /// No-op when `None`. Builder so the many existing constructor call sites
+    /// stay unchanged.
+    pub fn with_tags(mut self, tags: Option<String>) -> Self {
+        self.tags = tags;
+        self
     }
 
     /// Build a record for a request that was blocked before forwarding.
@@ -81,6 +94,7 @@ impl RequestRecord {
             blocked: true,
             block_reason: Some(reason.to_string()),
             session_id,
+            tags: None,
             request_hash: None,
             latency_ms: None,
             http_status: None,

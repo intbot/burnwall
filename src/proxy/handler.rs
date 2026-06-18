@@ -987,6 +987,60 @@ pub fn session_from_headers(headers: &hyper::HeaderMap) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// At most this many distinct tag keys are recorded; extra pairs are dropped.
+const MAX_TAGS: usize = 6;
+/// Per key/value character cap, so a hostile header can't bloat a row.
+const MAX_TAG_LEN: usize = 64;
+
+/// Parse and normalise the optional `x-burnwall-tags` header into a compact
+/// JSON object for cost attribution: `feature=auth,agent-run=run42,client=acme`
+/// → `{"feature":"auth","agent-run":"run42","client":"acme"}`.
+///
+/// These are **user-set labels only** — never prompt content — so recording
+/// them carries no secret/PII risk. Strictly bounded (≤ [`MAX_TAGS`] pairs,
+/// keys/values truncated to [`MAX_TAG_LEN`], keys limited to `[a-z0-9_.-]`) and
+/// fail-open: a malformed pair is skipped, an absent/empty/all-invalid header
+/// yields `None` — it never errors and never blocks a request.
+pub fn tags_from_headers(headers: &hyper::HeaderMap) -> Option<String> {
+    let raw = headers.get("x-burnwall-tags").and_then(|v| v.to_str().ok())?;
+    let mut map = serde_json::Map::new();
+    for pair in raw.split(',') {
+        if map.len() >= MAX_TAGS {
+            break;
+        }
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
+        let key = normalize_tag_key(k);
+        let val = truncate_chars(v.trim(), MAX_TAG_LEN);
+        if key.is_empty() || val.is_empty() {
+            continue;
+        }
+        map.entry(key)
+            .or_insert_with(|| serde_json::Value::String(val));
+    }
+    if map.is_empty() {
+        return None;
+    }
+    serde_json::to_string(&serde_json::Value::Object(map)).ok()
+}
+
+/// Normalise a tag key: lowercased, only `[a-z0-9_.-]` kept, capped length.
+fn normalize_tag_key(k: &str) -> String {
+    let cleaned: String = k
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        .collect();
+    truncate_chars(&cleaned, MAX_TAG_LEN)
+}
+
+/// Truncate to at most `max` characters (char-boundary safe).
+fn truncate_chars(s: &str, max: usize) -> String {
+    s.chars().take(max).collect()
+}
+
 fn bypass_active() -> bool {
     match std::env::var("BURNWALL_BYPASS") {
         Ok(v) => matches!(
@@ -1069,5 +1123,54 @@ async fn passthrough(req: Request<Incoming>, state: &Arc<AppState>) -> Response<
                 &format!("Upstream unreachable: {}", e),
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tag_header_tests {
+    use super::*;
+
+    fn headers(pairs: &[(&str, &str)]) -> hyper::HeaderMap {
+        let mut h = hyper::HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                hyper::header::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                hyper::header::HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        h
+    }
+
+    #[test]
+    fn tags_parse_normalises_into_json_object() {
+        let h = headers(&[("x-burnwall-tags", "feature=auth, Client=Acme , agent-run=run42")]);
+        let json = tags_from_headers(&h).expect("tags");
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["feature"], "auth");
+        // Key is lowercased/cleaned; the value is preserved verbatim.
+        assert_eq!(v["client"], "Acme");
+        assert_eq!(v["agent-run"], "run42");
+    }
+
+    #[test]
+    fn tags_absent_or_malformed_yield_none() {
+        assert!(tags_from_headers(&headers(&[])).is_none());
+        // No "k=v" pairs at all -> None (fail-open, never errors).
+        assert!(tags_from_headers(&headers(&[("x-burnwall-tags", "justwords,more")])).is_none());
+        assert!(tags_from_headers(&headers(&[("x-burnwall-tags", "")])).is_none());
+    }
+
+    #[test]
+    fn tags_are_bounded() {
+        // More than MAX_TAGS keys -> capped; over-long values truncated.
+        let many = (0..20).map(|i| format!("k{i}=v{i}")).collect::<Vec<_>>().join(",");
+        let json = tags_from_headers(&headers(&[("x-burnwall-tags", &many)])).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v.as_object().unwrap().len(), MAX_TAGS);
+
+        let long = format!("feature={}", "x".repeat(200));
+        let json = tags_from_headers(&headers(&[("x-burnwall-tags", &long)])).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["feature"].as_str().unwrap().chars().count(), MAX_TAG_LEN);
     }
 }

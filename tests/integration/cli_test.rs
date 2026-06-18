@@ -112,6 +112,235 @@ fn history_table_includes_seeded_day() {
         .stdout(predicate::str::contains("Projected EOM"));
 }
 
+/// Seed several local days of activity so the delta chips (today vs yesterday,
+/// window vs prior window) and the spend sparkline have data to render.
+fn seed_multiday(dir: &PathBuf) {
+    fs::create_dir_all(dir).unwrap();
+    let path = dir.join("burnwall.db");
+    let storage = Storage::open(&path).expect("open");
+    // Distinct per-day cost so the sparkline has shape and the deltas are
+    // non-flat. Day 0 = today, increasing days = further back.
+    let daily_cost = [0.80f64, 0.20, 0.55, 0.05, 0.40, 0.10, 0.30];
+    for (days_ago, cost) in daily_cost.iter().enumerate() {
+        let usage = TokenUsage {
+            input_tokens: 1000,
+            output_tokens: 400,
+            cache_creation_tokens: 0,
+            // Some cache reads on recent days so the cache-hit delta moves.
+            cache_read_tokens: if days_ago < 3 { 4000 } else { 0 },
+        };
+        let mut r =
+            RequestRecord::successful("anthropic", "claude-sonnet-4-6", &usage, *cost, None);
+        r.timestamp = Utc::now() - chrono::Duration::days(days_ago as i64);
+        storage.insert_request(&r).unwrap();
+    }
+    // A second model today so the share-of-spend bars have >1 row.
+    let usage = TokenUsage {
+        input_tokens: 800,
+        output_tokens: 300,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+    };
+    let mut r2 = RequestRecord::successful("openai", "gpt-4o", &usage, 0.15, None);
+    r2.timestamp = Utc::now();
+    storage.insert_request(&r2).unwrap();
+    // A block today and a block yesterday → a non-flat Blocked delta.
+    for days_ago in [0i64, 1] {
+        let mut evt = SecurityEvent::new("path_blocked", "~/.ssh/id_rsa")
+            .with_provider("anthropic", "claude-sonnet-4-6");
+        evt.timestamp = Utc::now() - chrono::Duration::days(days_ago);
+        storage.insert_security_event(&evt).unwrap();
+    }
+}
+
+#[test]
+fn status_shows_share_bars_and_spend_sparkline() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    seed_multiday(&path);
+
+    let out = burnwall(&path).arg("status").output().expect("run");
+    assert!(out.status.success());
+    let s = String::from_utf8(out.stdout).unwrap();
+    // Share-of-spend column + a filled bar cell in the Cost-by-model table.
+    assert!(s.contains("Share"), "missing Share column:\n{s}");
+    assert!(s.contains('▓'), "missing share fill bar:\n{s}");
+    // 7-day spend trend sparkline (any block glyph).
+    assert!(s.contains("7-day spend"), "missing sparkline label:\n{s}");
+    assert!(
+        s.chars().any(|c| "▁▂▃▄▅▆▇█".contains(c)),
+        "missing sparkline glyphs:\n{s}"
+    );
+}
+
+#[test]
+fn status_shows_delta_chip_vs_yesterday() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    seed_multiday(&path);
+
+    let out = burnwall(&path).arg("status").output().expect("run");
+    assert!(out.status.success());
+    let s = String::from_utf8(out.stdout).unwrap();
+    // Today ($0.95) vs yesterday ($0.20) — spend is up, so an up chip renders.
+    assert!(
+        s.contains('▲') || s.contains('▼'),
+        "expected a delta chip vs yesterday:\n{s}"
+    );
+}
+
+#[test]
+fn status_json_includes_spend_series_and_previous_day() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    seed_multiday(&path);
+
+    let out = burnwall(&path)
+        .args(["status", "--json"])
+        .output()
+        .expect("run");
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let series = v["spend_series"].as_array().expect("spend_series array");
+    assert_eq!(series.len(), 7, "expected a dense 7-day series");
+    assert!(v["previous_day"]["cost_usd"].as_f64().unwrap() > 0.0);
+}
+
+#[test]
+fn history_shows_sparkline_and_delta_chips() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    seed_multiday(&path);
+
+    let out = burnwall(&path)
+        .args(["history", "--days", "5"])
+        .output()
+        .expect("run");
+    assert!(out.status.success());
+    let s = String::from_utf8(out.stdout).unwrap();
+    assert!(s.contains("Daily spend"), "missing sparkline label:\n{s}");
+    assert!(
+        s.chars().any(|c| "▁▂▃▄▅▆▇█".contains(c)),
+        "missing sparkline glyphs:\n{s}"
+    );
+    // Window vs prior window → at least one delta chip.
+    assert!(
+        s.contains('▲') || s.contains('▼'),
+        "expected a window delta chip:\n{s}"
+    );
+}
+
+#[test]
+fn accuracy_shows_overstatement_for_cache_heavy_spend() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    let storage = Storage::open(path.join("burnwall.db")).unwrap();
+    // A cache-heavy request, stored at its REAL cache-aware cost — so the naive
+    // sticker-rate tally must over-state it.
+    let usage = TokenUsage {
+        input_tokens: 2000,
+        output_tokens: 3000,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 120_000,
+    };
+    let model = "claude-sonnet-4-6";
+    let cost = burnwall::pricing::calculate_cost(model, &usage).unwrap();
+    let mut r = RequestRecord::successful("anthropic", model, &usage, cost, None);
+    r.timestamp = Utc::now();
+    storage.insert_request(&r).unwrap();
+
+    // Table view.
+    burnwall(&path)
+        .arg("accuracy")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Cost accuracy"))
+        .stdout(predicate::str::contains("On-wire"))
+        .stdout(predicate::str::contains("Naive tally"));
+
+    // JSON view: naive must exceed on-wire for a cache-heavy workload.
+    let out = burnwall(&path)
+        .args(["accuracy", "--json"])
+        .output()
+        .expect("run");
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let wire = v["on_wire_usd"].as_f64().unwrap();
+    let naive = v["naive_tally_usd"].as_f64().unwrap();
+    assert!(naive > wire, "naive {naive} should exceed on-wire {wire}");
+    assert!(v["overstated_usd"].as_f64().unwrap() > 0.0);
+}
+
+#[test]
+fn tags_reports_spend_by_attribution_label() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    let storage = Storage::open(path.join("burnwall.db")).unwrap();
+    let usage = TokenUsage {
+        input_tokens: 1000,
+        output_tokens: 500,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+    };
+    for (client, cost) in [("acme", 0.40), ("acme", 0.20), ("globex", 0.10)] {
+        let mut r = RequestRecord::successful("anthropic", "claude-sonnet-4-6", &usage, cost, None)
+            .with_tags(Some(format!(r#"{{"client":"{client}","feature":"auth"}}"#)));
+        r.timestamp = Utc::now();
+        storage.insert_request(&r).unwrap();
+    }
+
+    // Table view groups by key and lists values.
+    burnwall(&path)
+        .arg("tags")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Attribution tags"))
+        .stdout(predicate::str::contains("By client"))
+        .stdout(predicate::str::contains("acme"))
+        .stdout(predicate::str::contains("globex"));
+
+    // JSON view: client=acme rolls up to 0.60 across two requests.
+    let out = burnwall(&path)
+        .args(["tags", "--key", "client", "--json"])
+        .output()
+        .expect("run");
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let client = v["by_key"]["client"].as_array().unwrap();
+    let acme = client.iter().find(|e| e["value"] == "acme").unwrap();
+    assert!((acme["cost_usd"].as_f64().unwrap() - 0.60).abs() < 1e-9);
+    assert_eq!(acme["requests"].as_i64().unwrap(), 2);
+    // Filtering by key excludes the other key entirely.
+    assert!(v["by_key"].get("feature").is_none());
+}
+
+#[test]
+fn tags_empty_db_explains_the_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    burnwall(&path)
+        .arg("tags")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no tagged requests"))
+        .stdout(predicate::str::contains("x-burnwall-tags"));
+}
+
+#[test]
+fn accuracy_empty_db_does_not_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    burnwall(&path)
+        .arg("accuracy")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no proxied spend"));
+}
+
 #[test]
 fn history_json_emits_array_of_rows() {
     let dir = tempfile::tempdir().unwrap();

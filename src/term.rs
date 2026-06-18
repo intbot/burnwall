@@ -146,6 +146,10 @@ pub struct Card {
     pub value_color: Option<Color>,
     /// Colour for the sub-line (e.g. a bar).
     pub sub_color: Option<Color>,
+    /// Optional delta-vs-previous chip, rendered on its own row between the
+    /// value and the sub-line. When *any* card in a row carries one, every card
+    /// renders the delta row (blank where absent) so the tiles stay aligned.
+    pub delta: Option<Delta>,
 }
 
 impl Card {
@@ -156,6 +160,7 @@ impl Card {
             sub: sub.to_string(),
             value_color: None,
             sub_color: None,
+            delta: None,
         }
     }
 
@@ -170,6 +175,12 @@ impl Card {
         self.sub_color = Some(c);
         self
     }
+
+    /// Builder: attach a delta-vs-previous chip (no-op when `None`).
+    pub fn with_delta(mut self, d: Option<Delta>) -> Self {
+        self.delta = d;
+        self
+    }
 }
 
 /// Render a horizontal row of stat cards as a four-line block (top border
@@ -178,8 +189,12 @@ impl Card {
 /// left-to-right separated by a single space.
 pub fn render_cards(cards: &[Card], inner: usize, indent: usize, sty: &Styler) -> String {
     let pad = " ".repeat(indent);
+    // If any card has a delta chip, every card reserves the row so the borders
+    // stay aligned — a half-height tile would shear the block.
+    let any_delta = cards.iter().any(|c| c.delta.is_some());
     let mut tops = Vec::with_capacity(cards.len());
     let mut vals = Vec::with_capacity(cards.len());
+    let mut deltas = Vec::with_capacity(cards.len());
     let mut subs = Vec::with_capacity(cards.len());
     let mut bots = Vec::with_capacity(cards.len());
     for c in cards {
@@ -190,15 +205,21 @@ pub fn render_cards(cards: &[Card], inner: usize, indent: usize, sty: &Styler) -
         bots.push(format!("└{}┘", "─".repeat(inner)));
         vals.push(card_cell(&c.value, inner, c.value_color, sty));
         subs.push(card_cell(&c.sub, inner, c.sub_color, sty));
+        if any_delta {
+            match &c.delta {
+                Some(d) => deltas.push(card_cell(&d.text, inner, Some(d.color), sty)),
+                None => deltas.push(card_cell("", inner, None, sty)),
+            }
+        }
     }
     let join = |segs: &[String]| format!("{pad}{}", segs.join(" "));
-    format!(
-        "{}\n{}\n{}\n{}",
-        join(&tops),
-        join(&vals),
-        join(&subs),
-        join(&bots)
-    )
+    let mut rows = vec![join(&tops), join(&vals)];
+    if any_delta {
+        rows.push(join(&deltas));
+    }
+    rows.push(join(&subs));
+    rows.push(join(&bots));
+    rows.join("\n")
 }
 
 /// One `│ centred-text │` interior cell: the (truncated) text centred in
@@ -234,6 +255,113 @@ pub fn gauge_hue(pct: f64) -> Color {
     } else {
         Color::Red
     }
+}
+
+// ──────────────────────── deltas & sparklines ────────────────────────
+//
+// Glanceable "how does this compare?" primitives borrowed from modern cost
+// dashboards: a delta chip (`▲12%` / `▼5`) coloured by whether the move is
+// good or bad, and a block-character sparkline of a daily series. Both are
+// pure and width-stable (one column per glyph) so they slot into the cards and
+// tables without breaking alignment.
+
+/// Whether an increase in a metric reads as good or bad — drives chip colour.
+#[derive(Clone, Copy)]
+pub enum Trend {
+    /// Higher is better (cache-hit rate): ▲ green, ▼ red.
+    HigherBetter,
+    /// Higher is worse (spend, blocked counts): ▲ caution, ▼ green.
+    HigherWorse,
+}
+
+/// A formatted delta chip: the glyph + magnitude text and its semantic colour.
+/// Paint at the call site with `sty.paint(&d.text, d.color)`.
+pub struct Delta {
+    pub text: String,
+    pub color: Color,
+}
+
+/// Percent change from `prev` to `curr`. `None` when `prev` is zero or not
+/// finite — there's no baseline to compare against, and we never render an
+/// "∞%" chip from a divide-by-zero.
+pub fn delta_pct(curr: f64, prev: f64) -> Option<f64> {
+    if !prev.is_finite() || prev.abs() < f64::EPSILON {
+        return None;
+    }
+    Some((curr - prev) / prev * 100.0)
+}
+
+/// Colour for a delta given its sign and the metric's [`Trend`]. A `flat`
+/// (rounds-to-zero) move is muted blue.
+fn delta_color(positive: bool, flat: bool, trend: Trend) -> Color {
+    if flat {
+        return Color::Blue;
+    }
+    match (positive, trend) {
+        (true, Trend::HigherBetter) | (false, Trend::HigherWorse) => Color::Green,
+        (true, Trend::HigherWorse) => Color::Orange,
+        (false, Trend::HigherBetter) => Color::Red,
+    }
+}
+
+/// Build a percent-change chip (`▲ 12%`, `▼ 7%`, or `→ 0%`) comparing `curr`
+/// to `prev`, coloured by `trend`. `None` when there is no baseline
+/// (`prev == 0`), so a card can fall back to its normal sub-line rather than
+/// show a bogus chip.
+pub fn delta_chip_pct(curr: f64, prev: f64, trend: Trend) -> Option<Delta> {
+    let rounded = delta_pct(curr, prev)?.round();
+    let flat = rounded.abs() < 1.0;
+    let text = if flat {
+        "→ 0%".to_string()
+    } else if rounded > 0.0 {
+        format!("▲ {}%", rounded as i64)
+    } else {
+        format!("▼ {}%", (-rounded) as i64)
+    };
+    Some(Delta {
+        text,
+        color: delta_color(rounded > 0.0, flat, trend),
+    })
+}
+
+/// Build an absolute-count chip (`▲3`, `▼5`) comparing `curr` to `prev`,
+/// coloured by `trend`. `None` when the counts are equal — a flat count chip
+/// is just noise on a card.
+pub fn delta_chip_count(curr: i64, prev: i64, trend: Trend) -> Option<Delta> {
+    if curr == prev {
+        return None;
+    }
+    let diff = curr - prev;
+    let glyph = if diff > 0 { '▲' } else { '▼' };
+    Some(Delta {
+        text: format!("{glyph} {}", diff.abs()),
+        color: delta_color(diff > 0, false, trend),
+    })
+}
+
+/// A block-character sparkline (`▁▂▃▄▅▆▇█`, one cell per value) of `values`,
+/// scaled to the series' own min..max. An empty series yields an empty string;
+/// a flat series renders a mid bar (or the floor when every value is zero).
+pub fn sparkline(values: &[f64]) -> String {
+    const LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    if values.is_empty() {
+        return String::new();
+    }
+    let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
+    let range = max - min;
+    if range <= f64::EPSILON {
+        let c = if max > 0.0 { LEVELS[LEVELS.len() / 2] } else { LEVELS[0] };
+        return std::iter::repeat_n(c, values.len()).collect();
+    }
+    values
+        .iter()
+        .map(|&v| {
+            let frac = ((v - min) / range).clamp(0.0, 1.0);
+            let idx = (frac * (LEVELS.len() - 1) as f64).round() as usize;
+            LEVELS[idx.min(LEVELS.len() - 1)]
+        })
+        .collect()
 }
 
 /// Truncate `s` to at most `max` display columns, marking the cut with `…`.
@@ -310,9 +438,89 @@ mod tests {
     }
 
     #[test]
+    fn delta_row_appears_when_any_card_has_one_and_stays_aligned() {
+        let sty = Styler::with_enabled(false);
+        let cards = [
+            Card::new("Spend", "$4.20", "37 req")
+                .with_delta(delta_chip_pct(4.2, 3.0, Trend::HigherWorse)),
+            // A card with no delta still reserves the row (blank), keeping height.
+            Card::new("Cache", "88%", &fill_bar(88.0, 8)),
+        ];
+        let block = render_cards(&cards, 11, 2, &sty);
+        // top, value, DELTA, sub, bottom = 5 lines.
+        assert_eq!(block.lines().count(), 5);
+        let widths: Vec<usize> = block.lines().map(|l| l.chars().count()).collect();
+        assert!(
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "delta block must stay aligned: {widths:?}\n{block}"
+        );
+        // The chip text is present.
+        assert!(block.contains('▲'), "{block}");
+    }
+
+    #[test]
     fn cards_colour_only_wraps_when_enabled() {
         let card = [Card::new("Cache", "88%", "hit").with_value_color(Color::Green)];
         assert!(!render_cards(&card, 9, 0, &Styler::with_enabled(false)).contains("\x1b["));
         assert!(render_cards(&card, 9, 0, &Styler::with_enabled(true)).contains("\x1b["));
+    }
+
+    #[test]
+    fn delta_pct_has_no_baseline_at_zero() {
+        assert_eq!(delta_pct(5.0, 0.0), None);
+        assert_eq!(delta_pct(5.0, f64::NAN), None);
+        assert_eq!(delta_pct(150.0, 100.0), Some(50.0));
+        assert_eq!(delta_pct(50.0, 100.0), Some(-50.0));
+    }
+
+    #[test]
+    fn delta_chip_pct_arrow_and_polarity() {
+        // Spend up 12% → caution (higher is worse).
+        let up = delta_chip_pct(11.2, 10.0, Trend::HigherWorse).unwrap();
+        assert_eq!(up.text, "▲ 12%");
+        assert!(matches!(up.color, Color::Orange));
+        // Cache up → good (higher is better).
+        let cache_up = delta_chip_pct(95.0, 90.0, Trend::HigherBetter).unwrap();
+        assert!(cache_up.text.starts_with('▲'));
+        assert!(matches!(cache_up.color, Color::Green));
+        // Spend down → good.
+        let down = delta_chip_pct(8.0, 10.0, Trend::HigherWorse).unwrap();
+        assert_eq!(down.text, "▼ 20%");
+        assert!(matches!(down.color, Color::Green));
+        // Sub-1% move → flat, muted, no false arrow.
+        let flat = delta_chip_pct(100.4, 100.0, Trend::HigherWorse).unwrap();
+        assert_eq!(flat.text, "→ 0%");
+        assert!(matches!(flat.color, Color::Blue));
+        // No baseline → no chip.
+        assert!(delta_chip_pct(5.0, 0.0, Trend::HigherWorse).is_none());
+    }
+
+    #[test]
+    fn delta_chip_count_absolute_and_polarity() {
+        // 5 fewer blocks than yesterday → good (down on a higher-worse metric).
+        let fewer = delta_chip_count(0, 5, Trend::HigherWorse).unwrap();
+        assert_eq!(fewer.text, "▼ 5");
+        assert!(matches!(fewer.color, Color::Green));
+        // 3 more → caution.
+        let more = delta_chip_count(3, 0, Trend::HigherWorse).unwrap();
+        assert_eq!(more.text, "▲ 3");
+        assert!(matches!(more.color, Color::Orange));
+        // Equal → no chip.
+        assert!(delta_chip_count(2, 2, Trend::HigherWorse).is_none());
+    }
+
+    #[test]
+    fn sparkline_shapes_the_series() {
+        assert_eq!(sparkline(&[]), "");
+        // One cell per value.
+        assert_eq!(sparkline(&[1.0, 2.0, 3.0]).chars().count(), 3);
+        // Min maps to the floor, max to the ceiling.
+        let s = sparkline(&[0.0, 5.0, 10.0]);
+        let chars: Vec<char> = s.chars().collect();
+        assert_eq!(chars[0], '▁');
+        assert_eq!(chars[2], '█');
+        // All-zero → all floor; flat-nonzero → a mid bar (not the floor).
+        assert_eq!(sparkline(&[0.0, 0.0, 0.0]), "▁▁▁");
+        assert!(sparkline(&[4.0, 4.0]).chars().all(|c| c != '▁'));
     }
 }

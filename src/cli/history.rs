@@ -9,7 +9,11 @@ use clap::Args;
 
 use crate::config;
 use crate::storage::Storage;
-use crate::term::{Card, Color, Styler, fill_bar, gauge_hue, render_cards};
+use crate::storage::models::DailyTotal;
+use crate::term::{
+    Card, Color, Styler, Trend, delta_chip_count, delta_chip_pct, fill_bar, gauge_hue,
+    render_cards, sparkline,
+};
 
 #[derive(Args, Debug)]
 pub struct HistoryArgs {
@@ -54,6 +58,64 @@ impl Burndown {
             monthly_budget_usd,
         })
     }
+}
+
+/// Aggregates for the window immediately preceding the displayed one — the
+/// baseline for the stat-card delta chips. All-zero when there's no prior data.
+#[derive(Default, Clone, Copy)]
+struct PriorWindow {
+    cost: f64,
+    cache_hit_pct: f64,
+    blocked: i64,
+}
+
+impl PriorWindow {
+    /// The `days` local days ending the day before the current window starts.
+    /// Best-effort: a query error degrades to a zero baseline (chips omitted).
+    fn compute(storage: &Storage, days: i64) -> Self {
+        let today = Local::now().date_naive();
+        let window_start = today - chrono::Duration::days(days - 1);
+        let prior: Vec<DailyTotal> = storage
+            .daily_totals(2 * days)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| {
+                NaiveDate::parse_from_str(&t.date, "%Y-%m-%d")
+                    .map(|d| d < window_start)
+                    .unwrap_or(false)
+            })
+            .collect();
+        if prior.is_empty() {
+            return Self::default();
+        }
+        let cost = prior.iter().map(|t| t.total_cost).sum();
+        let blocked = prior.iter().map(|t| t.total_blocked).sum();
+        let cache_hit_pct =
+            prior.iter().map(|t| t.cache_hit_rate).sum::<f64>() / prior.len() as f64 * 100.0;
+        Self {
+            cost,
+            cache_hit_pct,
+            blocked,
+        }
+    }
+}
+
+/// A dense, oldest → newest daily-spend series of length `days` built from the
+/// (newest-first, gap-omitting) `totals`. Idle days are zero-filled so the
+/// sparkline has one cell per calendar day.
+fn dense_spend_series(totals: &[DailyTotal], days: i64) -> Vec<f64> {
+    let today = Local::now().date_naive();
+    let by_date: std::collections::HashMap<&str, f64> =
+        totals.iter().map(|t| (t.date.as_str(), t.total_cost)).collect();
+    (0..days)
+        .rev()
+        .map(|i| {
+            let d = (today - chrono::Duration::days(i))
+                .format("%Y-%m-%d")
+                .to_string();
+            by_date.get(d.as_str()).copied().unwrap_or(0.0)
+        })
+        .collect()
 }
 
 /// Number of days in a given (year, month), via the first-of-next-month trick.
@@ -126,17 +188,40 @@ pub fn run_cmd(args: HistoryArgs) -> anyhow::Result<()> {
     let avg_hit_rate = totals.iter().map(|t| t.cache_hit_rate).sum::<f64>() / totals.len() as f64;
     let avg_hit_pct = avg_hit_rate * 100.0;
 
+    // Prior window (the `days` days immediately before this one) — the baseline
+    // for the delta chips. Fetch a 2×-wide window and keep the older half.
+    let prior = PriorWindow::compute(&storage, days);
+
     let cards = [
-        Card::new("Spent", &format!("${:.2}", total_cost), &format!("over {days}d")),
+        Card::new("Spent", &format!("${:.2}", total_cost), &format!("over {days}d"))
+            .with_delta(delta_chip_pct(total_cost, prior.cost, Trend::HigherWorse)),
+        // Request volume is neutral (more isn't inherently better or worse), so
+        // it carries no good/bad chip — its delta row stays blank, aligned.
         Card::new("Requests", &total_requests.to_string(), "total"),
         Card::new("Cache", &format!("{avg_hit_pct:.0}%"), &fill_bar(avg_hit_pct, 8))
             .with_value_color(Color::Green)
-            .with_sub_color(Color::Green),
+            .with_sub_color(Color::Green)
+            .with_delta(delta_chip_pct(avg_hit_pct, prior.cache_hit_pct, Trend::HigherBetter)),
         Card::new("Blocked", &total_blocked.to_string(), "events")
-            .with_value_color(if total_blocked > 0 { Color::Red } else { Color::Green }),
+            .with_value_color(if total_blocked > 0 { Color::Red } else { Color::Green })
+            .with_delta(delta_chip_count(total_blocked, prior.blocked, Trend::HigherWorse)),
     ];
     writeln!(out, "{}", render_cards(&cards, 11, 2, &sty))?;
     writeln!(out)?;
+
+    // Daily-spend sparkline across the window (oldest → newest, zero-filled).
+    let series = dense_spend_series(&totals, days);
+    if series.iter().any(|&v| v > 0.0) {
+        let hi = series.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        writeln!(
+            out,
+            "  {} {}  peak ${:.2}/day",
+            sty.bold("Daily spend"),
+            sty.paint(&sparkline(&series), Color::Cyan),
+            hi
+        )?;
+        writeln!(out)?;
+    }
 
     writeln!(
         out,

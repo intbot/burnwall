@@ -287,6 +287,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     // v0.7 observability: per-request upstream latency + HTTP status.
     ensure_column(conn, "requests", "latency_ms", "INTEGER")?;
     ensure_column(conn, "requests", "http_status", "INTEGER")?;
+    // v0.11 attribution tags: a compact JSON object of user-set labels
+    // (feature / agent-run / client / prompt-version). Metadata only.
+    ensure_column(conn, "requests", "tags", "TEXT")?;
 
     if on_disk < SCHEMA_VERSION {
         conn.execute_batch(&format!("PRAGMA user_version={SCHEMA_VERSION};"))?;

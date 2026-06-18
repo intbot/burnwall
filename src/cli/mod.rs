@@ -2,6 +2,7 @@
 
 use clap::{Parser, Subcommand};
 
+pub mod accuracy;
 #[cfg(feature = "audit")]
 pub mod audit;
 pub mod claude_settings;
@@ -49,6 +50,7 @@ pub mod skills;
 pub mod start;
 pub mod status;
 pub mod statusline;
+pub mod tags;
 pub mod stop;
 pub mod uninstall;
 pub mod upgrade;
@@ -87,6 +89,10 @@ pub enum Command {
     Status(status::StatusArgs),
     /// Show per-day totals over the last N days.
     History(history::HistoryArgs),
+    /// Real on-the-wire (cache-aware) cost vs a naive token-tally estimate.
+    Accuracy(accuracy::AccuracyArgs),
+    /// Attribute spend by `x-burnwall-tags` labels (feature / client / …).
+    Tags(tags::TagsArgs),
     /// Read or write `~/.burnwall/config.toml`.
     Config(config_cmd::ConfigArgs),
     /// Detect AI tools and print/apply env-var setup.
@@ -186,6 +192,8 @@ impl Cli {
             Command::Guard(args) => guard::run_cmd(args).await,
             Command::Status(args) => status::run_cmd(args),
             Command::History(args) => history::run_cmd(args),
+            Command::Accuracy(args) => accuracy::run_cmd(args),
+            Command::Tags(args) => tags::run_cmd(args),
             Command::Config(args) => config_cmd::run_cmd(args),
             Command::Init(args) => init::run_cmd(args),
             Command::Security(args) => security::run_cmd(args),

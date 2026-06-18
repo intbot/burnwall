@@ -37,6 +37,46 @@ test("panelHtml renders stat cards, models, security, and MCP", () => {
   assert.ok(html.includes("fs/read"), html);
 });
 
+test("panelHtml renders delta chips, SVG spend chart, and share bars", () => {
+  const html = panelHtml(
+    {
+      models: [
+        { provider: "anthropic", model: "claude-opus-4-7", requests: 10, cost_usd: 8.0 },
+        { provider: "openai", model: "gpt-4o", requests: 4, cost_usd: 2.0 },
+      ],
+    },
+    {
+      total_cost_usd: 0.95,
+      budget: { daily_limit_usd: 10, spent_today_usd: 0.95 },
+      security_blocked: 1,
+      security_alerts: 0,
+      breakdown: [{ input_tokens: 100, cache_creation_tokens: 0, cache_read_tokens: 900 }],
+      spend_series: [0.3, 0.1, 0.4, 0.05, 0.55, 0.2, 0.95],
+      previous_day: { cost_usd: 0.2, cache_hit_pct: 80, blocked: 5 },
+    },
+  );
+  // Spend up 0.20 → 0.95 ≈ +375% → up chip; cache 90 vs 80 → up chip.
+  assert.ok(html.includes("▲"), html);
+  // Fewer blocks than yesterday (1 vs 5) → a down chip.
+  assert.ok(html.includes("▼"), html);
+  // Static SVG spend chart is present (script-free <path>), no <script>.
+  assert.ok(html.includes("<svg"), html);
+  assert.ok(html.includes("Spend · last 7 days"), html);
+  assert.ok(!html.includes("<script"), "panel must stay script-free: " + html);
+  // Share-of-spend bars in the model table.
+  assert.ok(html.includes("pbar"), html);
+});
+
+test("panelHtml omits chart and chips without a baseline/series", () => {
+  // No spend_series / previous_day → no chart, no chips, but no crash.
+  const html = panelHtml(
+    { models: [{ provider: "x", model: "m", requests: 1, cost_usd: 1 }] },
+    { total_cost_usd: 1, breakdown: [{ input_tokens: 10, cache_read_tokens: 0 }] },
+  );
+  assert.ok(!html.includes("<svg"), "no chart without a series");
+  assert.ok(!html.includes("vs yest."), "no delta chip without a baseline");
+});
+
 test("panelHtml degrades on empty/missing fields", () => {
   const html = panelHtml({}, {});
   assert.ok(html.includes("(no spend in window)"), html);

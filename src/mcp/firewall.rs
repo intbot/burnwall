@@ -58,18 +58,18 @@ pub fn server_blocked(allowlist: &[String], server: &str, multi_server: bool) ->
 pub struct AdvertisedTool {
     pub name: String,
     pub description: String,
-    /// Stable content fingerprint over name + description + input schema.
-    /// A change *tripwire* over the tool's full advertised identity. This is
-    /// FNV-1a: deterministic across runs and platforms (so persisted
-    /// fingerprints stay comparable across binary upgrades), but it is a
-    /// change *tripwire*, not a collision-resistant cryptographic hash.
+    /// Stable content fingerprint over name + description + input schema —
+    /// SHA-256 (hex). Deterministic across runs and platforms (so persisted
+    /// fingerprints stay comparable across binary upgrades) and
+    /// collision-resistant, so "the description matches" is a cryptographic
+    /// claim, not just a change-tripwire.
     pub fingerprint: String,
-    /// Fingerprint over name + input schema ONLY (M-C2). This is the value
-    /// persisted by the watcher and the one whose change resets an approved
-    /// tool back to `pending`: a description-only edit (typo fix, version
-    /// bump in prose) must WARN but never silently revoke approval, while a
-    /// schema change alters what the tool can actually be asked to do and
-    /// therefore must force re-approval.
+    /// Fingerprint over name + input schema ONLY (M-C2) — SHA-256 (hex). This
+    /// is the value persisted by the watcher and the one whose change resets an
+    /// approved tool back to `pending`: a description-only edit (typo fix,
+    /// version bump in prose) must WARN but never silently revoke approval,
+    /// while a schema change alters what the tool can actually be asked to do
+    /// and therefore must force re-approval.
     pub schema_fingerprint: String,
     /// The raw tool object, kept so the caller can re-scan it with the
     /// existing `SecurityEngine` (secret / path / command patterns).
@@ -176,12 +176,14 @@ fn is_hidden_char(c: char) -> bool {
     )
 }
 
-/// FNV-1a (64-bit) over name + description + canonicalised schema. serde_json
+/// SHA-256 (hex) over name + description + canonicalised schema. serde_json
 /// orders object keys deterministically, so the same tool always hashes the
-/// same. Hex-encoded for storage.
+/// same. 64 hex chars — distinguishable by length from the legacy FNV-1a
+/// (16-hex) fingerprints, which the storage layer migrates in place on first
+/// sight (see `observe_mcp_tool`).
 fn fingerprint_tool(name: &str, description: &str, schema: &Value) -> String {
     let schema = serde_json::to_string(schema).unwrap_or_default();
-    fnv1a_hex(&[
+    sha256_hex(&[
         name.as_bytes(),
         b"\0",
         description.as_bytes(),
@@ -190,21 +192,26 @@ fn fingerprint_tool(name: &str, description: &str, schema: &Value) -> String {
     ])
 }
 
-/// FNV-1a (64-bit) over name + canonicalised schema only — the persisted
+/// SHA-256 (hex) over name + canonicalised schema only — the persisted
 /// fingerprint that drives enforce-mode re-pending (M-C2). Description text is
 /// deliberately excluded; see [`AdvertisedTool::schema_fingerprint`].
 fn fingerprint_schema(name: &str, schema: &Value) -> String {
     let schema = serde_json::to_string(schema).unwrap_or_default();
-    fnv1a_hex(&[name.as_bytes(), b"\0", schema.as_bytes()])
+    sha256_hex(&[name.as_bytes(), b"\0", schema.as_bytes()])
 }
 
-fn fnv1a_hex(parts: &[&[u8]]) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+/// SHA-256 of the concatenated `parts`, lower-hex encoded (64 chars).
+fn sha256_hex(parts: &[&[u8]]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
     for part in parts {
-        for &byte in *part {
-            hash ^= byte as u64;
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
+        hasher.update(part);
     }
-    format!("{hash:016x}")
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }

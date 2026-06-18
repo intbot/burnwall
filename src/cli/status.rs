@@ -16,7 +16,10 @@ use crate::logscrape::{self, ScrapeBreakdown};
 use crate::pricing;
 use crate::providers::TokenUsage;
 use crate::storage::{ModelBreakdown, Storage};
-use crate::term::{Card, Color, Styler, fill_bar, gauge_hue, render_cards};
+use crate::term::{
+    Card, Color, Styler, Trend, delta_chip_count, delta_chip_pct, fill_bar, gauge_hue,
+    render_cards, sparkline,
+};
 
 #[derive(Args, Debug)]
 pub struct StatusArgs {
@@ -60,6 +63,15 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
     #[cfg(not(feature = "logscrape"))]
     let waste_per_day: f64 = 0.0;
 
+    // Delta-vs-yesterday baselines for the stat-card chips, and a 7-day spend
+    // series for the trend sparkline. Both are best-effort: a query hiccup or a
+    // first-day-of-use empty baseline just means the chip/sparkline is omitted.
+    let yesterday = (now_local - chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    let prev = compute_prev_day(&storage, &yesterday);
+    let spend_spark = spend_series(&storage, now_local, 7);
+
     let budget = BudgetTracker::new((&config.budget).into());
     budget.hydrate_for_date(&storage, &today)?;
 
@@ -88,6 +100,8 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
             mcp_events_today,
             waste_per_day,
             &coverage,
+            prev,
+            &spend_spark,
         )?;
     } else {
         write_table(
@@ -108,6 +122,8 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
             projected_savings,
             mcp_events_today,
             waste_per_day,
+            prev,
+            &spend_spark,
         )?;
         // Per-session / swarm breakdown — only shown when the opt-in
         // `x-burnwall-session` header is in use, so it never clutters the
@@ -407,6 +423,8 @@ fn write_table(
     projected_savings: f64,
     mcp_events: i64,
     waste_per_day: f64,
+    prev: PrevDay,
+    spend_spark: &[f64],
 ) -> std::io::Result<()> {
     let sty = Styler::stdout();
     let pretty = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
@@ -436,12 +454,16 @@ fn write_table(
     // `Some` once any plan window was ever captured — the subscription tell.)
     let subscriber = crate::plan::freshest_any().is_some();
 
-    // Headline stat tiles (Variant 1 — native cards): the glanceable four.
-    let mut cards = vec![Card::new(
-        "Spend",
-        &format!("${:.2}", today_cost),
-        &format!("{} req", total_requests),
-    )];
+    // Headline stat tiles (Variant 1 — native cards): the glanceable four, each
+    // carrying a delta-vs-yesterday chip when there's a baseline to compare to.
+    let mut cards = vec![
+        Card::new(
+            "Spend",
+            &format!("${:.2}", today_cost),
+            &format!("{} req", total_requests),
+        )
+        .with_delta(delta_chip_pct(today_cost, prev.cost, Trend::HigherWorse)),
+    ];
     cards.push(if subscriber && !bcfg.enforce_on_plan {
         Card::new("Budget", "notional", "not billed").with_value_color(Color::Yellow)
     } else if bcfg.daily_usd > 0.0 {
@@ -455,7 +477,8 @@ fn write_table(
     cards.push(
         Card::new("Cache", &format!("{:.0}%", cache_hit), &fill_bar(cache_hit, 8))
             .with_value_color(Color::Green)
-            .with_sub_color(Color::Green),
+            .with_sub_color(Color::Green)
+            .with_delta(delta_chip_pct(cache_hit, prev.cache_hit_pct, Trend::HigherBetter)),
     );
     cards.push({
         let sub = if security_alerts > 0 {
@@ -467,36 +490,66 @@ fn write_table(
         } else {
             "0 alerts".to_string()
         };
-        Card::new("Blocked", &security_blocked.to_string(), &sub).with_value_color(
-            if security_blocked > 0 {
+        Card::new("Blocked", &security_blocked.to_string(), &sub)
+            .with_value_color(if security_blocked > 0 {
                 Color::Red
             } else {
                 Color::Green
-            },
-        )
+            })
+            .with_delta(delta_chip_count(
+                security_blocked,
+                prev.blocked,
+                Trend::HigherWorse,
+            ))
     });
     writeln!(w, "{}", render_cards(&cards, 11, 2, &sty))?;
     writeln!(w)?;
+
+    // 7-day spend trend sparkline — context for whether today is high or low for
+    // the week. Quiet when the whole week was idle.
+    if spend_spark.iter().any(|&v| v > 0.0) {
+        let lo = spend_spark.iter().cloned().fold(f64::INFINITY, f64::min);
+        let hi = spend_spark.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        writeln!(
+            w,
+            "  {} {}  ${:.2}–${:.2}",
+            sty.bold("7-day spend"),
+            sty.paint(&sparkline(spend_spark), Color::Cyan),
+            lo,
+            hi
+        )?;
+        writeln!(w)?;
+    }
 
     writeln!(w, "  {}", sty.bold("Cost by model"))?;
     if breakdown.is_empty() {
         writeln!(w, "  (no requests yet)")?;
     } else {
+        // Share-of-spend bar per row, so the dominant model is visible at a
+        // glance instead of having to compare dollar figures by eye.
+        let model_total: f64 = breakdown.iter().map(|r| r.cost).sum();
         writeln!(
             w,
-            "  {:<32}  {:>8}  {:>8}  {:>9}",
+            "  {:<32}  {:>8}  {:>8}  {:>9}  Share",
             "Provider / Model", "Cost", "Requests", "Cache Hit"
         )?;
-        writeln!(w, "  {}", "─".repeat(63))?;
+        writeln!(w, "  {}", "─".repeat(79))?;
         for row in breakdown {
             let label = format!("{}/{}", row.provider, row.model);
+            let share = if model_total > 0.0 {
+                row.cost / model_total * 100.0
+            } else {
+                0.0
+            };
             writeln!(
                 w,
-                "  {:<32}  ${:>7.2}  {:>8}  {:>8.0}%",
+                "  {:<32}  ${:>7.2}  {:>8}  {:>8.0}%  {} {:>3.0}%",
                 truncate(&label, 32),
                 row.cost,
                 row.requests,
-                row.cache_hit_rate() * 100.0
+                row.cache_hit_rate() * 100.0,
+                sty.paint(&fill_bar(share, 8), Color::Cyan),
+                share,
             )?;
         }
     }
@@ -675,6 +728,8 @@ fn write_json(
     mcp_events: i64,
     waste_per_day: f64,
     coverage: &[crate::coverage::ToolCoverage],
+    prev: PrevDay,
+    spend_spark: &[f64],
 ) -> std::io::Result<()> {
     use serde_json::json;
     let bcfg = budget.config();
@@ -776,6 +831,14 @@ fn write_json(
         "cost_without_cache_usd": cost_without_cache,
         "projected_cache_savings_usd": projected_savings,
         "avoidable_per_day_usd": waste_per_day,
+        // Dense 7-day spend series (oldest → newest, zero-filled) for the panel's
+        // static SVG trend chart, and yesterday's baselines for its delta chips.
+        "spend_series": spend_spark,
+        "previous_day": {
+            "cost_usd": prev.cost,
+            "cache_hit_pct": prev.cache_hit_pct,
+            "blocked": prev.blocked,
+        },
         "mcp_events_today": mcp_events,
         "pricing_age_days": pricing_age_days,
         "pricing_stale": pricing_age_days.map(|d| d > 30).unwrap_or(false),
@@ -852,6 +915,68 @@ fn model_cost_without_cache(row: &ModelBreakdown) -> f64 {
     pricing::get_pricing(&row.model)
         .map(|p| pricing::cost_without_cache(&row_usage(row), p))
         .unwrap_or(0.0)
+}
+
+/// Yesterday's headline metrics, the baseline for the stat-card delta chips.
+/// Defaults to zeros when there was no activity yesterday — the `delta_chip_*`
+/// helpers then return `None` (no chip) against the zero baseline.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct PrevDay {
+    cost: f64,
+    cache_hit_pct: f64,
+    blocked: i64,
+}
+
+/// Compute [`PrevDay`] for a local date string. Best-effort: any storage error
+/// degrades to a zero field, never a failed `status`.
+fn compute_prev_day(storage: &Storage, date: &str) -> PrevDay {
+    let cost = storage.total_cost_for_date(date).unwrap_or(0.0);
+    let (cache_read, prompt_total) = storage
+        .breakdown_for_date(date)
+        .map(|rows| {
+            rows.iter().fold((0u64, 0u64), |(cr, pt), b| {
+                (
+                    cr + b.cache_read_tokens,
+                    pt + b.input_tokens + b.cache_creation_tokens + b.cache_read_tokens,
+                )
+            })
+        })
+        .unwrap_or((0, 0));
+    let cache_hit_pct = if prompt_total > 0 {
+        cache_read as f64 / prompt_total as f64 * 100.0
+    } else {
+        0.0
+    };
+    let blocked = storage
+        .security_event_type_counts_for_date(date)
+        .map(|c| partition_security_counts(&c).0)
+        .unwrap_or(0);
+    PrevDay {
+        cost,
+        cache_hit_pct,
+        blocked,
+    }
+}
+
+/// A dense `len`-day spend series ending today (oldest → newest, one entry per
+/// local day, zero-filled for idle days). Powers the status sparkline and the
+/// panel's SVG chart. Best-effort: an error yields an all-zero series.
+fn spend_series(storage: &Storage, now_local: chrono::DateTime<chrono::Local>, len: i64) -> Vec<f64> {
+    let by_date: std::collections::HashMap<String, f64> = storage
+        .daily_totals(len)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| (t.date, t.total_cost))
+        .collect();
+    (0..len)
+        .rev()
+        .map(|i| {
+            let d = (now_local - chrono::Duration::days(i))
+                .format("%Y-%m-%d")
+                .to_string();
+            by_date.get(&d).copied().unwrap_or(0.0)
+        })
+        .collect()
 }
 
 /// Today's average spend per hour over the local day so far — the steady-state
