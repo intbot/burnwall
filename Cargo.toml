@@ -1,6 +1,6 @@
 [package]
 name = "burnwall"
-version = "0.11.0"
+version = "0.11.1"
 edition = "2024"
 rust-version = "1.87"
 description = "Local proxy for AI coding tools (Claude Code, Codex CLI, Aider): cache-aware cost tracking, path/command security checks, daily budget enforcement. Zero telemetry."

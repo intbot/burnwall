@@ -169,42 +169,117 @@ fn stop_removes_a_stale_pid_file() {
 // ──────────────────────── full start --daemon / stop ───────────────────────
 
 #[test]
-fn start_daemon_then_stop_lifecycle() {
+fn start_daemon_spawns_guard_then_hard_stop_terminates_both() {
     let dir = tempfile::tempdir().unwrap();
     let pid_file = dir.path().join("burnwall.pid");
+    let guard_pid_file = dir.path().join("burnwall.guard.pid");
 
     // Port 0 lets the OS pick a free port — the test never connects, it only
-    // exercises the daemon lifecycle.
+    // exercises the daemon lifecycle. `--no-routing` keeps routing inactive so
+    // the watchdog stays Idle (it only acts when routing is live), which means
+    // it can't restart-spawn during the test. Guard is on by default.
     burnwall(dir.path())
-        .args(["start", "--daemon", "--port", "0"])
+        .args(["start", "--daemon", "--no-routing", "--port", "0"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("running in the background"));
+        .stdout(predicate::str::contains("running in the background"))
+        .stdout(predicate::str::contains("Watchdog: guard running"));
 
     let _cleanup = DaemonCleanup(pid_file.clone());
+    let _guard_cleanup = DaemonCleanup(guard_pid_file.clone());
 
     assert!(
         pid_file.exists(),
         "the daemon writes its PID file once it is serving"
+    );
+    assert!(
+        guard_pid_file.exists(),
+        "the guard watchdog is spawned by default"
     );
     let pid: u32 = fs::read_to_string(&pid_file)
         .unwrap()
         .trim()
         .parse()
         .expect("PID file holds a number");
+    let guard_pid: u32 = fs::read_to_string(&guard_pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .expect("guard PID file holds a number");
     assert!(
         daemon::process_is_alive(pid),
         "the daemon process is running"
     );
+    assert!(
+        daemon::process_is_alive(guard_pid),
+        "the guard process is running"
+    );
 
+    // `stop --hard` fully terminates and frees the port (and retires the guard).
     burnwall(dir.path())
-        .arg("stop")
+        .args(["stop", "--hard"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Stopped Burnwall"));
 
-    assert!(!pid_file.exists(), "stop clears the PID file");
-    assert!(wait_until_gone(pid), "the daemon process exits after stop");
+    assert!(!pid_file.exists(), "hard stop clears the PID file");
+    assert!(
+        wait_until_gone(pid),
+        "the daemon process exits after a hard stop"
+    );
+    assert!(
+        wait_until_gone(guard_pid),
+        "hard stop terminates the guard process too (no leak)"
+    );
+    assert!(
+        !guard_pid_file.exists(),
+        "hard stop retires the guard watchdog too"
+    );
+}
+
+#[test]
+fn soft_stop_leaves_the_proxy_draining_so_running_tools_dont_wedge() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("burnwall.pid");
+    let drain_file = dir.path().join("pause.json");
+
+    // `--no-guard` keeps this focused on the proxy itself.
+    burnwall(dir.path())
+        .args(["start", "--daemon", "--no-guard", "--port", "0"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("running in the background"))
+        .stdout(predicate::str::contains("Watchdog: guard running").not());
+
+    let _cleanup = DaemonCleanup(pid_file.clone());
+    let pid: u32 = fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+
+    // Default (soft) stop: the proxy stays UP as a pass-through relay so an
+    // already-running tool doesn't hit a dead port. This is the wedge fix.
+    burnwall(dir.path())
+        .arg("stop")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Protection stopped"))
+        .stdout(predicate::str::contains("pass-through"));
+
+    assert!(
+        daemon::process_is_alive(pid),
+        "a soft stop must leave the proxy running so the port keeps answering"
+    );
+    assert!(pid_file.exists(), "soft stop does not remove the PID file");
+    let drain = fs::read_to_string(&drain_file).expect("soft stop writes the drain state file");
+    assert!(
+        drain.contains("drain"),
+        "the state file records drain mode: {drain}"
+    );
+
+    // Now free the port for good.
+    burnwall(dir.path())
+        .args(["stop", "--hard"])
+        .assert()
+        .success();
+    assert!(wait_until_gone(pid), "hard stop terminates the drainer");
 }
 
 #[test]
@@ -249,7 +324,7 @@ fn shutdown_file_alone_stops_the_daemon_gracefully() {
     let pid_file = dir.path().join("burnwall.pid");
 
     burnwall(dir.path())
-        .args(["start", "--daemon", "--port", "0"])
+        .args(["start", "--daemon", "--no-guard", "--port", "0"])
         .assert()
         .success();
     let _cleanup = DaemonCleanup(pid_file.clone());
@@ -279,7 +354,7 @@ fn start_daemon_refuses_when_already_running() {
     let pid_file = dir.path().join("burnwall.pid");
 
     burnwall(dir.path())
-        .args(["start", "--daemon", "--port", "0"])
+        .args(["start", "--daemon", "--no-guard", "--port", "0"])
         .assert()
         .success();
 
@@ -287,7 +362,7 @@ fn start_daemon_refuses_when_already_running() {
 
     // A second daemon must not start on top of the first.
     burnwall(dir.path())
-        .args(["start", "--daemon", "--port", "0"])
+        .args(["start", "--daemon", "--no-guard", "--port", "0"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("already running"));
@@ -300,5 +375,8 @@ fn start_daemon_refuses_when_already_running() {
         .failure()
         .stderr(predicate::str::contains("already running"));
 
-    burnwall(dir.path()).arg("stop").assert().success();
+    burnwall(dir.path())
+        .args(["stop", "--hard"])
+        .assert()
+        .success();
 }

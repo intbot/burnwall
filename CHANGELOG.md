@@ -2,6 +2,37 @@
 
 All notable changes to Burnwall.
 
+## [0.11.1] — 2026-06-18
+
+A resilience release for the proxy lifecycle: stopping Burnwall can no longer
+leave an already-running AI tool stranded on a dead port.
+
+### Changed
+
+- **`burnwall stop` no longer cuts off a tool that's still running.** By default
+  it now hands the proxy off to a pass-through relay and leaves the port serving,
+  so a tool mid-session keeps working instead of failing with a bare connection
+  error. The relay does no scanning, budget, or cost capture (protection is off)
+  and retires itself once traffic goes idle, freeing the port. Use
+  `burnwall stop --hard` to terminate immediately and free the port now.
+- **Clearer recovery guidance.** When a shell is routed at a proxy that isn't
+  answering, `burnwall status` now points to `burnwall start` (revive — running
+  tools recover at once) and `burnwall recover` (go direct, then restart tools),
+  and shows a distinct "stopped (draining)" state instead of a misleading green.
+
+### Added
+
+- **Guard watchdog on by default.** `burnwall start --daemon` now also runs the
+  guard, which notices a silently-dead proxy within seconds and pauses shell
+  routing so new shells go direct (with a best-effort relaunch). Opt out with
+  `--no-guard`.
+
+### Fixed
+
+- The guard watched the configured port even when the proxy was started on a
+  different `--port`, so a non-default port could make it treat a healthy proxy
+  as dead. It now watches the proxy's actual port.
+
 ## [0.11.0] — 2026-06-18
 
 A dashboard-polish release: clearer, more glanceable surfaces, plus two new

@@ -52,7 +52,11 @@ pub fn run_cmd(args: UninstallArgs) -> Result<()> {
     //    step 4 does the full routing teardown (env files AND rc hooks) — a
     //    pause here would only double-write the env files.
     writeln!(out, "1. Stopping the proxy…")?;
-    if let Err(e) = super::stop::run_cmd(super::stop::StopArgs { keep_routing: true }) {
+    if let Err(e) = super::stop::run_cmd(super::stop::StopArgs {
+        keep_routing: true,
+        // Terminate for good and free the port — we're removing the binary.
+        hard: true,
+    }) {
         writeln!(out, "   • {e}")?;
     }
 

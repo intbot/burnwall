@@ -70,6 +70,7 @@ async fn safe_anthropic_request_records_cost() {
     let budget = Arc::new(BudgetTracker::with_defaults());
     let state = AppState {
         pause_path: None,
+        last_activity: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -139,6 +140,7 @@ async fn safe_openai_request_records_cost_with_cache() {
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
         pause_path: None,
+        last_activity: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         upstream_anthropic: "http://127.0.0.1:1".to_string(),
         upstream_openai: mock.uri(),
         http_client: reqwest::Client::new(),
@@ -190,6 +192,7 @@ async fn security_violation_returns_403_and_records_event() {
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
         pause_path: None,
+        last_activity: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -273,6 +276,7 @@ async fn budget_exceeded_returns_429_without_forwarding() {
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
         pause_path: None,
+        last_activity: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -342,6 +346,7 @@ async fn subscription_traffic_not_blocked_by_dollar_cap() {
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
         pause_path: None,
+        last_activity: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -415,6 +420,7 @@ data: {\"type\":\"message_stop\"}\n\n";
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
         pause_path: None,
+        last_activity: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -491,6 +497,7 @@ async fn budget_warning_does_not_block() {
 
     let state = AppState {
         pause_path: None,
+        last_activity: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -550,6 +557,7 @@ async fn loop_detection_blocks_after_threshold_identical_requests() {
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
         pause_path: None,
+        last_activity: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -646,6 +654,7 @@ async fn accept_encoding_is_not_forwarded_upstream() {
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
         pause_path: None,
+        last_activity: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -706,6 +715,7 @@ async fn security_log_redact_details_strips_rule_from_storage() {
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
         pause_path: None,
+        last_activity: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         upstream_anthropic: "http://127.0.0.1:1".to_string(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -779,6 +789,7 @@ async fn distinct_requests_dont_trip_loop_detector() {
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
         pause_path: None,
+        last_activity: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -839,6 +850,7 @@ async fn cache_injection_rewrites_outbound_anthropic_body_when_enabled() {
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
         pause_path: None,
+        last_activity: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -921,6 +933,7 @@ async fn cache_injection_off_forwards_body_unchanged() {
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
         pause_path: None,
+        last_activity: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -979,6 +992,7 @@ async fn utf8_bom_prefixed_body_still_triggers_security_scan() {
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
         pause_path: None,
+        last_activity: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         http_client: reqwest::Client::new(),
@@ -1053,6 +1067,7 @@ async fn gemini_request_records_cost_and_latency() {
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
         pause_path: None,
+        last_activity: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         upstream_anthropic: "http://127.0.0.1:1".to_string(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         upstream_google: mock.uri(),
@@ -1132,6 +1147,7 @@ async fn failover_reroutes_to_healthy_endpoint_on_5xx() {
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
         pause_path: None,
+        last_activity: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         upstream_anthropic: primary.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         upstream_google: "http://127.0.0.1:1".to_string(),
@@ -1176,6 +1192,7 @@ async fn failover_disabled_forwards_5xx_verbatim() {
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
         pause_path: None,
+        last_activity: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         upstream_anthropic: primary.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         upstream_google: "http://127.0.0.1:1".to_string(),
@@ -1225,6 +1242,7 @@ async fn otel_span_written_for_forwarded_request() {
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
         pause_path: None,
+        last_activity: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         upstream_google: "http://127.0.0.1:1".to_string(),
@@ -1284,6 +1302,7 @@ async fn paranoid_mode_blocks_unscannable_body_default_forwards_it() {
 
     let base = |storage: Arc<Storage>, paranoid: bool| AppState {
         pause_path: None,
+        last_activity: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         upstream_google: "http://127.0.0.1:1".to_string(),
@@ -1368,6 +1387,7 @@ async fn trim_tool_output_shrinks_oversized_tool_result_before_forwarding() {
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
         pause_path: None,
+        last_activity: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         upstream_google: "http://127.0.0.1:1".to_string(),
@@ -1445,6 +1465,7 @@ async fn response_exfil_warning_records_event_and_never_modifies_reply() {
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
         pause_path: None,
+        last_activity: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         upstream_google: "http://127.0.0.1:1".to_string(),
@@ -1516,6 +1537,7 @@ async fn response_exfil_warning_dedupes_per_host() {
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
         pause_path: None,
+        last_activity: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         upstream_google: "http://127.0.0.1:1".to_string(),
@@ -1619,6 +1641,7 @@ async fn compact_request_with_keys_in_history_forwards_not_403() {
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
         pause_path: None,
+        last_activity: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         upstream_google: "http://127.0.0.1:1".to_string(),
@@ -1687,6 +1710,7 @@ async fn negative_control_in_flight_credential_exfil_still_blocks() {
     let storage = Arc::new(Storage::open_in_memory().unwrap());
     let state = AppState {
         pause_path: None,
+        last_activity: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
         upstream_anthropic: mock.uri(),
         upstream_openai: "http://127.0.0.1:1".to_string(),
         upstream_google: "http://127.0.0.1:1".to_string(),

@@ -50,7 +50,12 @@ pub fn run_cmd(args: UpgradeArgs) -> Result<()> {
     let was_running = matches!(super::daemon::running_pid(), Ok(Some(_)));
     if was_running {
         println!("   Stopping the running proxy so the binary can be replaced…");
-        let _ = super::stop::run_cmd(super::stop::StopArgs { keep_routing: true });
+        let _ = super::stop::run_cmd(super::stop::StopArgs {
+            keep_routing: true,
+            // Free the port and release the binary's file lock so the upgrade
+            // can replace it — a soft drain would keep the old proxy holding both.
+            hard: true,
+        });
     }
 
     // The canonical install path, captured before any rename so the restart

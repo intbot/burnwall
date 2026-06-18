@@ -183,6 +183,7 @@ async fn run_fix(i: &DoctorInput) -> anyhow::Result<()> {
         rewrite_anthropic_cache: false,
         no_routing: false,
         pause_routing_on_exit: false,
+        no_guard: false,
     };
     super::daemon::spawn_background(&start_args).await?;
 

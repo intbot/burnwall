@@ -63,6 +63,9 @@ pub async fn run_cmd(args: SidecarArgs) -> anyhow::Result<()> {
         rewrite_anthropic_cache: false,
         no_routing: true,
         pause_routing_on_exit: false,
+        // A sidecar serves a remote sandbox/CI agent with no local shell
+        // routing, so the routing-recovery watchdog has nothing to guard.
+        no_guard: true,
     })
     .await
 }

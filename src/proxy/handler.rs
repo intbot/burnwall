@@ -30,6 +30,14 @@ pub async fn handle(
         return Ok(healthz_response());
     }
 
+    // Record real request activity (after healthz, so a liveness probe can't
+    // keep a draining proxy alive). The idle-retire monitor uses this to wind
+    // a soft-stopped drain relay down once traffic actually stops.
+    state.last_activity.store(
+        chrono::Utc::now().timestamp(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+
     // ─── bypass kill-switch (L2) ───
     // BURNWALL_BYPASS=1 turns the proxy into a pure relay: no security scan,
     // no budget check, no loop detection, no storage write. The user's last-
@@ -61,6 +69,14 @@ pub async fn handle(
                     warn!("⏸ allow-once consumed — relaying this one request unchecked");
                     return Ok(passthrough(req, &state).await);
                 }
+            }
+            crate::bypass::Bypass::Draining => {
+                // A soft `burnwall stop` left this proxy up purely so
+                // already-running tools don't hit a dead port. Relay
+                // unchecked; the idle-retire monitor shuts us down once
+                // traffic stops.
+                tracing::debug!("🛑 draining after stop — relaying this request unchecked");
+                return Ok(passthrough(req, &state).await);
             }
             crate::bypass::Bypass::None => {}
         }
