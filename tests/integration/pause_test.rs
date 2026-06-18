@@ -124,6 +124,53 @@ async fn pause_file_relays_unchecked_and_resume_restores() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drain_file_relays_unchecked_so_a_soft_stop_never_wedges_a_tool() {
+    // A soft `burnwall stop` leaves the proxy up in drain (relay-only) mode so
+    // an already-running tool keeps working instead of hitting a dead port.
+    // The handler must honor the `drain` state exactly like a pause: relay
+    // unchecked. Clearing it (a fresh `start` / idle-retire) restores guarding.
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .expect(1) // exactly the drained request lands upstream
+        .mount(&mock)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let pause_path = dir.path().join("pause.json");
+    let mut state = AppState::new(mock.uri(), "http://127.0.0.1:1".to_string());
+    state.pause_path = Some(pause_path.clone());
+    let proxy = spawn_proxy(state).await;
+    let url = format!("http://{}/anthropic/v1/messages", proxy);
+
+    // Drain active (the exact JSON a soft `burnwall stop` writes) → relayed.
+    let now = chrono::Utc::now().timestamp();
+    std::fs::write(
+        &pause_path,
+        format!(r#"{{"mode":"drain","expires_at":{}}}"#, now + 3600),
+    )
+    .unwrap();
+    let resp = client()
+        .post(&url)
+        .json(&violating_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "a draining proxy must relay unchecked");
+
+    // Drain cleared (a fresh `start` clears it) → protection restored.
+    std::fs::remove_file(&pause_path).unwrap();
+    let resp = client()
+        .post(&url)
+        .json(&violating_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403, "clearing drain must restore protection");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn allow_once_relays_exactly_one_request() {
     let mock = MockServer::start().await;
     Mock::given(method("POST"))

@@ -177,6 +177,17 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
                     sty.green("🟢 Protection active —")
                 )?;
             }
+            (Some(pid), crate::bypass::Bypass::Draining) => {
+                writeln!(
+                    out,
+                    "   {} proxy (pid {pid}) is relaying unchecked after `burnwall stop` — it retires once traffic goes idle.",
+                    sty.yellow("⏹  Protection STOPPED (draining) —")
+                )?;
+                writeln!(
+                    out,
+                    "      Already-running tools keep working. Turn protection back on:  burnwall start"
+                )?;
+            }
             (Some(pid), crate::bypass::Bypass::None) => writeln!(
                 out,
                 "   {} proxy running (pid {pid}); every request is scanned.",
@@ -216,12 +227,20 @@ fn maybe_emit_nudge(
     today: &str,
 ) -> std::io::Result<()> {
     // Already nudged today → stay quiet.
-    if storage.meta_get("nudge_last_date").ok().flatten().as_deref() == Some(today) {
+    if storage
+        .meta_get("nudge_last_date")
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some(today)
+    {
         return Ok(());
     }
 
     const WINDOW_DAYS: i64 = 7;
-    let win = storage.breakdown_since_days(WINDOW_DAYS).unwrap_or_default();
+    let win = storage
+        .breakdown_since_days(WINDOW_DAYS)
+        .unwrap_or_default();
     let prompt_tokens: u64 = win
         .iter()
         .map(|b| b.input_tokens + b.cache_creation_tokens + b.cache_read_tokens)
@@ -351,12 +370,17 @@ fn write_routing(w: &mut impl Write, sty: &Styler) -> std::io::Result<()> {
                 )?;
                 writeln!(
                     w,
-                    "      Every AI tool launched from this shell will fail to connect."
+                    "      AI tools already running here will fail to connect (ConnectionRefused)."
+                )?;
+                writeln!(
+                    w,
+                    "      Fix:  {}   (revive the proxy — running tools recover instantly)",
+                    sty.bold("burnwall start")
                 )?;
                 return writeln!(
                     w,
-                    "      Fix:  {}   (or `burnwall stop` to pause routing and go direct)",
-                    sty.bold("burnwall start")
+                    "            {}  (go direct instead, then restart already-open AI tools)",
+                    sty.bold("burnwall recover")
                 );
             }
             writeln!(
@@ -475,10 +499,18 @@ fn write_table(
         Card::new("Budget", "no cap", &format!("${:.2}", today_cost))
     });
     cards.push(
-        Card::new("Cache", &format!("{:.0}%", cache_hit), &fill_bar(cache_hit, 8))
-            .with_value_color(Color::Green)
-            .with_sub_color(Color::Green)
-            .with_delta(delta_chip_pct(cache_hit, prev.cache_hit_pct, Trend::HigherBetter)),
+        Card::new(
+            "Cache",
+            &format!("{:.0}%", cache_hit),
+            &fill_bar(cache_hit, 8),
+        )
+        .with_value_color(Color::Green)
+        .with_sub_color(Color::Green)
+        .with_delta(delta_chip_pct(
+            cache_hit,
+            prev.cache_hit_pct,
+            Trend::HigherBetter,
+        )),
     );
     cards.push({
         let sub = if security_alerts > 0 {
@@ -509,7 +541,10 @@ fn write_table(
     // the week. Quiet when the whole week was idle.
     if spend_spark.iter().any(|&v| v > 0.0) {
         let lo = spend_spark.iter().cloned().fold(f64::INFINITY, f64::min);
-        let hi = spend_spark.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let hi = spend_spark
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
         writeln!(
             w,
             "  {} {}  ${:.2}–${:.2}",
@@ -798,11 +833,14 @@ fn write_json(
 
     // Runtime pause (`burnwall pause`): the editor extension must be able to
     // warn that a green-looking proxy is currently checking nothing.
-    let (protection_paused, pause_resumes_in_secs) =
-        match crate::bypass::read(chrono::Utc::now().timestamp()) {
-            crate::bypass::Bypass::Paused { resumes_in_secs } => (true, Some(resumes_in_secs)),
-            _ => (false, None),
-        };
+    let bypass_now = crate::bypass::read(chrono::Utc::now().timestamp());
+    let (protection_paused, pause_resumes_in_secs) = match bypass_now {
+        crate::bypass::Bypass::Paused { resumes_in_secs } => (true, Some(resumes_in_secs)),
+        _ => (false, None),
+    };
+    // Soft `burnwall stop` left the proxy up as a pass-through (relay-only),
+    // retiring when idle — surfaces should show it as stopped, not green.
+    let protection_draining = matches!(bypass_now, crate::bypass::Bypass::Draining);
 
     // De-duplicated cross-tool total (X4): excludes log rows of tools whose
     // provider flowed through the proxy today, so proxied Claude Code isn't
@@ -820,6 +858,7 @@ fn write_json(
         "proxy_running": proxy_running,
         "protection_paused": protection_paused,
         "pause_resumes_in_secs": pause_resumes_in_secs,
+        "protection_draining": protection_draining,
         "total_cost_usd": today_cost,
         "total_requests": total_requests,
         "blocked_requests": blocked,
@@ -961,7 +1000,11 @@ fn compute_prev_day(storage: &Storage, date: &str) -> PrevDay {
 /// A dense `len`-day spend series ending today (oldest → newest, one entry per
 /// local day, zero-filled for idle days). Powers the status sparkline and the
 /// panel's SVG chart. Best-effort: an error yields an all-zero series.
-fn spend_series(storage: &Storage, now_local: chrono::DateTime<chrono::Local>, len: i64) -> Vec<f64> {
+fn spend_series(
+    storage: &Storage,
+    now_local: chrono::DateTime<chrono::Local>,
+    len: i64,
+) -> Vec<f64> {
     let by_date: std::collections::HashMap<String, f64> = storage
         .daily_totals(len)
         .unwrap_or_default()

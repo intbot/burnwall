@@ -105,8 +105,10 @@ impl PriorWindow {
 /// sparkline has one cell per calendar day.
 fn dense_spend_series(totals: &[DailyTotal], days: i64) -> Vec<f64> {
     let today = Local::now().date_naive();
-    let by_date: std::collections::HashMap<&str, f64> =
-        totals.iter().map(|t| (t.date.as_str(), t.total_cost)).collect();
+    let by_date: std::collections::HashMap<&str, f64> = totals
+        .iter()
+        .map(|t| (t.date.as_str(), t.total_cost))
+        .collect();
     (0..days)
         .rev()
         .map(|i| {
@@ -193,18 +195,38 @@ pub fn run_cmd(args: HistoryArgs) -> anyhow::Result<()> {
     let prior = PriorWindow::compute(&storage, days);
 
     let cards = [
-        Card::new("Spent", &format!("${:.2}", total_cost), &format!("over {days}d"))
-            .with_delta(delta_chip_pct(total_cost, prior.cost, Trend::HigherWorse)),
+        Card::new(
+            "Spent",
+            &format!("${:.2}", total_cost),
+            &format!("over {days}d"),
+        )
+        .with_delta(delta_chip_pct(total_cost, prior.cost, Trend::HigherWorse)),
         // Request volume is neutral (more isn't inherently better or worse), so
         // it carries no good/bad chip — its delta row stays blank, aligned.
         Card::new("Requests", &total_requests.to_string(), "total"),
-        Card::new("Cache", &format!("{avg_hit_pct:.0}%"), &fill_bar(avg_hit_pct, 8))
-            .with_value_color(Color::Green)
-            .with_sub_color(Color::Green)
-            .with_delta(delta_chip_pct(avg_hit_pct, prior.cache_hit_pct, Trend::HigherBetter)),
+        Card::new(
+            "Cache",
+            &format!("{avg_hit_pct:.0}%"),
+            &fill_bar(avg_hit_pct, 8),
+        )
+        .with_value_color(Color::Green)
+        .with_sub_color(Color::Green)
+        .with_delta(delta_chip_pct(
+            avg_hit_pct,
+            prior.cache_hit_pct,
+            Trend::HigherBetter,
+        )),
         Card::new("Blocked", &total_blocked.to_string(), "events")
-            .with_value_color(if total_blocked > 0 { Color::Red } else { Color::Green })
-            .with_delta(delta_chip_count(total_blocked, prior.blocked, Trend::HigherWorse)),
+            .with_value_color(if total_blocked > 0 {
+                Color::Red
+            } else {
+                Color::Green
+            })
+            .with_delta(delta_chip_count(
+                total_blocked,
+                prior.blocked,
+                Trend::HigherWorse,
+            )),
     ];
     writeln!(out, "{}", render_cards(&cards, 11, 2, &sty))?;
     writeln!(out)?;

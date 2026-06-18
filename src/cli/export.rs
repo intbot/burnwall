@@ -202,10 +202,16 @@ mod tests {
     #[test]
     fn rows_are_sorted_date_desc_then_provider_model() {
         let per_day = vec![
-            ("2026-06-10".to_string(), vec![mb("openai", "gpt-5.5", 0.04, 1)]),
+            (
+                "2026-06-10".to_string(),
+                vec![mb("openai", "gpt-5.5", 0.04, 1)],
+            ),
             (
                 "2026-06-11".to_string(),
-                vec![mb("anthropic", "claude-opus-4-7", 0.10, 2), mb("anthropic", "claude-haiku-4-5", 0.01, 5)],
+                vec![
+                    mb("anthropic", "claude-opus-4-7", 0.10, 2),
+                    mb("anthropic", "claude-haiku-4-5", 0.01, 5),
+                ],
             ),
         ];
         let rows = build_rows(per_day);

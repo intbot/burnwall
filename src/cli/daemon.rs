@@ -105,6 +105,107 @@ pub fn running_pid() -> anyhow::Result<Option<u32>> {
     }
 }
 
+/// Decide whether a fresh `start` may proceed. Returns `Some(pid)` if a
+/// fully-protecting proxy is already running — the caller must refuse to start a
+/// second one. Returns `None` if the path is clear: either nothing was running,
+/// or a DRAIN-only relay (left by a soft `burnwall stop` to keep already-running
+/// tools alive) was retired here to free the port. Shared by the foreground
+/// `start` and the `--daemon` launcher so `stop` → `start` re-arms protection
+/// instead of failing "already running".
+pub fn protecting_proxy_blocking_start() -> anyhow::Result<Option<u32>> {
+    let Some(pid) = running_pid()? else {
+        return Ok(None);
+    };
+    if !crate::bypass::is_draining(chrono::Utc::now().timestamp()) {
+        return Ok(Some(pid)); // a real, protecting proxy — caller should bail
+    }
+    tracing::info!("retiring the draining proxy (PID {pid}) to start a protected one");
+    let _ = request_graceful_shutdown(pid);
+    let deadline = Instant::now() + Duration::from_secs(12);
+    while process_is_alive(pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if process_is_alive(pid) {
+        let _ = terminate_process(pid);
+    }
+    remove_pid_file().ok();
+    clear_shutdown_file();
+    Ok(None)
+}
+
+// ───────────────────────── guard watchdog lifecycle ─────────────────────────
+//
+// `start --daemon` spawns a `burnwall guard` watchdog alongside the proxy
+// (unless `--no-guard`). It outlives a proxy crash and auto-pauses routing so a
+// silently-dead proxy (the classic Windows AV-quarantine case) can't keep
+// stranding new shells. Tracked by its own PID file so `stop` can retire it and
+// a second `start` doesn't stack duplicates.
+
+/// Absolute path to the guard watchdog's PID file
+/// (`<data dir>/burnwall.guard.pid`).
+pub fn guard_pid_file_path() -> anyhow::Result<PathBuf> {
+    Ok(data_dir()
+        .context("locating the Burnwall data directory")?
+        .join("burnwall.guard.pid"))
+}
+
+/// PID of a live guard watchdog, if one is running. A file pointing at a dead
+/// (or reused, non-burnwall) PID is stale — removed, and `None` returned.
+pub fn running_guard_pid() -> anyhow::Result<Option<u32>> {
+    let path = guard_pid_file_path()?;
+    let contents = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    match contents.trim().parse::<u32>() {
+        Ok(pid) if pid > 0 && process_is_alive(pid) => Ok(Some(pid)),
+        _ => {
+            let _ = fs::remove_file(&path);
+            Ok(None)
+        }
+    }
+}
+
+/// Spawn the guard watchdog as a detached process (if one isn't already
+/// running) and record its PID. Best-effort restart of a crashed proxy is on
+/// (`--restart`): the guard's primary action, pausing routing, always happens
+/// first, so a quarantined binary fails the relaunch safely rather than
+/// stranding shells. Returns the guard PID.
+pub fn spawn_guard(port: u16) -> anyhow::Result<u32> {
+    if let Some(pid) = running_guard_pid()? {
+        return Ok(pid); // already watching
+    }
+    let exe = std::env::current_exe().context("locating the burnwall executable")?;
+    let pid = spawn_detached(
+        &exe,
+        &[
+            "guard".to_string(),
+            "--port".to_string(),
+            port.to_string(),
+            "--restart".to_string(),
+        ],
+    )
+    .context("spawning the guard watchdog")?;
+    let path = guard_pid_file_path()?;
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&path, pid.to_string());
+    Ok(pid)
+}
+
+/// Retire the guard watchdog (called by `stop`): terminate it if running and
+/// clear its PID file. Best-effort — a stop must never fail on guard cleanup.
+pub fn stop_guard() {
+    if let Ok(Some(pid)) = running_guard_pid() {
+        let _ = terminate_process(pid);
+    }
+    if let Ok(path) = guard_pid_file_path() {
+        let _ = fs::remove_file(path);
+    }
+}
+
 /// How the previous daemon run ended, inferred at the next start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PriorExit {
@@ -170,7 +271,9 @@ pub fn note_clean_exit() {
 /// Re-exec `burnwall start` (without `--daemon`) as a detached background
 /// process, then wait for it to write its PID file before returning.
 pub async fn spawn_background(args: &StartArgs) -> anyhow::Result<()> {
-    if let Some(pid) = running_pid()? {
+    // A fully-protecting proxy blocks a second start; a soft-stop drain relay is
+    // retired here so `stop` → `start --daemon` re-arms protection seamlessly.
+    if let Some(pid) = protecting_proxy_blocking_start()? {
         anyhow::bail!(
             "Burnwall is already running (PID {pid}). Use `burnwall stop` to stop it first."
         );
@@ -203,6 +306,17 @@ pub async fn spawn_background(args: &StartArgs) -> anyhow::Result<()> {
                     "http://localhost:{}",
                     resolved_port(args)
                 ));
+            }
+            // Guard watchdog (default): outlives a proxy crash and auto-pauses
+            // routing so a silently-dead proxy can't keep stranding new shells.
+            // Opt out with `--no-guard`.
+            if !args.no_guard {
+                match spawn_guard(resolved_port(args)) {
+                    Ok(gpid) => println!(
+                        "   Watchdog: guard running (PID {gpid}) — auto-recovers routing if the proxy dies."
+                    ),
+                    Err(e) => tracing::warn!("could not start the guard watchdog: {e}"),
+                }
             }
             // Name the log file so a later crash is diagnosable (L-H2) —
             // before this, a dead daemon left nothing to look at.
@@ -542,13 +656,16 @@ pub fn process_is_alive(pid: u32) -> bool {
 #[cfg(unix)]
 fn process_is_burnwall(pid: u32) -> bool {
     // Linux: /proc/<pid>/exe symlink. macOS: no /proc — fall back to `ps`.
+    // Match against the FULL image path, not just the file name: the real
+    // binary's path always contains "burnwall" (its dir and/or file name), and
+    // this keeps the three platforms consistent — Windows checks the full image
+    // path and macOS's `ps -o comm=` returns the full path too. A bare file-name
+    // check diverged on Linux and read a binary launched from a burnwall checkout
+    // (e.g. the `daemon_test-*` integration runner) as "not burnwall".
     #[cfg(target_os = "linux")]
     {
         match std::fs::read_link(format!("/proc/{pid}/exe")) {
-            Ok(p) => p
-                .file_name()
-                .map(|n| n.to_string_lossy().contains("burnwall"))
-                .unwrap_or(true),
+            Ok(p) => p.to_string_lossy().contains("burnwall"),
             Err(_) => true,
         }
     }

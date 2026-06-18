@@ -30,6 +30,14 @@ pub async fn handle(
         return Ok(healthz_response());
     }
 
+    // Record real request activity (after healthz, so a liveness probe can't
+    // keep a draining proxy alive). The idle-retire monitor uses this to wind
+    // a soft-stopped drain relay down once traffic actually stops.
+    state.last_activity.store(
+        chrono::Utc::now().timestamp(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+
     // ─── bypass kill-switch (L2) ───
     // BURNWALL_BYPASS=1 turns the proxy into a pure relay: no security scan,
     // no budget check, no loop detection, no storage write. The user's last-
@@ -61,6 +69,14 @@ pub async fn handle(
                     warn!("⏸ allow-once consumed — relaying this one request unchecked");
                     return Ok(passthrough(req, &state).await);
                 }
+            }
+            crate::bypass::Bypass::Draining => {
+                // A soft `burnwall stop` left this proxy up purely so
+                // already-running tools don't hit a dead port. Relay
+                // unchecked; the idle-retire monitor shuts us down once
+                // traffic stops.
+                tracing::debug!("🛑 draining after stop — relaying this request unchecked");
+                return Ok(passthrough(req, &state).await);
             }
             crate::bypass::Bypass::None => {}
         }
@@ -1002,7 +1018,9 @@ const MAX_TAG_LEN: usize = 64;
 /// fail-open: a malformed pair is skipped, an absent/empty/all-invalid header
 /// yields `None` — it never errors and never blocks a request.
 pub fn tags_from_headers(headers: &hyper::HeaderMap) -> Option<String> {
-    let raw = headers.get("x-burnwall-tags").and_then(|v| v.to_str().ok())?;
+    let raw = headers
+        .get("x-burnwall-tags")
+        .and_then(|v| v.to_str().ok())?;
     let mut map = serde_json::Map::new();
     for pair in raw.split(',') {
         if map.len() >= MAX_TAGS {
@@ -1143,7 +1161,10 @@ mod tag_header_tests {
 
     #[test]
     fn tags_parse_normalises_into_json_object() {
-        let h = headers(&[("x-burnwall-tags", "feature=auth, Client=Acme , agent-run=run42")]);
+        let h = headers(&[(
+            "x-burnwall-tags",
+            "feature=auth, Client=Acme , agent-run=run42",
+        )]);
         let json = tags_from_headers(&h).expect("tags");
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["feature"], "auth");
@@ -1163,7 +1184,10 @@ mod tag_header_tests {
     #[test]
     fn tags_are_bounded() {
         // More than MAX_TAGS keys -> capped; over-long values truncated.
-        let many = (0..20).map(|i| format!("k{i}=v{i}")).collect::<Vec<_>>().join(",");
+        let many = (0..20)
+            .map(|i| format!("k{i}=v{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
         let json = tags_from_headers(&headers(&[("x-burnwall-tags", &many)])).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v.as_object().unwrap().len(), MAX_TAGS);

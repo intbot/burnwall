@@ -57,6 +57,12 @@ pub struct StartArgs {
     /// background child doesn't strand Active env files at a dead port.
     #[arg(long, hide = true)]
     pub pause_routing_on_exit: bool,
+    /// Don't spawn the guard watchdog alongside the daemon. By default
+    /// `--daemon` also starts `burnwall guard`, which auto-pauses routing if
+    /// the proxy dies silently (e.g. an antivirus quarantine) so new shells go
+    /// direct instead of stranding at a dead port.
+    #[arg(long)]
+    pub no_guard: bool,
 }
 
 pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
@@ -108,12 +114,18 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
 
     // Refuse to start a second proxy on top of a running one — `bind` below
     // is the real backstop, but this gives a clearer message in the common
-    // case (and cleans up a stale PID file from a previous crashed run).
-    if let Some(pid) = daemon::running_pid()? {
+    // case (and cleans up a stale PID file from a previous crashed run). A
+    // proxy that is only DRAINING (a soft `burnwall stop` left it up as a
+    // pass-through) is retired here so `stop` → `start` re-arms protection.
+    if let Some(pid) = daemon::protecting_proxy_blocking_start()? {
         anyhow::bail!(
             "Burnwall is already running (PID {pid}). Use `burnwall stop` to stop it first."
         );
     }
+    // A fresh start means protection is ON: clear any stale bypass (the drain
+    // left by a proxy we just retired, or an orphaned pause) so the new daemon
+    // never boots straight into relay-only mode with protection silently off.
+    let _ = crate::bypass::clear();
 
     let storage = Arc::new(Storage::open_default().context("opening default storage")?);
 
@@ -260,6 +272,9 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
         // Live escape hatch: `burnwall pause` / `allow-once` write this file;
         // the handler checks it per request. Resolved once, here.
         pause_path: crate::bypass::default_path(),
+        last_activity: Arc::new(std::sync::atomic::AtomicI64::new(
+            chrono::Utc::now().timestamp(),
+        )),
     };
 
     let host: IpAddr = host_str
@@ -284,7 +299,13 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
         resume_and_report(&format!("http://localhost:{port}"));
     }
 
-    let result = serve_with_shutdown(listener, Arc::new(state), daemon::shutdown_signal()).await;
+    let state = Arc::new(state);
+    // Idle-retire monitor: when a soft `burnwall stop` flips us into drain
+    // (relay-only) mode, wind the process down once traffic goes idle so the
+    // port frees on its own — without ever cutting an in-use tool. A no-op
+    // until/unless drain is entered.
+    spawn_idle_retire_monitor(state.clone());
+    let result = serve_with_shutdown(listener, state, daemon::shutdown_signal()).await;
     daemon::remove_pid_file().ok();
     // We reached the end of `serve` on our own terms (signal / shutdown file),
     // so this run is exiting cleanly — clear the unclean-exit escalation.
@@ -294,6 +315,47 @@ pub async fn run_cmd(args: StartArgs) -> anyhow::Result<()> {
     }
     result.context("proxy serve")?;
     Ok(())
+}
+
+/// Seconds a drain relay (from a soft `burnwall stop`) may sit idle before it
+/// retires itself and frees the port. Long enough to bridge a tool between
+/// requests, short enough that a stopped proxy doesn't linger.
+const DRAIN_IDLE_RETIRE_SECS: i64 = 60;
+
+/// Watchdog for the drain relay a soft `burnwall stop` leaves behind: while
+/// drain is active and no real request has arrived for [`DRAIN_IDLE_RETIRE_SECS`],
+/// ask the proxy to shut down (via the same shutdown file `stop` uses) so the
+/// port frees itself. A no-op while protection is on — it only ever fires once
+/// drain has been entered, and only after traffic has actually gone quiet.
+fn spawn_idle_retire_monitor(state: Arc<AppState>) {
+    const POLL: std::time::Duration = std::time::Duration::from_secs(5);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(POLL).await;
+            let now = chrono::Utc::now().timestamp();
+            let draining = crate::bypass::is_draining(now);
+            let last = state
+                .last_activity
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if drain_should_retire(draining, now, last, DRAIN_IDLE_RETIRE_SECS) {
+                tracing::info!(
+                    "drain idle for {}s — retiring the proxy so the port frees",
+                    now - last
+                );
+                if let Ok(path) = daemon::shutdown_file_path() {
+                    let _ = std::fs::write(&path, "idle-retire after soft stop");
+                }
+                return;
+            }
+        }
+    });
+}
+
+/// Pure decision for the idle-retire monitor: a drain relay retires only while
+/// drain is actually in effect AND no real request has arrived for `idle_secs`.
+/// Split out so the timing logic is unit-testable without a clock or a socket.
+fn drain_should_retire(is_draining: bool, now: i64, last_activity: i64, idle_secs: i64) -> bool {
+    is_draining && now - last_activity >= idle_secs
 }
 
 /// Lines explaining an unclean prior exit, with platform-specific antivirus
@@ -678,6 +740,18 @@ mod tests {
         assert!(many.contains("burnwall recover"), "{many}");
         #[cfg(windows)]
         assert!(many.contains("Add-MpPreference"), "{many}");
+    }
+
+    #[test]
+    fn drain_retires_only_when_draining_and_idle() {
+        let idle = 60;
+        // Not draining → never retire, however long idle.
+        assert!(!super::drain_should_retire(false, 1_000, 0, idle));
+        // Draining but still active (recent request) → keep relaying.
+        assert!(!super::drain_should_retire(true, 1_000, 990, idle));
+        // Draining and idle past the window → retire (frees the port).
+        assert!(super::drain_should_retire(true, 1_000, 940, idle));
+        assert!(super::drain_should_retire(true, 1_000, 900, idle));
     }
 
     #[test]

@@ -30,6 +30,11 @@ use super::routing;
 
 #[derive(Args, Debug)]
 pub struct GuardArgs {
+    /// Port to watch. Overrides `proxy.port` from config — the daemon launcher
+    /// passes the proxy's ACTUAL resolved port so a `--port` that differs from
+    /// config doesn't make the guard watch the wrong (dead-looking) port.
+    #[arg(long)]
+    pub port: Option<u16>,
     /// Seconds between checks.
     #[arg(long, default_value_t = 5)]
     pub interval: u64,
@@ -88,11 +93,13 @@ fn any_routing_active() -> bool {
 }
 
 pub async fn run_cmd(args: GuardArgs) -> Result<()> {
-    let port = config::default_path()
-        .ok()
-        .and_then(|p| config::load_or_default(&p).ok())
-        .map(|c| c.proxy.port)
-        .unwrap_or(4100);
+    let port = args.port.unwrap_or_else(|| {
+        config::default_path()
+            .ok()
+            .and_then(|p| config::load_or_default(&p).ok())
+            .map(|c| c.proxy.port)
+            .unwrap_or(4100)
+    });
 
     let threshold = args.threshold.max(1);
     let interval = Duration::from_secs(args.interval.max(1));
@@ -127,7 +134,7 @@ pub async fn run_cmd(args: GuardArgs) -> Result<()> {
                 }
                 dead_streak = 0; // acted; don't repeat every tick
                 if args.restart {
-                    try_restart();
+                    try_restart(port);
                 }
             }
             GuardAction::Watching => {
@@ -145,12 +152,14 @@ pub async fn run_cmd(args: GuardArgs) -> Result<()> {
 
 /// Best-effort relaunch of the daemon (`--restart`). Failures are logged, not
 /// fatal — the guard's primary job (pausing routing) already happened.
-fn try_restart() {
+fn try_restart(port: u16) {
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
+    // Restart on the SAME port the guard was watching, so a `--port` that
+    // differed from config is honored on relaunch too.
     match std::process::Command::new(exe)
-        .args(["start", "--daemon"])
+        .args(["start", "--daemon", "--port", &port.to_string()])
         .status()
     {
         Ok(s) if s.success() => tracing::info!("guard relaunched the proxy"),

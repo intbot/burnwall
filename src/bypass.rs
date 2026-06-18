@@ -46,6 +46,12 @@ pub const DEFAULT_PAUSE_SECS: u64 = 5 * 60;
 pub const MAX_PAUSE_SECS: u64 = 24 * 3600;
 /// How long an unused allow-once stays armed before it expires.
 pub const ALLOW_ONCE_TTL_SECS: u64 = 10 * 60;
+/// Backstop expiry for a `Drain` (the relay a soft `burnwall stop` leaves
+/// behind to keep already-running tools alive). The real teardown is the
+/// proxy's idle-retire monitor; this is only a safety net so a drainer that
+/// somehow never goes idle can't relay unchecked forever. A fresh `start`
+/// also clears any stale drain on boot, so protection is never silently off.
+pub const DRAIN_BACKSTOP_SECS: u64 = 12 * 3600;
 
 /// On-disk shape. Tiny and stable: a mode tag plus an absolute expiry.
 #[derive(Debug, Serialize, Deserialize)]
@@ -59,6 +65,11 @@ struct StateFile {
 enum Mode {
     Pause,
     AllowOnce,
+    /// Soft-`stop` drain: relay everything unchecked, like `Pause`, but with no
+    /// auto-resume — the proxy is on its way out and only stays up to keep
+    /// already-running tools off a dead port. The proxy's idle-retire monitor
+    /// shuts it down once traffic stops; `DRAIN_BACKSTOP_SECS` is the safety net.
+    Drain,
 }
 
 /// The live bypass state, as the proxy and status surfaces see it.
@@ -71,6 +82,10 @@ pub enum Bypass {
     /// The next request relays unchecked (consume-on-use), then protection
     /// restores. Expires unused after the TTL.
     AllowOnce { expires_in_secs: i64 },
+    /// A soft `burnwall stop` left the proxy up as a pure relay so
+    /// already-running tools don't hit a dead port. Relays unchecked; the
+    /// proxy retires itself once traffic goes idle. No auto-resume.
+    Draining,
 }
 
 /// Default state-file path (`<data dir>/pause.json`), `None` if no data dir
@@ -105,7 +120,15 @@ pub fn read_at(path: &Path, now: i64) -> Bypass {
         Mode::AllowOnce => Bypass::AllowOnce {
             expires_in_secs: remaining,
         },
+        Mode::Drain => Bypass::Draining,
     }
+}
+
+/// True if a drain (soft-stop relay) is currently in effect at the default
+/// path. Used by `start` (to retire a stale drainer and take over the port)
+/// and by the proxy's idle-retire monitor.
+pub fn is_draining(now: i64) -> bool {
+    matches!(read(now), Bypass::Draining)
 }
 
 /// Read the bypass state at the default path.
@@ -133,6 +156,13 @@ pub fn pause_for(secs: u64, now: i64) -> std::io::Result<i64> {
 /// expiry timestamp written.
 pub fn arm_allow_once(now: i64) -> std::io::Result<i64> {
     write_state(Mode::AllowOnce, now + ALLOW_ONCE_TTL_SECS as i64)
+}
+
+/// Enter drain (soft `burnwall stop`): the running proxy relays unchecked and
+/// retires itself when idle. Backstopped at [`DRAIN_BACKSTOP_SECS`] so it can
+/// never silently relay forever. Returns the expiry timestamp written.
+pub fn drain(now: i64) -> std::io::Result<i64> {
+    write_state(Mode::Drain, now + DRAIN_BACKSTOP_SECS as i64)
 }
 
 /// Clear any pause / armed allow-once. `Ok(true)` if a file was removed.
@@ -242,6 +272,18 @@ mod tests {
         assert!(consume_allow_once_at(&p));
         assert!(!consume_allow_once_at(&p));
         assert_eq!(read_at(&p, 1000), Bypass::None);
+    }
+
+    #[test]
+    fn drain_reads_as_draining_until_backstop() {
+        let p = temp_path("drain-active.json");
+        write_at(&p, Mode::Drain, 5000);
+        assert_eq!(read_at(&p, 1000), Bypass::Draining);
+        // Past the backstop it self-clears (protection restores) just like the
+        // other modes — a drainer can never relay unchecked forever.
+        write_at(&p, Mode::Drain, 1000);
+        assert_eq!(read_at(&p, 1000), Bypass::None);
+        assert!(!p.exists());
     }
 
     #[test]

@@ -64,7 +64,11 @@ fn aggregate(days: i64, rows: &[(String, f64)]) -> TagReport {
         };
         for (k, v) in map {
             if let Some(val) = v.as_str() {
-                let entry = acc.entry(k).or_default().entry(val.to_string()).or_insert((0.0, 0));
+                let entry = acc
+                    .entry(k)
+                    .or_default()
+                    .entry(val.to_string())
+                    .or_insert((0.0, 0));
                 entry.0 += *cost;
                 entry.1 += 1;
             }
@@ -195,14 +199,16 @@ fn write_json(w: &mut impl Write, r: &TagReport, key_filter: Option<&str>) -> st
         .map(|(k, values)| {
             (
                 k.clone(),
-                json!(values
-                    .iter()
-                    .map(|v| json!({
-                        "value": v.value,
-                        "cost_usd": v.cost,
-                        "requests": v.requests,
-                    }))
-                    .collect::<Vec<_>>()),
+                json!(
+                    values
+                        .iter()
+                        .map(|v| json!({
+                            "value": v.value,
+                            "cost_usd": v.cost,
+                            "requests": v.requests,
+                        }))
+                        .collect::<Vec<_>>()
+                ),
             )
         })
         .collect();

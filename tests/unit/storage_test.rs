@@ -69,8 +69,14 @@ fn open_in_memory_creates_all_tables() {
 fn tags_roundtrip_and_tag_rows_query() {
     let storage = Storage::open_in_memory().expect("open");
     // A tagged forwarded row + an untagged one + a tagged-but-blocked one.
-    let tagged = RequestRecord::successful("anthropic", "claude-sonnet-4-6", &sample_usage(), 0.50, None)
-        .with_tags(Some(r#"{"client":"acme","feature":"auth"}"#.to_string()));
+    let tagged = RequestRecord::successful(
+        "anthropic",
+        "claude-sonnet-4-6",
+        &sample_usage(),
+        0.50,
+        None,
+    )
+    .with_tags(Some(r#"{"client":"acme","feature":"auth"}"#.to_string()));
     let id = storage.insert_request(&tagged).unwrap();
     storage
         .insert_request(&RequestRecord::successful(

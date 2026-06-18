@@ -829,10 +829,19 @@ mod tests {
         });
         let s = r.render(false);
         assert!(s.contains("⚠ DIRECT (unprotected)"), "got: {s}");
-        assert!(s.contains("burnwall doctor"), "degraded must hint a fix: {s}");
+        assert!(
+            s.contains("burnwall doctor"),
+            "degraded must hint a fix: {s}"
+        );
         assert!(s.contains("↑13k ↓615"), "token counts stay: {s}");
-        assert!(!s.contains("5h"), "no stale plan window when unprotected: {s}");
-        assert!(!s.contains("blocked"), "no block count when unprotected: {s}");
+        assert!(
+            !s.contains("5h"),
+            "no stale plan window when unprotected: {s}"
+        );
+        assert!(
+            !s.contains("blocked"),
+            "no block count when unprotected: {s}"
+        );
     }
 
     #[test]
@@ -842,7 +851,10 @@ mod tests {
         r.routing = Routing::Direct;
         let s = r.render(false);
         assert!(s.contains("⚠ DIRECT (unprotected)"), "got: {s}");
-        assert!(!s.contains("doctor"), "chosen direct must not suggest a fix: {s}");
+        assert!(
+            !s.contains("doctor"),
+            "chosen direct must not suggest a fix: {s}"
+        );
     }
 
     #[test]

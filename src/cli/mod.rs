@@ -50,8 +50,8 @@ pub mod skills;
 pub mod start;
 pub mod status;
 pub mod statusline;
-pub mod tags;
 pub mod stop;
+pub mod tags;
 pub mod uninstall;
 pub mod upgrade;
 #[cfg(feature = "waste")]

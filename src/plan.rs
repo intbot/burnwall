@@ -432,7 +432,10 @@ mod tests {
             .expect("known subscriber stays in plan mode");
         assert!(rl.stale);
         assert_eq!(rl.primary_label, "5h");
-        assert_eq!(rl.primary_pct, 0.0, "a rolled 5h window must read 0%, not ~100%");
+        assert_eq!(
+            rl.primary_pct, 0.0,
+            "a rolled 5h window must read 0%, not ~100%"
+        );
         // 7d is still inside its period → last-known value preserved.
         assert_eq!(rl.secondary, Some(("7d".to_string(), 10.0)));
     }
@@ -465,7 +468,10 @@ mod tests {
         // a 5h reading of 0%, not the resurrected last-known 11%.
         let snap = parse_limits("anthropic", &unified(), 1780951905).unwrap();
         let after_5h_reset = 1780960800 + 60;
-        assert!(!snap.is_stale(after_5h_reset, 12 * 3600), "snapshot itself is fresh");
+        assert!(
+            !snap.is_stale(after_5h_reset, 12 * 3600),
+            "snapshot itself is fresh"
+        );
         let rl = snap
             .to_ribbon_limits_stale_aware(after_5h_reset, false)
             .or_else(|| snap.to_ribbon_limits_stale_aware(after_5h_reset, true))

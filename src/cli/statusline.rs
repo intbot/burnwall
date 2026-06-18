@@ -225,8 +225,7 @@ fn routing_state(model_id: &str) -> ribbon::Routing {
 /// `enable-routing` / `disable-routing` write. Reading it costs one small file
 /// read, and only on the (already unhappy) direct path.
 fn direct_state() -> ribbon::Routing {
-    let active = crate::cli::init::Shell::detect()
-        .and_then(crate::cli::routing::env_file_state)
+    let active = crate::cli::init::Shell::detect().and_then(crate::cli::routing::env_file_state)
         == Some(crate::cli::routing::EnvFileState::Active);
     if active {
         ribbon::Routing::DirectDegraded
@@ -343,10 +342,7 @@ fn db_enrichment() -> (f64, u64) {
         return (0.0, 0);
     };
     let cost = storage.total_cost_for_date(&today).unwrap_or(0.0);
-    let blocks = storage
-        .blocked_count_for_date(&today)
-        .unwrap_or(0)
-        .max(0) as u64;
+    let blocks = storage.blocked_count_for_date(&today).unwrap_or(0).max(0) as u64;
     (cost, blocks)
 }
 
@@ -463,9 +459,15 @@ mod tests {
         });
         let s = assemble_ribbon(&cc, None, 0.0, 0, plan, ribbon::Routing::Proxied).render(false);
         assert!(s.contains("5h ["), "got: {s}");
-        assert!(s.contains("15% (44m)"), "binding window shows live reset: {s}");
+        assert!(
+            s.contains("15% (44m)"),
+            "binding window shows live reset: {s}"
+        );
         assert!(s.contains("7d 58%"), "got: {s}");
-        assert!(!s.contains("sess"), "subscription mode hides notional dollars: {s}");
+        assert!(
+            !s.contains("sess"),
+            "subscription mode hides notional dollars: {s}"
+        );
     }
 
     #[test]
@@ -497,7 +499,10 @@ mod tests {
 
     #[test]
     fn cc_model_id_prefers_id_then_display_name() {
-        assert_eq!(cc_model_id(&cc_from(r#"{"model":{"id":"claude-opus-4-8"}}"#)), "claude-opus-4-8");
+        assert_eq!(
+            cc_model_id(&cc_from(r#"{"model":{"id":"claude-opus-4-8"}}"#)),
+            "claude-opus-4-8"
+        );
         assert_eq!(
             cc_model_id(&cc_from(r#"{"model":{"id":"","display_name":"Opus"}}"#)),
             "Opus"

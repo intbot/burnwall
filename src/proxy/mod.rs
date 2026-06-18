@@ -217,6 +217,11 @@ pub struct AppState {
     /// (the test constructor's default, so a developer's real pause file
     /// can't leak into test runs).
     pub pause_path: Option<std::path::PathBuf>,
+    /// Unix-seconds timestamp of the most recent request, bumped per request.
+    /// The idle-retire monitor (a soft `burnwall stop` leaves the proxy up as
+    /// a drain relay) reads this to retire the process once traffic stops, so
+    /// the port frees on its own without ever cutting an in-use tool.
+    pub last_activity: Arc<std::sync::atomic::AtomicI64>,
 }
 
 impl AppState {
@@ -242,6 +247,7 @@ impl AppState {
             #[cfg(feature = "observe")]
             otel: None,
             pause_path: None,
+            last_activity: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         }
     }
 

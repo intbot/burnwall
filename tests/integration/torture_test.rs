@@ -56,6 +56,7 @@ fn state_for(upstream: String, storage: Arc<Storage>, client: reqwest::Client) -
         #[cfg(feature = "observe")]
         otel: None,
         pause_path: None,
+        last_activity: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0)),
     }
 }
 
