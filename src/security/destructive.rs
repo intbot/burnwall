@@ -11,15 +11,23 @@
 /// First catastrophic pattern matched in `s`, or `None`. Returns the technique
 /// label, safe to log.
 pub fn first_match(s: &str) -> Option<&'static str> {
-    let lower = collapse_ws(&s.to_ascii_lowercase());
+    let lower = s.to_ascii_lowercase();
 
-    if is_recursive_force_rm(&lower) {
+    // Recursive force-delete is judged PER shell command segment (see
+    // `command_segments`): a `$(...)`, a bare `/`, or a glob belonging to a
+    // *different* command in a compound line must not combine with an unrelated
+    // `rm` and trip a false catastrophic match (FP-review 2026-06-18:
+    // `PID=$(...); rm -rf ./scoped` and `echo "a / b"; grep "rm -rf" src/`).
+    if command_segments(&lower).any(segment_is_catastrophic_rm) {
         return Some("recursive force delete");
     }
-    if is_disk_destroyer(&lower) {
+    // Disk/filesystem destruction and destructive SQL are single-command shapes;
+    // the collapsed whole string is fine for them.
+    let collapsed = collapse_ws(&lower);
+    if is_disk_destroyer(&collapsed) {
         return Some("disk/filesystem destruction");
     }
-    if is_destructive_sql(&lower) {
+    if is_destructive_sql(&collapsed) {
         return Some("destructive SQL (drop/truncate)");
     }
     None
@@ -30,28 +38,45 @@ fn collapse_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// `rm` that is BOTH recursive AND force, aimed at a broad/expandable target.
-/// Catches `-rf`, `-fr`, `-r -f`, `--recursive --force`, `-Rf`, etc.
-fn is_recursive_force_rm(lower: &str) -> bool {
-    // Must invoke rm as a command token.
-    if !has_token(lower, "rm") {
+/// Split a command line into individual command segments on shell control
+/// operators — `;`, `&&`/`&`, pipelines (`|`/`||`), and newlines — so each
+/// command is judged on its own. A dangerous indicator (a `$(...)`, a bare `/`,
+/// a `*`) belonging to one command must not combine with an `rm` in a
+/// *different* command and produce a false catastrophic match. A `$(...)`
+/// substitution may itself contain these operators; splitting through it is
+/// harmless because the actual `rm` invocation lives in its own segment, which
+/// stays clean. Newlines are split here (not pre-collapsed) so a multi-line
+/// script's commands don't merge into one giant segment.
+fn command_segments(lower: &str) -> impl Iterator<Item = &str> {
+    lower
+        .split([';', '&', '|', '\n', '\r'])
+        .filter(|seg| !seg.trim().is_empty())
+}
+
+/// One shell command segment that is a catastrophic recursive force-delete:
+/// invokes `rm` with BOTH recursive AND force (`-rf`, `-fr`, `-r -f`,
+/// `--recursive --force`, `-Rf`, …) AND either disables the safety rail
+/// (`--no-preserve-root`), carries an expandable target (`$(...)`, backticks),
+/// or aims at a broad target token (root, home, cwd, globs) — all evaluated
+/// WITHIN this segment so a sibling command can't contaminate the verdict. A
+/// scoped target like `./build`, `node_modules`, or an explicit project path is
+/// left alone.
+fn segment_is_catastrophic_rm(raw_segment: &str) -> bool {
+    let seg = collapse_ws(raw_segment);
+    let seg = seg.as_str();
+    if !has_token(seg, "rm") {
         return false;
     }
-    let recursive = contains_flag(lower, 'r') || lower.contains("--recursive");
-    let force = contains_flag(lower, 'f') || lower.contains("--force");
+    let recursive = contains_flag(seg, 'r') || seg.contains("--recursive");
+    let force = contains_flag(seg, 'f') || seg.contains("--force");
     if !(recursive && force) {
         return false;
     }
-    // Anything that disables the safety rail, or an expandable target, is
-    // catastrophic regardless of the rest.
-    if lower.contains("--no-preserve-root") || lower.contains("$(") || lower.contains('`') {
+    if seg.contains("--no-preserve-root") || seg.contains("$(") || seg.contains('`') {
         return true;
     }
-    // Broad/expandable *target token*: root, home, cwd, globs. A scoped target
-    // like `./build` or `node_modules` is left alone (token equality, so `.`
-    // does not match `./build`).
     const BROAD: &[&str] = &["/", "/*", "~", "~/", ".", "./*", "*", "$home", "$home/"];
-    tokens(lower).any(|t| BROAD.contains(&t))
+    tokens(seg).any(|t| BROAD.contains(&t))
 }
 
 /// Writing over a raw disk / making a filesystem — irreversible.
@@ -134,6 +159,39 @@ mod tests {
         assert_eq!(first_match("rm -rf node_modules"), None);
         assert_eq!(first_match("rm file.txt"), None); // not recursive+force
         assert_eq!(first_match("rm -r logs/old"), None); // recursive but not force
+    }
+
+    #[test]
+    fn does_not_flag_rm_when_danger_is_in_a_sibling_command() {
+        // FP-review 2026-06-18 — real dogfooding repros. The `rm` is judged per
+        // command segment, so a `$(...)` or bare `/` from ANOTHER command in the
+        // line can't make a scoped delete look catastrophic.
+        //
+        // (1) A scoped `rm -rf` after an unrelated `$()` (a PID capture). The
+        //     subshell belongs to `netstat`, not the rm; the rm target is an
+        //     explicit project artifact dir.
+        let scoped_rm_after_subshell =
+            "PID=$(netstat -ano | grep ':3210' | awk '{print $NF}')\n\
+             rm -rf \"C:/Code/ng2-pdfjs-viewer/.playwright-mcp\"";
+        assert_eq!(first_match(scoped_rm_after_subshell), None);
+
+        // (2) Searching source FOR the literal: `rm` lives in a grep pattern, and
+        //     a bare `/` lives in an unrelated echo on another line. Neither
+        //     segment is a delete. This exact shape blocked the session fixing it.
+        let grep_for_the_pattern =
+            "echo \"=== destructive_blocked / rules ===\"\n\
+             grep -rn \"rm -rf|disk wipe\" src/security/ | head";
+        assert_eq!(first_match(grep_for_the_pattern), None);
+    }
+
+    #[test]
+    fn still_flags_rm_with_danger_in_its_own_segment() {
+        // The per-segment fix must NOT weaken real catches: danger in the rm's
+        // own segment still trips, after a benign sibling command.
+        assert!(first_match("ls -la; rm -rf /").is_some());
+        assert!(first_match("echo hi && rm -rf $(cat targets)").is_some());
+        assert!(first_match("rm -rf ~ | tee log").is_some());
+        assert!(first_match("cd /tmp && rm -rf *").is_some());
     }
 
     #[test]
