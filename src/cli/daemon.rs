@@ -656,13 +656,16 @@ pub fn process_is_alive(pid: u32) -> bool {
 #[cfg(unix)]
 fn process_is_burnwall(pid: u32) -> bool {
     // Linux: /proc/<pid>/exe symlink. macOS: no /proc — fall back to `ps`.
+    // Match against the FULL image path, not just the file name: the real
+    // binary's path always contains "burnwall" (its dir and/or file name), and
+    // this keeps the three platforms consistent — Windows checks the full image
+    // path and macOS's `ps -o comm=` returns the full path too. A bare file-name
+    // check diverged on Linux and read a binary launched from a burnwall checkout
+    // (e.g. the `daemon_test-*` integration runner) as "not burnwall".
     #[cfg(target_os = "linux")]
     {
         match std::fs::read_link(format!("/proc/{pid}/exe")) {
-            Ok(p) => p
-                .file_name()
-                .map(|n| n.to_string_lossy().contains("burnwall"))
-                .unwrap_or(true),
+            Ok(p) => p.to_string_lossy().contains("burnwall"),
             Err(_) => true,
         }
     }
