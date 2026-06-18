@@ -193,9 +193,11 @@ id = "corp"
 deny_paths = ["/corp/secrets"]
 "#,
     );
-    assert!(engine
-        .scan(br#"{"path": "/corp/secrets/db.json"}"#)
-        .is_some());
+    assert!(
+        engine
+            .scan(br#"{"path": "/corp/secrets/db.json"}"#)
+            .is_some()
+    );
 }
 
 // ── Official bundled packs (Phase B) ───────────────────────────────────────
@@ -217,4 +219,110 @@ fn official_packs_all_parse() {
             "official pack '{id}' should carry at least one rule"
         );
     }
+}
+
+// ── `rules lint` — registry-acceptance linter ───────────────────────────────
+
+/// The bundled official packs must themselves pass the strict registry lint —
+/// this is the gate the `burnwall-rules` CI calls, and it runs here in CI too,
+/// so we can never ship an official pack the registry would reject.
+#[test]
+fn official_packs_pass_lint() {
+    use burnwall::security::packs;
+    for (id, toml) in packs::OFFICIAL_PACKS {
+        let findings = packs::lint(toml);
+        assert!(
+            packs::lint_is_clean(&findings),
+            "official pack '{id}' must lint clean, got: {:?}",
+            findings
+                .iter()
+                .filter(|f| f.severity == packs::LintSeverity::Error)
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn lint_rejects_forbidden_and_unknown_keys() {
+    use burnwall::security::packs;
+    // A loosening key (I2) is an error, not just a warning like the runtime.
+    let f = packs::lint("id = \"x\"\nallow_paths = [\"/etc\"]\ndeny_paths = [\"/a\"]\n");
+    assert!(f.iter().any(|x| x.code == "forbidden-key"));
+    assert!(!packs::lint_is_clean(&f));
+    // A surprise key the registry doesn't understand is also an error.
+    let f = packs::lint("id = \"x\"\nsurprise = 1\ndeny_paths = [\"/a\"]\n");
+    assert!(f.iter().any(|x| x.code == "unknown-key"));
+}
+
+#[test]
+fn lint_rejects_overbroad_rules() {
+    use burnwall::security::packs;
+    let overbroad_path = packs::lint("id = \"x\"\ndeny_paths = [\"/.env\"]\n");
+    assert!(overbroad_path.iter().any(|x| x.code == "overbroad-path"));
+
+    let overbroad_cmd = packs::lint("id = \"x\"\ndeny_commands = [\"rm\"]\n");
+    assert!(overbroad_cmd.iter().any(|x| x.code == "overbroad-command"));
+
+    let overbroad_re =
+        packs::lint("id = \"x\"\n[[secret_patterns]]\nname = \"all\"\nregex = \".*\"\n");
+    assert!(overbroad_re.iter().any(|x| x.code == "overbroad-regex"));
+}
+
+#[test]
+fn lint_rejects_uncompilable_regex() {
+    use burnwall::security::packs;
+    // An unbalanced group never compiles — registry rejects (runtime would skip).
+    let f = packs::lint("id = \"x\"\n[[secret_patterns]]\nname = \"bad\"\nregex = \"(\"\n");
+    assert!(f.iter().any(|x| x.code == "bad-regex"));
+}
+
+#[test]
+fn lint_flags_empty_pack_and_missing_id() {
+    use burnwall::security::packs;
+    assert!(
+        packs::lint("id = \"x\"\n")
+            .iter()
+            .any(|x| x.code == "empty-pack")
+    );
+    assert!(
+        packs::lint("deny_paths = [\"/a\"]\n")
+            .iter()
+            .any(|x| x.code == "missing-id")
+    );
+}
+
+// ── M-M6 — pack id is used as a filename; reject traversal attempts ─────────
+
+#[test]
+fn pack_id_validation_blocks_path_traversal() {
+    use burnwall::cli::rules::validate_pack_id;
+    // Registry alphabet passes.
+    assert!(validate_pack_id("django").is_ok());
+    assert!(validate_pack_id("data-science_2").is_ok());
+    // Anything that could escape the rules dir (or surprise the FS) fails.
+    assert!(validate_pack_id("..\\..\\x").is_err());
+    assert!(validate_pack_id("../escape").is_err());
+    assert!(validate_pack_id("a/b").is_err());
+    assert!(validate_pack_id("a.b").is_err());
+    assert!(validate_pack_id("UPPER").is_err());
+    assert!(validate_pack_id("").is_err());
+    assert!(validate_pack_id("nul:").is_err());
+}
+
+#[test]
+fn lint_clean_pack_passes_with_only_warnings() {
+    use burnwall::security::packs;
+    // Valid rules but no name/version → clean (warnings don't fail the gate).
+    let f = packs::lint("id = \"corp\"\ndeny_paths = [\"/corp/secrets\"]\n");
+    assert!(packs::lint_is_clean(&f), "should pass: {f:?}");
+    assert!(f.iter().any(|x| x.severity == packs::LintSeverity::Warning));
+
+    // Fully specified pack → zero findings.
+    let full = packs::lint(
+        "id = \"corp\"\nname = \"Corp\"\nversion = \"1.0.0\"\ndeny_paths = [\"/corp/secrets\"]\n",
+    );
+    assert!(
+        full.is_empty(),
+        "fully-specified pack should have no findings: {full:?}"
+    );
 }

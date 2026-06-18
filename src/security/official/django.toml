@@ -2,14 +2,24 @@
 # Bundled in the binary (inherently trusted). Declarative + deny-only.
 id = "django"
 name = "Django security rules"
-version = "1.0.0"
+version = "1.1.0"
 
 # Sensitive Django files an agent generally should not read or exfiltrate.
+# Scoped to credential-bearing files, not general source.
 deny_paths = [
     "/settings/secrets.py",
+    "/local_settings.py",
+    "/settings/local.py",
 ]
 
-# A hardcoded Django SECRET_KEY (request signing key) appearing in a payload.
+# Genuinely destructive Django management commands (data loss).
+deny_commands = [
+    "manage.py flush",
+    "manage.py sqlflush",
+    "manage.py reset_db",
+]
+
+# A hardcoded Django SECRET_KEY (request-signing key) appearing in a payload.
 [[secret_patterns]]
 name = "Django SECRET_KEY"
 regex = '''SECRET_KEY\s*=\s*['"][^'"]{16,}['"]'''

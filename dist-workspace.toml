@@ -20,6 +20,14 @@ ci = "github"
 #   npm              -> an npm package using the esbuild optionalDependencies layout
 #   msi              -> a native Windows installer
 installers = ["shell", "powershell", "homebrew", "npm", "msi"]
+# Install to the SAME directory the hand-written README installer (install.ps1
+# / install.sh) uses and persists on PATH (L-C3). Without this, cargo-dist
+# defaults to $CARGO_HOME/bin, so `burnwall upgrade` (which runs the dist
+# installer) wrote the new binary to a *different* dir than the running one —
+# leaving the restart pointed at the old path, a second PATH entry, and an
+# autostart Run-key aimed at a now-stale exe. One canonical dir removes the
+# whole class.
+install-path = "~/.burnwall/bin"
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 # Where the Homebrew formula is published (the existing tap repo).
@@ -36,3 +44,20 @@ tap = "intbot/homebrew-burnwall"
 publish-jobs = ["./publish-crates", "./publish-nuget", "./publish-pypi"]
 # Run a plan-only check on PRs (don't try to build/publish on every PR).
 pr-run-mode = "plan"
+# `release.yml` carries a manual patch over the dist-generated workflow (the
+# attestation-retry block — re-apply after any `dist generate`). Without this,
+# dist's CI-consistency guard fails `plan` because the committed workflow no
+# longer matches what dist would emit. Scope is "ci" only, so every other file
+# is still checked for drift.
+allow-dirty = ["ci"]
+# Generate GitHub Artifact Attestations (Sigstore keyless build provenance,
+# SLSA Build L2). Every released binary can then be verified with
+# `gh attestation verify <file> --repo intbot/burnwall`. No signing key to
+# manage — a security tool should be exemplary about its own integrity.
+github-attestations = true
+# Code signing is NOT wired yet — unsigned releases can trip Windows Defender /
+# SmartScreen and macOS Gatekeeper. The procurement + CI plan (Azure Artifact
+# Signing for Windows, Apple Developer ID + notarization for macOS) lives in
+# internal/SIGNING.md. Signing must integrate through cargo-dist's codesign hook
+# so the SIGNED binary is the one hashed + attested — a post-hoc re-sign would
+# break the published checksums and `gh attestation verify`.

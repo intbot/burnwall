@@ -2,6 +2,629 @@
 
 All notable changes to Burnwall.
 
+## [0.11.0] — 2026-06-17
+
+A dashboard-polish release: clearer, more glanceable surfaces, plus two new
+cost views and a security hardening — all built on data Burnwall already
+captures on the wire. Still zero telemetry, still a single local binary.
+
+### Added
+
+**Cost**
+- **`burnwall accuracy`** — contrast your real on-the-wire, cache-aware cost with
+  a naive token tally (every prompt token charged at the base input rate, the
+  shortcut a log-only estimator takes when it ignores cache reads). For
+  cache-heavy coding sessions the naive tally can overstate the bill by a wide
+  margin; this shows by how much, per model.
+- **`burnwall tags`** — attribute spend by your own labels. Set the opt-in
+  `x-burnwall-tags` header (e.g. `feature=auth,agent-run=run42,client=acme`) and
+  Burnwall rolls spend up by key → value, locally, with cost and request counts.
+
+**Surfaces**
+- **Delta-vs-previous chips** on the stat cards: `burnwall status` compares to
+  yesterday, `burnwall history` to the prior window, coloured by whether the move
+  is good or bad (spend up = caution, cache up = good).
+- **Share-of-spend bars** in the cost-by-model tables, so the dominant model is
+  obvious at a glance.
+- **Daily-spend sparkline** in `burnwall history`, and a 7-day spend trend on
+  `burnwall status`.
+- **VS Code panel:** a spend-trend chart, delta chips, and share bars — rendered
+  with a baked, script-free SVG so it works under the panel's locked-down webview
+  and adapts to your editor theme.
+
+**Security**
+- **MCP tool fingerprints now use SHA-256** (collision-resistant). The upgrade is
+  migrated in place: an already-approved tool is re-pinned to the new format
+  silently and is **not** re-prompted by the format change alone — only a genuine
+  change to the tool still resets approval.
+
+## [0.10.0] — 2026-06-12
+
+A large release: a wave of security, cost, and compliance features, plus an
+availability-hardening pass driven by dogfooding — so the proxy stays safe to run
+hands-off even when something outside Burnwall (an antivirus, a crash) takes it down.
+
+### Added
+
+**Security**
+- **Scan agent config files for committed secrets + hidden instructions.** `burnwall
+  scan <paths>` checks `CLAUDE.md` / `.cursorrules` / `.mcp.json` / `.claude/` and
+  friends for committed credentials and invisible-Unicode instruction smuggling, with
+  SARIF output. A one-line **GitHub Action** runs it in CI and posts findings to the
+  repository's Security tab.
+- **Teach your agent about Burnwall.** `burnwall skills install` drops a guide where
+  Claude Code and Codex discover it, so the agent can read your spend, explain a block,
+  and run the file scanner — but never weaken protection itself.
+- **Decode-then-scan + invisible-text scrubbing.** Obfuscated (base64/hex) and
+  zero-width-Unicode payloads inside tool calls are un-hidden before checking.
+- **Canary trap.** Plant a fake credential; if it ever tries to leave the machine, the
+  request is blocked and a tamper-proof receipt is sealed.
+- **Egress checks for file uploads and credential misdirection** (opt-in), a
+  **silent-billing watchdog** (warns when a session flips from subscription to metered),
+  and a **slow-drip exfiltration monitor** (warn-only).
+- **Per-project MCP allowlist** — restrict which MCP servers an agent may reach, per repo.
+- **Paranoid mode** (opt-in) — fail closed: block a request the scanner cannot inspect,
+  for users who prefer that over the fail-open default.
+- **Image/link exfil warning** (opt-in, warn-only) — flags a model reply that embeds a
+  data-carrying image URL, the zero-click exfiltration pattern.
+
+**Cost**
+- **Per-repo / per-client cost export** to CSV, correct even when several projects run
+  at once.
+- **`burnwall wire-check`** — compare your real on-the-wire spend with a log-scrape
+  estimate.
+- **Cache-dead-zone warning**, an **hourly spend brake** (opt-in), and an optional
+  **cheaper-model fallback** when you hit a budget cap instead of stopping work.
+- **Tool-output trim** (opt-in) — middle-truncate oversized tool results before they
+  re-enter context, with an in-band marker, to cut token cost.
+
+**Compliance**
+- **SPDX 3.0 AI-profile bill-of-materials** and framework-labelled evidence packs on top
+  of the existing CycloneDX AIBOM + SARIF exporters; a control crosswalk rides on blocks.
+
+**Integration**
+- **Sit in front of a gateway you already use.** A new `[upstreams]` config (and
+  `--upstream-*` flags) chains Burnwall ahead of any OpenAI- or Anthropic-compatible
+  gateway, keeping cross-tool spend tracking and enforcement on top.
+
+**Resilience**
+- **`burnwall recover`** — get unstuck if the proxy dies under you: pauses routing so new
+  shells go direct, and explains how to restore already-open tools.
+- **`burnwall guard`** — a watchdog that auto-pauses routing if the proxy dies while
+  routed, so a crash or quarantine can't strand new shells.
+
+**Diagnostics & data**
+- **`burnwall doctor`** — a one-glance health check that names what's wrong and the exact
+  fix, with `burnwall doctor --export` writing a redacted, metadata-only bundle that
+  self-scans for secrets before it's written (and refuses to write if anything
+  secret-shaped survives) — the thing to attach to a bug report.
+- **`burnwall explain <id>`** — explain any block in plain language: what rule fired, a
+  masked preview of what matched, why that class is blocked, and how to proceed.
+- **`burnwall export --format csv|json`** — a portable copy of your metadata, on your
+  machine, any time.
+- **Rule reference + troubleshooting docs.** Every block carries a stable rule id that
+  resolves to a `docs/RULES.md` entry (mirrored by `burnwall explain`), plus a
+  symptom→fix `docs/TROUBLESHOOTING.md` and a diagnostic-first bug-report template.
+
+### Changed
+- **Graceful drain on stop.** `burnwall stop` (and `upgrade`) now let in-flight requests
+  finish before exiting instead of cutting them mid-stream.
+- **A crash, forced kill, or antivirus quarantine is now diagnosed.** `burnwall start`
+  notices an unclean prior exit and, on a streak, points at the likely cause (an
+  antivirus quarantining the unsigned binary) with the fix. Panics in background tasks
+  are now written to the log instead of vanishing silently.
+- **Status-line block count** reads `🚫 N blocked` and no longer renders the digit on top
+  of the shield glyph in some terminals.
+- **Status-line context reads true.** The context gauge no longer snaps toward ~100% off
+  a stale plan window — it shows the tool's own headroom figure (the one `/usage` reports)
+  and marks it stale rather than implying the conversation is nearly full.
+- **Blocks and alerts are reported separately.** A warn-only security alert is no longer
+  counted as a block: `burnwall status` shows the two side by side, and the nudge line
+  reads "blocked N request(s)" versus "raised N security alert(s)" honestly.
+- **Windows install note.** The README and the installer now explain the
+  Defender/SmartScreen false positive and how to recover from it.
+
+### Fixed
+- **Fewer false security blocks**, each locked with a regression test: a
+  credential-shaped string in resent conversation history (including a `/compact`
+  summary), an editor tool writing a key into a local test fixture, a search query that
+  mentions a sensitive path, and a tool's non-command metadata field no longer 403 —
+  while a genuine credential or dangerous command inside an actual tool call still blocks.
+- **MCP watcher description-drift state is now per-watcher.** The advisory "a tool changed
+  its description" memory was process-global, so two watchers — or an ephemeral upstream
+  port reused by a different server — could leak sightings into each other (a flaky test
+  surfaced it). It's now scoped to each watcher instance; enforcement was never affected.
+
+## [0.9.15] — 2026-06-10
+
+A follow-up from live dogfooding: kill a false-positive class that could wedge a
+whole session, make every block explain itself, give false positives a live
+escape hatch, and stop surfaces from showing stale numbers when the proxy is
+down.
+
+### Added
+- **`burnwall pause` / `resume` / `allow-once` — a live escape hatch.** After a
+  block you believe is a false positive, `burnwall allow-once` lets exactly the
+  next request through (then protection restores itself), and `burnwall pause
+  [5m]` relays everything unchecked for a bounded window — both take effect on
+  the running proxy with no daemon or AI-tool restart, so the agent's session
+  survives. Pauses auto-expire (default 5 minutes, capped at 24 hours), an
+  unused allow-once expires after 10 minutes, and every status surface shows a
+  loud `⏸ PAUSED` warning with a countdown for the whole window. Block messages
+  now point at these toggles; the previous advice (an environment variable plus
+  a tool restart) never reached a backgrounded daemon and has been removed.
+
+### Fixed
+- **A secret-shaped token in conversation history no longer blocks the session.**
+  Security data checks (credentials, cards, SSNs) now run only inside tool-call
+  arguments — the agent *action* — never on prose or resent conversation history.
+  Clients resend the full conversation every turn, so a key-shaped string merely
+  *quoted or discussed* (e.g. an example key in a summary) used to 403 every
+  request until the session was abandoned. The exfiltration vector that matters —
+  a credential leaving the machine inside a tool call — stays fully covered.
+- **Subscribers no longer see a notional dollar figure where a plan reading
+  belongs.** When the latest plan reading is stale (idle, or the proxy was briefly
+  down), the status line keeps showing last-known plan headroom — marked stale —
+  instead of falling back to a session-cost figure that reads as real money. The
+  `status` command frames a subscriber's spend as notional, not a budget breach.
+
+### Changed
+- **Blocks now explain themselves.** A security block names the tool that tripped
+  it, shows a masked, recognisable preview of what matched (e.g. `AKIA…LKEY`) for
+  credential/PII hits — the raw value is never echoed or logged — and states why
+  that class is blocked, instead of a bare category label.
+- **A down proxy now looks down.** When routing points at a dead proxy, status
+  surfaces drop the cost, plan, today, and block-count segments (all stale with no
+  capture happening) and show only the loud "proxy down" warning alongside the
+  tool-reported token and context gauges.
+
+## [0.9.14] — 2026-06-10
+
+A real-world robustness pass driven by dogfooding: a multi-agent review of
+every feature, focused on the failure modes that make a tool freeze, falsely
+block, or mislead — the kind that trigger an uninstall.
+
+### Fixed
+
+- **The daily budget now resets at midnight.** A long-running proxy used to
+  accumulate spend across days and eventually return "budget exceeded" on every
+  request even though the day's real spend was small. The counter is now
+  day- and month-aware (restart- and clock-change-proof), and the monthly cap
+  is actually enforced.
+- **Loop detection no longer gets stuck on retries.** A blocked request (and a
+  client's automatic retry of it, or a retry after a provider outage) no longer
+  feeds the loop-detection window, so a transient blip can't wedge a session
+  into a permanent 429 loop. Blocks now carry a `Retry-After`, and the window is
+  keyed per method/provider/path so unrelated requests don't collide.
+- **Fewer false security blocks.** Writing or discussing a file that merely
+  mentions a sensitive path (e.g. `~/.ssh` in a README) no longer 403s — only
+  shell-tool arguments get command checks. Windows paths in tool arguments are
+  no longer mistaken for network mounts, scoped deletes like `rm -rf /tmp/x`
+  pass, and well-known documentation/example keys are exempt. Blocks now explain
+  what was caught and how to proceed, and `burnwall report-bug` writes a
+  sanitized local report for false positives.
+- **The proxy no longer hangs on a stalled or unreachable upstream**, and
+  cancelling a request (Esc) stops the upstream instead of billing the full
+  response.
+- **Accurate cost capture for more tools.** OpenAI's Responses API (used by
+  Codex) is now parsed instead of silently recording $0, unknown models warn
+  instead of recording $0, and the cross-tool "today" total no longer
+  double-counts traffic that went through the proxy.
+
+### Changed
+
+- **A crashed or stopped proxy no longer breaks your terminals.** Shell routing
+  is liveness-gated: if the proxy isn't running, a new shell talks directly to
+  the provider (unprotected but working) instead of failing to connect. Every
+  status surface shows a clear "proxy down" warning when routing points at a
+  dead port. PowerShell now gets persistent routing like the other shells.
+- Plan-aware budgeting: on a flat-rate subscription, the dollar cap is treated
+  as advisory (tracked and warned, not blocked) unless you opt in.
+- Hardening across MCP (prose-safe scanning, clearer approval errors), the audit
+  chain (lost-key detection), storage (schema versioning), and the daemon
+  (a real log file, PID identity checks).
+
+## [0.9.13] — 2026-06-09
+
+### Fixed
+
+- **Talking *about* a denied path or command no longer blocks the request.**
+  The proxy's security scan previously applied every rule to every string in
+  the request body, so a system prompt, chat message, tool definition, or tool
+  result that merely *mentioned* `~/.ssh` or `rm -rf` returned a 403 — e.g. a
+  project's CLAUDE.md documenting a deny list made every Claude Code request
+  from that repo fail (surfacing in the client as a bogus "run /login" auth
+  error). Command-shaped rules (denied paths/commands, network mounts,
+  destructive commands, exfil techniques) now apply only inside tool-call
+  argument subtrees (Anthropic `tool_use.input`, OpenAI
+  `tool_calls`/`function_call` arguments, Gemini `functionCall`) — the places
+  an agent actually acts. Secret detection and DLP still scan the entire
+  payload, and MCP `tools/call` bodies keep the strict whole-body scan.
+- **A blocked tool call no longer poisons the conversation forever.** Clients
+  resend the full history on every request, so one (correctly) blocked call
+  used to re-trigger the 403 on every subsequent message — the only escapes
+  were a new conversation or the bypass switch. Command-shaped rules now apply
+  to the **latest assistant turn's in-flight tool round** only: the request
+  carrying the dangerous call (and its results) is still blocked, but once the
+  user sends a new message that round is adjudicated history and the
+  conversation continues. Secrets/DLP still scan all turns, so sensitive
+  content in old results stays caught.
+- **`burnwall stop` no longer strands routed shells on a dead proxy.** Stopping
+  the proxy used to leave `ANTHROPIC_BASE_URL`/`OPENAI_BASE_URL` pointing at
+  the closed port, so every AI tool failed with a connection error until the
+  user discovered `disable-routing`. `stop` now pauses routing (new shells go
+  direct), prints how to clear the variables from already-open terminals, and
+  `start` resumes routing automatically. An explicit `burnwall
+  disable-routing` is remembered and never overridden by `start`; opt out of
+  the coupling with `stop --keep-routing` / `start --no-routing`.
+
+### Added
+
+- **`uninstall` now removes routing env files instead of stubbing them, and
+  warns about already-open terminals.** The leftover banner-only stub was
+  residue on a machine the user asked to clean, and it kept counting the
+  shell as "configured" forever (fish/PowerShell are detected by env-file
+  presence). Uninstall also can't pull env vars out of running shells — no
+  uninstaller can — so it now says so and prints the per-shell unset command.
+
+- **Pricing for Claude Fable 5 and Opus 4.8** (both released 2026-06-09):
+  `claude-fable-5` at $10/$50 per MTok (cache write $12.50, read $1.00) and
+  `claude-opus-4-8` at the standard Opus $5/$25. Pricing lookup now also
+  resolves bracket variant tags — Claude Code requests the 1M-context tier as
+  `claude-fable-5[1m]`, which previously fell through to "unknown model".
+
+## [0.9.12] — 2026-06-09
+
+### Fixed
+
+- **Routing commands now act on every configured shell, not just the detected
+  one.** A user often drives more than one shell (on Windows, PowerShell *and*
+  Git-bash are the norm). Previously `enable-routing` / `disable-routing` /
+  `uninstall` resolved a single shell and touched only its env file + rc hook, so
+  enabling from PowerShell left bash silently unrouted (and `uninstall` could
+  leave a live rc hook pointing at a removed proxy). They now sync the detected
+  shell **plus** every shell already configured for routing, keeping them
+  consistent. Bash/zsh are disambiguated by their rc-hook (they share one
+  `env.sh`); fish/PowerShell by their own env files — so a never-used shell is
+  never pulled in (no spurious `~/.zshrc`).
+
+### Added
+
+- **Not-routed warning on the Claude Code status line.** When a tool's traffic
+  isn't flowing through the proxy, the ribbon shows a loud `⚠ DIRECT
+  (unprotected)` chip (and `⚠ bypass` when `BURNWALL_BYPASS` is set) right after
+  the model — so "the proxy is running but my traffic isn't reaching it" can't go
+  unnoticed. Detected from the tool's `*_BASE_URL` in the environment the status
+  line inherits; silent on the healthy path.
+- **Routing readout in `burnwall status`.** A per-shell line states whether this
+  shell points traffic at the proxy, with the one-line fix when it doesn't; also
+  surfaced as `env_routing` in `status --json` for the editor extension.
+- **Colorized console output.** The install scripts (`install.sh` / `install.ps1`),
+  the proxy banner, the background-start and login-service messages, and the
+  routing/coverage readouts now use semantic color (green = active/healthy,
+  yellow = caution, red = unprotected). Honors `NO_COLOR` and non-TTY output, so
+  piped/redirected text stays clean.
+
+## [0.9.11] — 2026-06-08
+
+### Added
+
+- **Subscription-aware status, across every surface.** For a Claude Pro/Max plan,
+  dollar figures are notional (you pay a flat rate), so Burnwall now shows what's
+  actually scarce: your usage-window headroom. The proxy reads Anthropic's
+  `anthropic-ratelimit-unified-*` response headers (rolling 5-hour + 7-day windows)
+  off traffic it already forwards and persists a small, non-sensitive, **per-provider**
+  snapshot; surfaces render e.g. `5h [▓░░░░░░░] 17% (1h56m) · 7d 10%` in place of the
+  dollar segment, leading with whichever window the provider reports as binding and
+  flagging a throttled status. Auto-detected (a subscription emits these headers, an
+  API key doesn't — verified against Anthropic's docs), so API users keep the
+  dollar/cost view with no configuration; falls back to dollars when no fresh snapshot
+  exists. Surfaced on:
+  - the **Claude Code status line** (`burnwall statusline`);
+  - **`burnwall watch`** — the cross-tool pane for CLIs without their own status bar
+    (Codex, Aider, …): run it in a split pane to see the gauge;
+  - **`burnwall watch --title`** — emits the ribbon as a terminal-title (OSC) escape,
+    for a shell prompt hook or `tmux status-right`, so even a status-bar-less CLI gets
+    it in the window title;
+  - **`status --json`** — a `plan` block (per-provider windows + reset countdown),
+    rendered by the **VS Code / Cursor / Windsurf extension** status bar + tooltip.
+
+  The capture is provider-generic; OpenAI/Google hooks exist but return nothing until
+  their subscription signal is probed and verified (we don't synthesize a window from
+  per-minute API limits).
+
+- **Coverage readout — which of your tools are actually behind the firewall.** A
+  proxy only protects traffic that flows through it, and the dangerous failure mode
+  is *silent* non-coverage — a tool you assume is protected whose traffic never
+  reaches Burnwall. Burnwall now makes coverage visible per installed tool:
+  - **`burnwall init`** warns at setup when a detected tool is in a bypassing mode —
+    concretely, Codex signed in with ChatGPT login (read from `~/.codex/auth.json`,
+    a local non-secret mode flag), whose traffic goes to the ChatGPT backend over
+    OAuth and can't be routed through any no-MITM proxy. It notes that API-key
+    mode would route through Burnwall but bills per-token — an informed trade-off,
+    not a blanket "switch."
+  - **`burnwall status`** and **`burnwall watch`** show a per-tool **Coverage**
+    section: *protected* (provider seen routing recently), *installed but no traffic
+    seen*, or *bypasses*. `status --json` carries a `coverage` array, and the VS Code
+    / Cursor / Windsurf extension surfaces a `⚠ <tool> unprotected` warning plus a
+    tooltip breakdown.
+  - README documents the boundary outright.
+
+- **More official security rule packs.** The bundled, signed-release rule packs
+  grew from 4 to **8** — added `node`, `python`, `go`, and `kubernetes`, and
+  fleshed out `django` / `react` / `infrastructure` / `data-science` (now ~61
+  rules total). Each targets unambiguously sensitive credential/state files
+  (`.npmrc`, `.pypirc`, kubeconfigs, `terraform.tfstate`, …) and genuinely
+  destructive commands, keeping the low-false-positive bar. Install with
+  `burnwall rules install <id>`; list with `burnwall rules list`.
+- **`burnwall rules lint`** — validate a rule pack against strict acceptance rules
+  (stricter than the runtime: forbidden/unknown keys, uncompilable or over-broad
+  rules are hard errors), optionally verifying its signature (`--sig`). Exits
+  non-zero on any error and supports `--json`, so it can gate a community rule
+  repo's CI. The bundled official packs are themselves checked by it in CI.
+
+### Changed
+
+- Status ribbon now carries a `burnwall` wordmark — `🔥 burnwall · <model> · …` —
+  across every surface (Claude Code status line, `burnwall watch`, editor status
+  bar), which share one renderer.
+- `short_model` now keeps a trailing context-variant tag and upper-cases it, and
+  no longer lets it defeat the version dotting: `claude-opus-4-8[1m]` renders as
+  `opus-4.8[1M]` (was `opus-4-8[1m]`).
+
+## [0.9.10] — 2026-06-08
+
+### Added
+
+- **`burnwall init` now wires up the Claude Code status line.** When Claude Code
+  is detected, `init --apply` merges a `statusLine` block into
+  `~/.claude/settings.json` so the Burnwall ribbon (model · ↑/↓ tokens · spend)
+  appears automatically — no hand-editing JSON. The merge is idempotent,
+  preserves your other settings, writes the PATH-resolved `burnwall statusline`
+  command, and never overwrites a status line you already configured.
+- **`burnwall uninstall`** — one command to undo everything `install` + `init`
+  set up: stops the proxy, removes the login service, removes the Claude Code
+  status line (a foreign one is left untouched), empties the routing env file and
+  removes the rc-source hook, and removes the binary. Your cost-history database
+  is kept by default; `--purge` deletes the whole `~/.burnwall` data directory.
+  Confirms before acting (skip with `--yes`); refuses to run non-interactively
+  without `--yes`.
+
+### Changed
+
+- `burnwall upgrade` now sweeps the leftover `burnwall.exe.old` from a previous
+  Windows self-upgrade on the next launch, so the transient renamed binary never
+  lingers (best-effort, silent; the running binary can't delete itself).
+
+## [0.9.9] — 2026-06-08
+
+### Added
+
+- **`burnwall upgrade`** (alias `self-upgrade`) — one command to move to the
+  latest release. It stops the running proxy first (a live `burnwall.exe` can't
+  be overwritten on Windows), runs the installer, and restarts the proxy. On
+  Windows it renames its own running binary aside so the installer can write the
+  new one, restoring it if the install fails. `--dry-run` to preview,
+  `--no-restart` to skip the restart. The mirror of `self-rollback`.
+
+## [0.9.8] — 2026-06-07
+
+### Added
+
+- **`burnwall savings`** — your own *measured* cache-savings report: dollars
+  recovered through caching over a window (from real token buckets at published
+  cache-read vs base-input rates), plus models that are underusing caching. No
+  marketing percentages — your numbers.
+- **`burnwall watch` / `status` self-test heartbeat** — `status` now states
+  plainly whether protection is live ("proxy running (pid …); every request is
+  scanned"), so a passive proxy never leaves you wondering if it's working.
+- **`burnwall share`** — an opt-in, screenshot-friendly, **signed** value card
+  (spend / cache savings / blocks), verifiable against the local audit key so the
+  numbers can't be faked. Nothing leaves your machine.
+- **`burnwall sidecar`** — run the proxy as a co-located egress point for an
+  agent that executes off your laptop (self-hosted sandbox / container / CI
+  runner), with the in-sandbox env-var recipe. Same scanning + budgets; not a
+  TLS-terminating proxy (no CA injection — see `SECURITY.md`).
+- **Catastrophic-command detection by shape** — recursive-force deletes, disk
+  destruction (`dd of=/dev/…`, `mkfs`), and destructive SQL (`DROP`/`TRUNCATE`)
+  are blocked regardless of flag order, spacing, or target expansion — the forms
+  that slipped past literal/approval checks in real incidents.
+- **Data-exfiltration technique detection** (opt-in under `security.dlp`): DNS
+  exfiltration, secret-file-piped-to-network, command-substituted uploads.
+- **Per-session / swarm budget ceiling** (`budget.per_session`, opt-in via an
+  `x-burnwall-session` request header) — agents in a fan-out that share a session
+  id share one blast-radius cap; `status` shows a per-session breakdown.
+- **Build provenance** — releases now carry GitHub Artifact Attestations (SLSA
+  Build L2); verify with `gh attestation verify … --repo intbot/burnwall`. New
+  `SECURITY.md` documents integrity + TLS handling (rustls, no CA injection, no
+  plaintext at rest), backed by a guard test.
+
+### Changed
+
+- `command_matches` is whitespace-normalized, so padding (`rm   -rf   /`) can't
+  evade a literal deny rule.
+- README: "Verify your download" + the trust/defense-in-depth sections.
+
+## [0.9.7] — 2026-06-07
+
+### Added
+
+- **Data-exfiltration technique detection** (opt-in, under `security.dlp`) — the
+  scanner now flags the exfiltration *method* in a tool-call argument, not just
+  secrets in the payload: DNS exfiltration (`dig $(...).evil.com`, encoded
+  subdomains), a secret file piped to the network (`cat .env | curl -d @-`), and
+  command-substituted uploads. Conservative/high-signal (a network tool alone is
+  fine) and names only the technique, never the data.
+- **`burnwall security --summary`** — a "what Burnwall caught for you" receipt:
+  blocks grouped by type over the window (pairs with `--days 7`), so passive
+  protection registers as ongoing value instead of going unseen.
+- **`burnwall audit pack`** — one-command compliance evidence pack: bundles the
+  signed hash-chained receipts, the CycloneDX 1.6 AIBOM, and the SARIF 2.1.0
+  security findings into a directory with a `MANIFEST.md` that maps each artifact
+  to the controls auditors ask for (ISO/IEC 42001, EU AI Act Art. 12/26, FINRA).
+  The artifacts already existed; this is one command + the framework mapping you
+  can hand a security team.
+- **MCP firewall is validated against the published attacks** — a test corpus
+  models the real PoCs (Invariant tool-poisoning / SSH-key exfiltration, the
+  MCPoison rug-pull that swaps a tool's behavior after approval, `<IMPORTANT>`
+  shadowing) so coverage is provable and stays covered.
+
+### Changed
+
+- README: a **Trust & privacy** section (local, zero-telemetry, read-only on
+  responses, signed single-binary releases, auditable "no network except
+  forwarding"), a **defense-in-depth** framing for security (rules run before
+  anything leaves your machine; complements — doesn't replace — native
+  controls), and the MCP scope note now points at the built-in `mcp-watch`
+  firewall (tool-poisoning + rug-pull detection).
+
+## [0.9.6] — 2026-06-07
+
+### Added
+
+- **`burnwall watch`** — a live, cross-tool status ribbon for a spare terminal
+  pane. The in-TUI ribbon only works in Claude Code; this shows the *same*
+  renderer for every tool that routes through the proxy (Codex, Gemini, Aider,
+  …), sourced from the local database. `--oneline` for a compact line, `--once`
+  for a single frame (scripting/tests), `--interval` for the fallback refresh.
+  It refreshes event-driven off the `watch.signal` marker the proxy touches each
+  turn, with a periodic fallback. The headline figure is **today's spend across
+  all tools** — the cross-tool number no single tool shows.
+- The status ribbon's context gauge stays honest on this surface: no tool feeds
+  an exact context %, so it's an estimate (`~`) when the model's window is known
+  and the prompt fits, and `—` otherwise — never an unqualified number.
+
+### Changed
+
+- Ribbon cost fields (`sess`, `today`) are now rendered only when known, so the
+  cross-tool view (which has no per-session concept) shows per-message + today
+  without a misleading "session" figure.
+
+## [0.9.5] — 2026-06-07
+
+### Added
+
+- **`burnwall statusline`** — renders the Burnwall ribbon for Claude Code's
+  customizable status line. Reads Claude Code's per-turn JSON on stdin and prints
+  one line: `🔥 sonnet-4.6 · ↑13k ↓615 · $0.05 msg $0.16 sess · $2.40 today · ctx
+  [▓▓░░░░░░] 22%`. Per-message cost is derived from the cumulative session total;
+  today's spend and security-block count are enriched from the proxy database, so
+  the line reflects spend **across all your tools**, not just the current one.
+  Wire it up with one line in `~/.claude/settings.json`:
+  `{ "statusLine": { "type": "command", "command": "burnwall statusline" } }`.
+  Fail-open: malformed input or an unreadable database still yields a best-effort
+  line rather than breaking the editor.
+- **Context gauge is honest by construction** — the ribbon shows a context-window
+  percentage only when it's *exact* (reported by the tool, e.g. Claude Code).
+  Where a value is estimated it's flagged with `~`; where the window can't be
+  trusted it renders `—`; where the tool already shows its own gauge it's omitted
+  rather than duplicated.
+- **Activity marker** — the proxy touches `<data dir>/watch.signal` after each
+  recorded turn (off the response path, so no added latency), laying the
+  groundwork for event-driven refresh of upcoming status surfaces.
+
+### Fixed
+
+- **`burnwall install-service` on Windows no longer needs admin.** It previously
+  created a Scheduled Task at the Task Scheduler library root, which requires
+  elevation and failed with "Access is denied" for a normal shell. The default is
+  now a per-user `HKCU\…\Run` registry entry that launches `burnwall start
+  --daemon` at logon — no UAC. `--task` opts back into the Scheduled-Task variant
+  (which adds crash-restart) for users who run an elevated terminal.
+  `uninstall-service` removes whichever was installed.
+
+## [0.9.4] — 2026-06-07
+
+### Added
+
+- **Five-layer graceful-degradation model**, so a bad release can't break your AI
+  tools:
+  - `BURNWALL_BYPASS=1` — instant kill-switch. Proxy becomes a pure relay; no
+    security scan, no budget check, no storage write. Forward bytes to the
+    upstream and stream the response back unchanged.
+  - **Panic-catching wrapper** — if anything in the request pipeline panics, the
+    proxy returns a clear 502 (pointing the user at `BURNWALL_BYPASS=1`) instead
+    of dropping the connection.
+  - **Crash-loop circuit breakers** baked into each platform's service unit
+    (launchd `ThrottleInterval=60`, systemd `StartLimitBurst=5`, Task Scheduler
+    `RestartOnFailure` capped at 5 attempts).
+  - **`burnwall self-rollback <version>`** — fetches the version-pinned dist
+    installer for any prior release and reinstalls. Windows refuses to roll back
+    while the proxy is running so it can replace the binary safely.
+  - **Sourced env-file activation model** — one burnwall-owned file
+    (`~/.config/burnwall/env.sh` / `%APPDATA%\burnwall\env.ps1`) holds the
+    routing exports; the user's rc gets one idempotent source line. Disable by
+    truncating the env file — one place to revert.
+- **`burnwall enable-routing` / `disable-routing`** — write/clear the env file,
+  install the rc-hook, and emit eval-able exports for immediate-effect
+  activation in the current shell (`eval "$(burnwall enable-routing)"` on POSIX,
+  `burnwall enable-routing --eval | Out-String | Invoke-Expression` on
+  PowerShell). `enable-routing` runs a `/healthz` preflight against the proxy
+  before activating.
+- **`burnwall install-service` / `uninstall-service`** — registers burnwall as a
+  login-time service so the proxy auto-starts. User-scoped (no admin needed) on
+  all three platforms: launchd LaunchAgent on macOS, systemd user unit on Linux,
+  Windows Scheduled Task at logon.
+- **`/healthz`** local probe — returns 200 without touching upstreams. Used by
+  the activation preflight, the supervisor circuit breaker, and any external
+  monitor.
+- **Extended `burnwall init`** — two-step interactive flow that now also offers
+  login-service install and routing activation in the same run. `--apply` to
+  execute, `--yes` for unattended scripted use, `--install-service` to opt in to
+  the supervisor.
+- **Local pricing overrides** — drop a `~/.burnwall/pricing.toml` to override or
+  add model rates without waiting for a release. Entries take precedence over the
+  built-in rate card and handle date-suffixed model IDs automatically, so a
+  brand-new model can be priced immediately and a mid-cycle price change is a
+  two-line edit. This is the escape hatch the staleness warning always
+  advertised — now actually wired up.
+- **`burnwall pricing` command** — `list` shows the effective rate card (built-in
+  plus overrides, with the source of each), `path [--init]` prints/scaffolds the
+  override file.
+- **Signed remote pricing cards** — `burnwall pricing update` fetches a
+  `pricing.toml` from a URL (default: the latest GitHub release asset) and
+  installs it **only** if its detached Ed25519 signature verifies against a
+  trusted `[pricing].publishers` key — verify-before-parse, no fail-open.
+  `pricing sign` / `pricing verify` cover the publisher and offline-check sides,
+  reusing the same key format as `burnwall rules keygen`. Lets prices ship
+  between binary releases without giving up zero-trust.
+
+### Changed
+
+- **`burnwall init` output reworked** — dry-run output now lists the two actions
+  (routing + service) with the exact file paths and exports that would be
+  written. The legacy `append_to_rc` helper is kept (still used by tests) but
+  routing activation now goes through the new sourced env-file path.
+- **`burnwall status`** — the stale-pricing warning now points at
+  `burnwall pricing path --init`, and an active-override count is shown (plus a
+  `pricing_override_count` field in `status --json`).
+
+## [0.9.3] — 2026-05-29
+
+### Fixed
+
+- **Path/command security rules are now case- and separator-insensitive**, so an
+  access to `~/.SSH/id_rsa` — or a mixed `\`/`/` Windows path — can no longer slip
+  past a `~/.ssh` deny rule on case-insensitive filesystems (Windows, default macOS).
+- **`start --daemon`** now forwards the `--upstream-google` and
+  `--rewrite-anthropic-cache` flags to the background process instead of dropping them.
+
+### Added
+
+- **Opt-in cost-spiral enforcement** — set `[loop_detection].cost_spiral_enforce = true`
+  to block the next request once rolling spend exceeds `max_cost_per_window`. Off by
+  default; detection still logs a warning regardless.
+- **Optional build features** (`audit`, `mcp`, `observe`, `logscrape`, `waste`), all on
+  by default so the shipped binary is unchanged. `cargo build --no-default-features`
+  now produces a lean core-proxy build (cost + security + budget + storage).
+
+### Changed
+
+- **Migrated to the Rust 2024 edition** with a declared minimum supported Rust version,
+  and moved lint policy into `Cargo.toml`.
+- **SQLite hardening** — WAL journal mode and a busy-timeout, plus response-path writes
+  now run off the async runtime so the proxy never stalls on disk I/O.
+
 ## [0.9.2] — 2026-05-28
 
 ### Added

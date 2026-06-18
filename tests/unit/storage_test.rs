@@ -66,6 +66,41 @@ fn open_in_memory_creates_all_tables() {
 }
 
 #[test]
+fn tags_roundtrip_and_tag_rows_query() {
+    let storage = Storage::open_in_memory().expect("open");
+    // A tagged forwarded row + an untagged one + a tagged-but-blocked one.
+    let tagged = RequestRecord::successful("anthropic", "claude-sonnet-4-6", &sample_usage(), 0.50, None)
+        .with_tags(Some(r#"{"client":"acme","feature":"auth"}"#.to_string()));
+    let id = storage.insert_request(&tagged).unwrap();
+    storage
+        .insert_request(&RequestRecord::successful(
+            "openai",
+            "gpt-4o",
+            &sample_usage(),
+            0.10,
+            None,
+        ))
+        .unwrap();
+    let mut blocked = RequestRecord::blocked("anthropic", "m", "path_blocked", None)
+        .with_tags(Some(r#"{"client":"acme"}"#.to_string()));
+    blocked.timestamp = Utc::now();
+    storage.insert_request(&blocked).unwrap();
+
+    // The tag survives a read-back.
+    let got = storage.get_request(id).unwrap().unwrap();
+    assert_eq!(
+        got.tags.as_deref(),
+        Some(r#"{"client":"acme","feature":"auth"}"#)
+    );
+
+    // tag_rows_since_days returns only forwarded, tagged rows — the untagged
+    // row and the blocked row are both excluded.
+    let rows = storage.tag_rows_since_days(30).unwrap();
+    assert_eq!(rows.len(), 1, "only the one tagged, forwarded row");
+    assert!((rows[0].1 - 0.50).abs() < 1e-9);
+}
+
+#[test]
 fn open_is_idempotent() {
     let storage = Storage::open_in_memory().expect("first open");
     // No direct way to call migrate() a second time on the same connection
@@ -240,6 +275,45 @@ fn daily_totals_groups_by_date_and_aggregates() {
     assert_eq!(totals[1].total_requests, 1);
     assert_eq!(totals[1].total_blocked, 0);
     assert!((totals[1].total_cost - 0.20).abs() < 1e-9);
+}
+
+#[test]
+fn daily_totals_one_day_window_returns_only_today() {
+    let storage = Storage::open_in_memory().unwrap();
+
+    // One row today, one yesterday. A `days = 1` window means *today only* —
+    // the same inclusive-of-today convention as the `*_since_days` queries
+    // (regression test for the off-by-one that made `history --days 7`
+    // print 8 days).
+    let mut today_row = RequestRecord::successful(
+        "anthropic",
+        "claude-sonnet-4-6",
+        &sample_usage(),
+        0.05,
+        None,
+    );
+    today_row.timestamp = local_noon(0);
+    storage.insert_request(&today_row).unwrap();
+
+    let mut yesterday_row =
+        RequestRecord::successful("openai", "gpt-5.4", &sample_usage(), 0.20, None);
+    yesterday_row.timestamp = local_noon(-1);
+    storage.insert_request(&yesterday_row).unwrap();
+
+    let totals = storage.daily_totals(1).unwrap();
+    assert_eq!(
+        totals.len(),
+        1,
+        "1-day window must hold today only, got {totals:?}"
+    );
+    assert_eq!(totals[0].date, local_date(0));
+    assert_eq!(totals[0].total_requests, 1);
+    assert!((totals[0].total_cost - 0.05).abs() < 1e-9);
+
+    // A 2-day window picks yesterday back up.
+    let totals = storage.daily_totals(2).unwrap();
+    assert_eq!(totals.len(), 2);
+    assert_eq!(totals[1].date, local_date(-1));
 }
 
 // ─────────────────────────── Security events ───────────────────────────
@@ -429,6 +503,45 @@ fn rug_pull_change_resets_approval_to_pending() {
 }
 
 #[test]
+fn fingerprint_format_upgrade_does_not_repend_approved_tool() {
+    // Legacy FNV-1a fingerprints were 16 hex chars; the SHA-256 upgrade emits
+    // 64. Re-observing an approved tool with the new-format hash must be a
+    // silent migration (Unchanged, still approved), NOT a rug-pull re-pend.
+    let storage = Storage::open_in_memory().unwrap();
+    let legacy = "0123456789abcdef"; // 16 hex chars — FNV-1a shape
+    let sha256 = "a".repeat(64); //     64 hex chars — SHA-256 shape
+    storage.observe_mcp_tool("fs", "read", legacy).unwrap();
+    storage.approve_mcp_tool("fs", "read").unwrap();
+
+    assert_eq!(
+        storage.observe_mcp_tool("fs", "read", &sha256).unwrap(),
+        McpToolObservation::Unchanged,
+        "format upgrade must not look like a change"
+    );
+    assert_eq!(
+        storage
+            .mcp_tool_trust_state("fs", "read")
+            .unwrap()
+            .as_deref(),
+        Some("approved"),
+        "approval must survive the fingerprint-format migration"
+    );
+    // After migration, a genuine SHA-256 content change (64→64) DOES re-pend.
+    let other = "b".repeat(64);
+    assert_eq!(
+        storage.observe_mcp_tool("fs", "read", &other).unwrap(),
+        McpToolObservation::Changed,
+    );
+    assert_eq!(
+        storage
+            .mcp_tool_trust_state("fs", "read")
+            .unwrap()
+            .as_deref(),
+        Some("pending"),
+    );
+}
+
+#[test]
 fn revoke_returns_tool_to_pending() {
     let storage = Storage::open_in_memory().unwrap();
     storage.observe_mcp_tool("fs", "write", "fp").unwrap();
@@ -479,10 +592,12 @@ fn approve_whole_server_approves_all_its_tools() {
 fn approve_unknown_tool_returns_false() {
     let storage = Storage::open_in_memory().unwrap();
     assert!(!storage.approve_mcp_tool("ghost", "nope").unwrap());
-    assert!(storage
-        .mcp_tool_trust_state("ghost", "nope")
-        .unwrap()
-        .is_none());
+    assert!(
+        storage
+            .mcp_tool_trust_state("ghost", "nope")
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]

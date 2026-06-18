@@ -19,7 +19,10 @@ $installDir = if ($env:BURNWALL_INSTALL_DIR) {
 }
 $version = if ($env:BURNWALL_VERSION) { $env:BURNWALL_VERSION } else { 'latest' }
 
-function Info($msg)  { Write-Host "burnwall: $msg" }
+function Info($msg)  { Write-Host "burnwall: " -ForegroundColor Cyan -NoNewline; Write-Host $msg }
+function Ok($msg)    { Write-Host $msg -ForegroundColor Green }
+function Warn($msg)  { Write-Host $msg -ForegroundColor Yellow }
+function Step($msg)  { Write-Host $msg -ForegroundColor White }
 function Die($msg)   { Write-Host "burnwall installer error: $msg" -ForegroundColor Red; exit 1 }
 
 # Detect architecture. PROCESSOR_ARCHITEW6432 wins if present (covers 32-bit shells on 64-bit hosts).
@@ -80,7 +83,7 @@ try {
     Copy-Item -Path $exe.FullName -Destination $dest -Force
 
     Info ''
-    Info "installed $tag to $dest"
+    Ok "✓ installed $tag to $dest"
     try { & $dest --version } catch {}
 
     # Persist to User PATH if not already there
@@ -95,14 +98,19 @@ try {
         # Also patch the current session so the next command works without reopening.
         $env:Path = "$env:Path;$installDir"
         Info ''
-        Info "added $installDir to your User PATH (persisted)."
-        Info 'open a new terminal so other shells pick up the change.'
+        Ok   "✓ added $installDir to your User PATH (persisted)."
+        Warn 'open a new terminal so other shells pick up the change.'
     }
 
     Info ''
-    Info 'next steps:'
-    Info '  burnwall init --apply    # detect AI tools and configure env vars'
-    Info '  burnwall start           # run the proxy'
+    Step 'next steps:'
+    Ok   '  burnwall init --apply    # detect AI tools and configure env vars'
+    Ok   '  burnwall start           # run the proxy'
+    Info ''
+    Warn 'Heads up: the binary is not code-signed yet, so Windows Defender/SmartScreen may'
+    Warn 'flag it as a false positive. If it gets quarantined and your AI tools start showing'
+    Warn 'ConnectionRefused, run  burnwall recover  to go direct, and exclude it (elevated):'
+    Warn '  Add-MpPreference -ExclusionPath "$HOME\.burnwall"'
 } finally {
     if (Test-Path $tmpDir) {
         Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue

@@ -112,6 +112,10 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/${{ join(matrix.targets, '-') }}-dist-manifest.json
+    permissions:
+      "attestations": "write"
+      "contents": "read"
+      "id-token": "write"
     steps:
       - name: enable windows longpaths
         run: |
@@ -144,6 +148,30 @@ jobs:
           # Actually do builds and make zips and whatnot
           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
+      # NOTE: manual patch over the cargo-dist-generated workflow — re-apply
+      # after `dist generate`. Retries build-provenance attestation up to 3x
+      # because Sigstore's transparency log intermittently returns a transient
+      # "InternalError: error fetching tlog entry". Attestation stays MANDATORY:
+      # the final attempt is not continue-on-error, so a persistent Sigstore
+      # outage still fails the job (we never ship an un-attested release).
+      - name: Attest
+        id: attest1
+        continue-on-error: true
+        uses: actions/attest@v4
+        with:
+          subject-path: "target/distrib/*${{ join(matrix.targets, ', ') }}*"
+      - name: Attest (retry 1)
+        id: attest2
+        if: steps.attest1.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/attest@v4
+        with:
+          subject-path: "target/distrib/*${{ join(matrix.targets, ', ') }}*"
+      - name: Attest (retry 2)
+        if: steps.attest1.outcome == 'failure' && steps.attest2.outcome == 'failure'
+        uses: actions/attest@v4
+        with:
+          subject-path: "target/distrib/*${{ join(matrix.targets, ', ') }}*"
       - id: cargo-dist
         name: Post-build
         # We force bash here just because github makes it really hard to get values up

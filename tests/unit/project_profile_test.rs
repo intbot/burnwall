@@ -85,6 +85,73 @@ fn malformed_yaml_returns_error() {
     assert!(matches!(err, burnwall::config::ConfigError::Yaml(_)));
 }
 
+// ──────────── Parsing — mcp_allowed_servers (per-project MCP allowlist) ────────────
+
+#[test]
+fn parses_mcp_allowed_servers_when_present() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        ".burnwall.yaml",
+        "mcp_allowed_servers:\n  - filesystem\n  - github\n",
+    );
+    let profile = project::load(&dir.path().join(".burnwall.yaml")).expect("load");
+    assert_eq!(profile.mcp_allowed_servers, vec!["filesystem", "github"]);
+}
+
+#[test]
+fn parses_mcp_allowed_servers_inline_list() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        ".burnwall.yaml",
+        "mcp_allowed_servers: [filesystem, github]\n",
+    );
+    let profile = project::load(&dir.path().join(".burnwall.yaml")).expect("load");
+    assert_eq!(profile.mcp_allowed_servers, vec!["filesystem", "github"]);
+}
+
+#[test]
+fn empty_mcp_allowed_servers_list_deserializes() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), ".burnwall.yaml", "mcp_allowed_servers: []\n");
+    let profile = project::load(&dir.path().join(".burnwall.yaml")).expect("load");
+    assert!(profile.mcp_allowed_servers.is_empty());
+}
+
+#[test]
+fn absent_mcp_allowed_servers_defaults_to_empty() {
+    // A profile that only sets other fields must still parse — the new field
+    // defaults to an empty Vec (no per-project MCP restriction).
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), ".burnwall.yaml", "allow_paths:\n  - ./src\n");
+    let profile = project::load(&dir.path().join(".burnwall.yaml")).expect("load");
+    assert!(profile.mcp_allowed_servers.is_empty());
+    assert_eq!(profile.allow_paths, vec!["./src"]);
+}
+
+// ──────────── mcp_server_allowed — deny-by-omission semantics ────────────
+
+#[test]
+fn mcp_server_allowed_when_list_absent_permits_anything() {
+    let profile = ProjectProfile::default();
+    assert!(profile.mcp_server_allowed("filesystem"));
+    assert!(profile.mcp_server_allowed("anything"));
+}
+
+#[test]
+fn mcp_server_allowed_with_list_is_deny_by_omission() {
+    let profile = ProjectProfile {
+        mcp_allowed_servers: vec!["filesystem".to_string(), "github".to_string()],
+        ..Default::default()
+    };
+    assert!(profile.mcp_server_allowed("filesystem"));
+    assert!(profile.mcp_server_allowed("github"));
+    assert!(!profile.mcp_server_allowed("shell"));
+    // Exact match — not a prefix/substring.
+    assert!(!profile.mcp_server_allowed("git"));
+}
+
 // ──────────────────────────── Discovery ────────────────────────────
 
 #[test]
@@ -184,6 +251,10 @@ fn budget(daily: f64) -> BudgetConfig {
         daily_usd: daily,
         monthly_usd: 0.0,
         warn_percent: 80,
+        per_session_usd: 0.0,
+        per_hour_usd: 0.0,
+        enforce_on_plan: false,
+        fallback_model: String::new(),
     }
 }
 

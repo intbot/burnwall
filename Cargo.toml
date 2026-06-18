@@ -1,7 +1,8 @@
 [package]
 name = "burnwall"
-version = "0.9.2"
-edition = "2021"
+version = "0.11.0"
+edition = "2024"
+rust-version = "1.87"
 description = "Local proxy for AI coding tools (Claude Code, Codex CLI, Aider): cache-aware cost tracking, path/command security checks, daily budget enforcement. Zero telemetry."
 # FSL-1.1-MIT is not an SPDX identifier; crates.io rejects it as `license`,
 # so the license is declared via the file instead.
@@ -19,13 +20,34 @@ path-guid = "1B65F07B-49F5-469A-AF2C-8C091A57035A"
 license = false
 eula = false
 
+# Optional feature clusters layered on top of the core proxy (cost + security
+# + budget + storage). All on by default so the shipped binary is unchanged;
+# `--no-default-features` builds the lean core. Implication edges mirror the
+# module graph: audit→observe→logscrape and waste→logscrape.
+[features]
+default = ["audit", "mcp", "observe", "logscrape", "waste"]
+logscrape = []
+observe = ["logscrape"]
+waste = ["logscrape"]
+audit = ["observe"]
+mcp = []
+
+# Lint policy lives here (not as crate-wide `#![allow]`) so it is visible and
+# reviewable. `unused` stays a warning rather than being silenced wholesale.
+[lints.rust]
+unused = "warn"
+rust_2018_idioms = "warn"
+
+[lints.clippy]
+all = "warn"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
 # HTTP proxy
 hyper = { version = "1", features = ["full"] }
-hyper-util = { version = "0.1", features = ["tokio", "server-auto", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "server-graceful", "http1", "http2"] }
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
 
@@ -81,10 +103,17 @@ tempfile = "3"
 wiremock = "0.6"                     # Mock HTTP server for integration tests
 assert_cmd = "2"                     # CLI testing
 predicates = "3"                     # Assertion helpers
+dashmap = "6"                        # Construct WatchState literals in tests
 
 [[test]]
 name = "proxy_test"
 path = "tests/integration/proxy_test.rs"
+
+# Own binary (= own process): proxy_test flips the process-global
+# BURNWALL_BYPASS env var, which would race the pause/allow-once assertions.
+[[test]]
+name = "pause_test"
+path = "tests/integration/pause_test.rs"
 
 [[test]]
 name = "parser_test"
@@ -93,6 +122,10 @@ path = "tests/unit/parser_test.rs"
 [[test]]
 name = "pricing_test"
 path = "tests/unit/pricing_test.rs"
+
+[[test]]
+name = "tls_integrity_test"
+path = "tests/unit/tls_integrity_test.rs"
 
 [[test]]
 name = "storage_test"
@@ -175,8 +208,20 @@ name = "observe_test"
 path = "tests/unit/observe_test.rs"
 
 [[test]]
+name = "cost_export_test"
+path = "tests/unit/cost_export_test.rs"
+
+[[test]]
 name = "audit_cli_test"
 path = "tests/integration/audit_cli_test.rs"
+
+[[test]]
+name = "audit_test"
+path = "tests/unit/audit_test.rs"
+
+[[test]]
+name = "torture_test"
+path = "tests/integration/torture_test.rs"
 
 [profile.release]
 opt-level = "z"                      # Optimize for size

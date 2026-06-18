@@ -76,6 +76,8 @@ const KNOWN_SECTIONS: &[&str] = &[
     "mcp",
     "resilience",
     "observability",
+    "pricing",
+    "upstreams",
     "log_scrape",
 ];
 
@@ -152,6 +154,20 @@ fn doctor(path: &Path) -> anyhow::Result<()> {
             "⚠️  security.enabled is OFF — request scanning is disabled; nothing is blocked."
         )?;
     }
+    if cfg.proxy.trim_tool_output {
+        warnings += 1;
+        writeln!(
+            out,
+            "⚠️  proxy.trim_tool_output is ON — Burnwall rewrites request bodies to truncate oversized tool output."
+        )?;
+    }
+    if cfg.security.paranoid {
+        warnings += 1;
+        writeln!(
+            out,
+            "⚠️  security.paranoid is ON — requests whose bodies can't be parsed for scanning are BLOCKED (fail-closed, not the fail-open default)."
+        )?;
+    }
 
     // Out-of-range values (error) and no-op combinations (informational).
     if cfg.budget.warn_percent > 100 {
@@ -172,6 +188,60 @@ fn doctor(path: &Path) -> anyhow::Result<()> {
         writeln!(
             out,
             "ℹ️  all log scraping is OFF — cross-tool spend and waste insights have no data."
+        )?;
+    }
+
+    // Per-shell routing matrix (L-H4): env-file state × rc-hook presence ×
+    // proxy liveness — the exact table a stranded "connection refused" user
+    // needs, which no single surface printed before. Names the precise
+    // missing link per shell rather than a generic "run enable-routing".
+    writeln!(out)?;
+    writeln!(out, "Routing matrix (per shell):")?;
+    let proxy_up = crate::cli::routing::proxy_port_alive(
+        cfg.proxy.port,
+        std::time::Duration::from_millis(120),
+    );
+    writeln!(
+        out,
+        "  proxy: {} (port {})",
+        if proxy_up {
+            "🟢 listening"
+        } else {
+            "⚪ not running"
+        },
+        cfg.proxy.port
+    )?;
+    for shell in crate::cli::init::Shell::ALL {
+        use crate::cli::routing::{EnvFileState, env_file_state, rc_hook_present};
+        let env = match env_file_state(shell) {
+            Some(EnvFileState::Active) => "active",
+            Some(EnvFileState::Paused) => "paused",
+            Some(EnvFileState::Disabled) => "disabled",
+            None => "absent",
+        };
+        let hook = rc_hook_present(shell);
+        let verdict = match (env, hook, proxy_up) {
+            ("active", true, true) => "🟢 routed".to_string(),
+            ("active", true, false) => {
+                "🟡 will route once the proxy starts (liveness-gated)".to_string()
+            }
+            // Diagnostic only — machine state, not config state, so it never
+            // flips the doctor's error/warning summary.
+            ("active", false, _) | ("paused", false, _) => format!(
+                "⚠️  env file present but no shell hook — add it with `burnwall enable-routing` (run from {})",
+                shell.label()
+            ),
+            ("paused", true, _) => "⏸  paused — `burnwall start` re-enables".to_string(),
+            ("disabled", _, _) => "⏹  explicitly disabled".to_string(),
+            _ => "—  not configured".to_string(),
+        };
+        writeln!(
+            out,
+            "  {:<11} env:{:<9} hook:{:<3}  {}",
+            shell.label(),
+            env,
+            if hook { "yes" } else { "no" },
+            verdict
         )?;
     }
 

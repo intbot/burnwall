@@ -5,7 +5,7 @@
 
 use std::fs;
 
-use burnwall::providers::{anthropic, google, openai, TokenUsage};
+use burnwall::providers::{TokenUsage, anthropic, google, openai};
 
 fn fixture(name: &str) -> Vec<u8> {
     let path = format!("tests/fixtures/{}", name);
@@ -119,6 +119,111 @@ fn openai_missing_prompt_tokens_details_defaults_to_zero_cache() {
 #[test]
 fn openai_invalid_json_returns_error() {
     assert!(openai::parse(b"<html>").is_err());
+}
+
+// ──────────────────────── OpenAI Responses API ──────────────────────────
+
+#[test]
+fn openai_responses_api_body_parses_input_output_and_cached() {
+    // /v1/responses (Codex CLI default) names the usage fields
+    // input_tokens/output_tokens/input_tokens_details — same semantics as
+    // Chat Completions (input includes the cached portion), different names.
+    let body = br#"{
+        "id": "resp_abc123",
+        "object": "response",
+        "status": "completed",
+        "model": "gpt-5.4-codex",
+        "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}],
+        "usage": {
+            "input_tokens": 2048,
+            "input_tokens_details": {"cached_tokens": 1536},
+            "output_tokens": 256,
+            "output_tokens_details": {"reasoning_tokens": 64},
+            "total_tokens": 2304
+        }
+    }"#;
+    let parsed = openai::parse(body).expect("parse Responses API body");
+
+    // input_tokens=2048, cached=1536 → non-cached input=512, cache_read=1536
+    assert_eq!(parsed.model, "gpt-5.4-codex");
+    assert_eq!(
+        parsed.usage,
+        TokenUsage {
+            input_tokens: 512,
+            output_tokens: 256,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 1536,
+        }
+    );
+
+    // The proxy tee goes through parse_any — same result.
+    assert_eq!(openai::parse_any(body), Some(parsed));
+}
+
+#[test]
+fn openai_responses_api_sse_reads_usage_from_completed_event() {
+    // Responses API streaming nests model/usage under `response` in typed
+    // events; usage arrives on the final `response.completed` event.
+    let sse = "event: response.created\n\
+data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.4-codex\",\"status\":\"in_progress\",\"usage\":null}}\n\
+\n\
+event: response.output_text.delta\n\
+data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\
+\n\
+event: response.completed\n\
+data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.4-codex\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1000,\"input_tokens_details\":{\"cached_tokens\":400},\"output_tokens\":50,\"total_tokens\":1050}}}\n\n";
+
+    let parsed = openai::parse_sse(sse.as_bytes()).expect("sse parse");
+    assert_eq!(parsed.model, "gpt-5.4-codex");
+    assert_eq!(
+        parsed.usage,
+        TokenUsage {
+            input_tokens: 600,
+            output_tokens: 50,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 400,
+        }
+    );
+}
+
+#[test]
+fn openai_chat_completions_still_parses_via_parse_any() {
+    // The Responses API support must not disturb the Chat Completions path
+    // the tee already relies on.
+    let parsed = openai::parse_any(&fixture("openai_cached.json")).expect("parse_any");
+    assert_eq!(parsed.model, "gpt-5.4-2026-01-15");
+    assert_eq!(
+        parsed.usage,
+        TokenUsage {
+            input_tokens: 512,
+            output_tokens: 512,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 1536,
+        }
+    );
+}
+
+#[test]
+fn openai_all_zero_usage_returns_none_from_parse_any() {
+    // Every Usage field is #[serde(default)], so an unrecognized usage shape
+    // deserializes "successfully" with zero tokens. parse_any must treat that
+    // as a parse failure (None → tee warns) instead of recording a $0 row.
+    let empty_usage = br#"{"model":"gpt-5.4","usage":{}}"#;
+    assert_eq!(openai::parse_any(empty_usage), None);
+
+    let unknown_shape = br#"{"model":"gpt-5.4","usage":{"weird_tokens":123}}"#;
+    assert_eq!(openai::parse_any(unknown_shape), None);
+}
+
+#[test]
+fn openai_zero_output_with_nonzero_input_still_parses() {
+    // The all-zero guard must not reject legitimate edge cases: a response
+    // that billed input but produced no output tokens is still a real,
+    // billable response.
+    let body = br#"{"model":"gpt-5.4","usage":{"prompt_tokens":300,"completion_tokens":0}}"#;
+    let parsed = openai::parse_any(body).expect("nonzero input must parse");
+    assert_eq!(parsed.usage.input_tokens, 300);
+    assert_eq!(parsed.usage.output_tokens, 0);
 }
 
 // ──────────────────────────────── Google ────────────────────────────────

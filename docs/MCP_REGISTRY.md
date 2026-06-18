@@ -14,8 +14,8 @@ burnwall mcp-watch --upstream <your-mcp-server-url> [--port 4101] [--require-app
 
 Point your MCP client at the watcher's local address instead of the upstream
 directly. Multiple servers can be fronted via `[[mcp.servers]]` in
-`~/.burnwall/config.toml`; auto-approve/deny globs go under `[mcp]` (see
-`docs/SPEC.md`).
+`~/.burnwall/config.toml`; auto-approve/deny globs go under `[mcp]` (run
+`burnwall config show` to see the current MCP section).
 
 ## Registry manifest
 

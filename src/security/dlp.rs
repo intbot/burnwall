@@ -34,16 +34,24 @@ static SSN: LazyLock<Regex> =
 
 /// The first DLP category `value` matches, or `None`.
 pub fn first_match(value: &str) -> Option<&'static str> {
-    if contains_valid_credit_card(value) {
-        return Some("credit card number");
+    first_match_masked(value).map(|(name, _)| name)
+}
+
+/// [`first_match`] plus a **masked, recognisable preview** of the matched value
+/// (e.g. `4111…1111`) for the block message — the raw value is never returned,
+/// echoed, or logged. Mirrors [`super::secrets::first_match_masked`].
+pub fn first_match_masked(value: &str) -> Option<(&'static str, String)> {
+    if let Some(m) = credit_card_match(value) {
+        return Some(("credit card number", super::secrets::mask_match(m)));
     }
-    if contains_valid_ssn(value) {
-        return Some("US Social Security number");
+    if let Some(m) = ssn_match(value) {
+        return Some(("US Social Security number", super::secrets::mask_match(m)));
     }
     None
 }
 
-fn contains_valid_credit_card(value: &str) -> bool {
+/// The first substring of `value` that is a Luhn-valid card number, or `None`.
+fn credit_card_match(value: &str) -> Option<&str> {
     for m in CC_CANDIDATE.find_iter(value) {
         let digits: String = m.as_str().chars().filter(char::is_ascii_digit).collect();
         let len = digits.len();
@@ -58,10 +66,10 @@ fn contains_valid_credit_card(value: &str) -> bool {
             _ => continue,
         }
         if luhn_valid(&digits) {
-            return true;
+            return Some(m.as_str());
         }
     }
-    false
+    None
 }
 
 /// Luhn (mod-10) checksum. `digits` must be ASCII digits only.
@@ -82,7 +90,8 @@ fn luhn_valid(digits: &str) -> bool {
     sum.is_multiple_of(10)
 }
 
-fn contains_valid_ssn(value: &str) -> bool {
+/// The first substring of `value` that is a validly-issued dashed SSN, or `None`.
+fn ssn_match(value: &str) -> Option<&str> {
     for caps in SSN.captures_iter(value) {
         let area: u32 = caps[1].parse().unwrap_or(0);
         let group: u32 = caps[2].parse().unwrap_or(0);
@@ -94,7 +103,7 @@ fn contains_valid_ssn(value: &str) -> bool {
         if group == 0 || serial == 0 {
             continue;
         }
-        return true;
+        return Some(caps.get(0).unwrap().as_str());
     }
-    false
+    None
 }

@@ -1,0 +1,21 @@
+# Burnwall official rule pack — Kubernetes.
+# Bundled in the binary (inherently trusted). Declarative + deny-only.
+id = "kubernetes"
+name = "Kubernetes security rules"
+version = "1.0.0"
+
+# Kubeconfigs carry cluster-admin credentials.
+deny_paths = [
+    "~/.kube/config",
+    "/.kube/config",
+    "/kubeconfig",
+]
+
+# Cluster- or namespace-wide destructive operations.
+deny_commands = [
+    "kubectl delete namespace",
+    "kubectl delete --all",
+    "kubectl delete pvc",
+    "helm uninstall",
+    "kubectl delete deployment --all",
+]

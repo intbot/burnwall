@@ -174,11 +174,7 @@ fn write_json(
 }
 
 fn plural(n: i64) -> &'static str {
-    if n == 1 {
-        ""
-    } else {
-        "s"
-    }
+    if n == 1 { "" } else { "s" }
 }
 
 fn truncate(s: &str, n: usize) -> String {

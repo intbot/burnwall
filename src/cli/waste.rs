@@ -9,6 +9,7 @@ use clap::Args;
 
 use crate::config::{self, Config};
 use crate::logscrape::{self, UsageEntry};
+use crate::term::{Card, Color, Styler, render_cards};
 use crate::waste::{self, Finding};
 
 #[derive(Args, Debug)]
@@ -65,37 +66,59 @@ fn write_table(
     days: i64,
     total: f64,
 ) -> std::io::Result<()> {
-    writeln!(w, "💸 Waste insights (last {} day{})", days, plural(days))?;
+    let sty = Styler::stdout();
+    writeln!(
+        w,
+        "🔥 {} · Waste · last {} day{}",
+        sty.bold("Burnwall"),
+        days,
+        plural(days)
+    )?;
     writeln!(w)?;
 
     if findings.is_empty() {
-        writeln!(w, "   No waste patterns detected. Nice.")?;
+        writeln!(w, "  {} No waste patterns detected. Nice.", sty.green("✓"))?;
         writeln!(w)?;
         writeln!(
             w,
-            "   (Analyzes local AI session logs read-only — never your prompt content.)"
+            "  Analyzes local AI session logs read-only — never your prompt content."
         )?;
         return Ok(());
     }
 
-    writeln!(
-        w,
-        "   Estimated avoidable spend: up to ${:.2} over the window",
-        total
-    )?;
+    // Headline tiles: total avoidable, its per-day rate, and how many patterns.
+    let per_day = total / days.max(1) as f64;
+    let cards = [
+        Card::new("Avoidable", &format!("${:.2}", total), &format!("over {days}d"))
+            .with_value_color(Color::Yellow),
+        Card::new("Per day", &format!("${:.2}", per_day), "avg"),
+        Card::new("Findings", &findings.len().to_string(), "patterns"),
+    ];
+    writeln!(w, "{}", render_cards(&cards, 11, 2, &sty))?;
     writeln!(w)?;
+
+    writeln!(w, "  {}", sty.bold("Findings"))?;
     for f in findings {
-        writeln!(
-            w,
-            "   [{}] {} — ${:.2}",
-            f.severity.as_str(),
-            f.title,
-            f.observed_waste_usd
-        )?;
-        writeln!(w, "      {}", f.detail)?;
+        let sev = f.severity.as_str();
+        let tag = sty.paint(&format!("{:<6}", sev.to_uppercase()), sev_hue(sev));
+        writeln!(w, "  {} {} — ${:.2}", tag, f.title, f.observed_waste_usd)?;
+        writeln!(w, "         {}", f.detail)?;
         writeln!(w)?;
     }
+    writeln!(
+        w,
+        "  Analyzes local AI session logs read-only — never your prompt content."
+    )?;
     Ok(())
+}
+
+/// Severity → hue: high/critical red, medium orange, everything else blue.
+fn sev_hue(sev: &str) -> Color {
+    match sev.to_ascii_lowercase().as_str() {
+        "high" | "critical" | "crit" | "severe" => Color::Red,
+        "medium" | "med" | "moderate" => Color::Orange,
+        _ => Color::Blue,
+    }
 }
 
 fn write_json(
@@ -121,9 +144,5 @@ fn write_json(
 }
 
 fn plural(n: i64) -> &'static str {
-    if n == 1 {
-        ""
-    } else {
-        "s"
-    }
+    if n == 1 { "" } else { "s" }
 }

@@ -5,7 +5,7 @@
 //! `~/.burnwall/config.toml`. `burnwall start` discovers it once at boot and
 //! merges it into the runtime [`Ruleset`] and [`BudgetConfig`].
 //!
-//! Schema (matches docs/SPEC.md §"v0.2 Additions"):
+//! Schema (matches internal/SPEC.md §"v0.2 Additions"):
 //! ```yaml
 //! allow_paths:
 //!   - ./src
@@ -13,6 +13,9 @@
 //! deny_paths:
 //!   - ./secrets
 //!   - ./.env
+//! mcp_allowed_servers:
+//!   - filesystem
+//!   - github
 //! budget:
 //!   daily_max_usd: 10
 //! ```
@@ -23,6 +26,13 @@
 //!   path-deny checks (command / mount / secret checks still run). See
 //!   [`crate::security::scanner`]. A project can only loosen *path* rules
 //!   for its own traffic — it can never green-light a command or a secret.
+//! - `mcp_allowed_servers` is an **allowlist** of MCP server names this repo's
+//!   agents may reach. ABSENT or empty → no per-project restriction (current
+//!   behavior; never blocks a user who hasn't opted in). PRESENT and non-empty
+//!   → a `tools/call` routed to a server *not* on the list is blocked at the
+//!   MCP firewall. It composes with the global `[mcp].auto_deny`, which is
+//!   still checked first and always wins. Deny-by-omission applies *only* when
+//!   the list is non-empty, so it can never accidentally block everyone.
 //! - `budget.daily_max_usd` is a **cap**: the effective daily limit is the
 //!   lower of the global limit and the project cap. A project can tighten
 //!   the budget, never raise it. A cap of `0`, negative, non-finite, or
@@ -48,6 +58,11 @@ pub struct ProjectProfile {
     pub allow_paths: Vec<String>,
     #[serde(default)]
     pub deny_paths: Vec<String>,
+    /// MCP servers this project's agents are allowed to reach. Empty / absent
+    /// = no restriction (see module docs). A non-empty list turns the MCP
+    /// firewall into deny-by-omission: any server not named here is blocked.
+    #[serde(default)]
+    pub mcp_allowed_servers: Vec<String>,
     #[serde(default)]
     pub budget: ProjectBudget,
 }
@@ -109,6 +124,18 @@ pub fn discover_and_load(start: &Path) -> Result<Option<(PathBuf, ProjectProfile
 }
 
 impl ProjectProfile {
+    /// Whether a `tools/call` routed to MCP server `server` is permitted by
+    /// this project's `mcp_allowed_servers` list.
+    ///
+    /// Deny-by-omission applies *only* when the list is non-empty: an
+    /// absent/empty list means "no per-project restriction" and always
+    /// returns `true`, so a user who never sets the field is never blocked.
+    /// `server` is matched exactly against the configured names (the same
+    /// routed server name the MCP firewall derives from the path).
+    pub fn mcp_server_allowed(&self, server: &str) -> bool {
+        self.mcp_allowed_servers.is_empty() || self.mcp_allowed_servers.iter().any(|s| s == server)
+    }
+
     /// Layer this profile's path rules onto a base [`Ruleset`]: `deny_paths`
     /// extend the deny list, `allow_paths` extend the exception list.
     pub fn apply_to_ruleset(&self, ruleset: &mut Ruleset) {

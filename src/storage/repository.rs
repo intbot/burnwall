@@ -9,13 +9,13 @@
 //! derives them from `chrono::Local`).
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 
 use super::{
+    Result, Storage,
     models::{
         DailyTotal, McpEvent, McpToolRow, ModelBreakdown, ReceiptRow, RequestRecord, SecurityEvent,
     },
-    Result, Storage,
 };
 
 /// Outcome of recording a tool advertised by an MCP server, relative to what
@@ -39,8 +39,8 @@ impl Storage {
                     timestamp, provider, model,
                     input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
                     cost_usd, blocked, block_reason, session_id, request_hash,
-                    latency_ms, http_status
-                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                    latency_ms, http_status, tags
+                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
                 params![
                     r.timestamp,
                     r.provider,
@@ -56,6 +56,7 @@ impl Storage {
                     r.request_hash,
                     r.latency_ms,
                     r.http_status,
+                    r.tags,
                 ],
             )?;
             Ok(conn.last_insert_rowid())
@@ -105,6 +106,21 @@ impl Storage {
                         "UPDATE mcp_tools SET last_seen = datetime('now')
                          WHERE server = ?1 AND tool_name = ?2",
                         params![server, tool_name],
+                    )?;
+                    Ok(McpToolObservation::Unchanged)
+                }
+                Some(prev) if prev.len() == 16 && fingerprint.len() == 64 => {
+                    // Fingerprint *format* upgrade across a binary version —
+                    // legacy FNV-1a (16-hex) → SHA-256 (64-hex), not a tool
+                    // change. Silently re-pin to the new format WITHOUT touching
+                    // `trust_state`: a format migration must never look like a
+                    // rug pull or re-pend an already-approved tool. Real
+                    // SHA-256 content changes are 64→64 and fall through to the
+                    // `Changed` arm below.
+                    conn.execute(
+                        "UPDATE mcp_tools SET fingerprint = ?1, last_seen = datetime('now')
+                         WHERE server = ?2 AND tool_name = ?3",
+                        params![fingerprint, server, tool_name],
                     )?;
                     Ok(McpToolObservation::Unchanged)
                 }
@@ -259,7 +275,7 @@ impl Storage {
                     "SELECT id, timestamp, provider, model,
                             input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
                             cost_usd, blocked, block_reason, session_id, request_hash,
-                            latency_ms, http_status
+                            latency_ms, http_status, tags
                      FROM requests WHERE id = ?1",
                     params![id],
                     row_to_request,
@@ -284,6 +300,84 @@ impl Storage {
         })
     }
 
+    /// Total spend for a local calendar month. `month` is a `YYYY-MM` string;
+    /// rows are bucketed by their local-time month so the boundary matches the
+    /// daily query and the user's clock. Powers the monthly budget cap (B-H2).
+    pub fn total_cost_for_month(&self, month: &str) -> Result<f64> {
+        self.with_conn(|conn| {
+            let cost: f64 = conn.query_row(
+                "SELECT COALESCE(SUM(cost_usd), 0.0) FROM requests
+                 WHERE strftime('%Y-%m', timestamp, 'localtime') = ?1",
+                params![month],
+                |row| row.get(0),
+            )?;
+            Ok(cost)
+        })
+    }
+
+    /// The most recent successful (non-blocked) request, if any. Powers the
+    /// DB-sourced status ribbon (`burnwall watch` / editor bar): the last
+    /// real turn's model, token counts, and cost.
+    pub fn most_recent_request(&self) -> Result<Option<RequestRecord>> {
+        self.with_conn(|conn| {
+            let r = conn
+                .query_row(
+                    "SELECT id, timestamp, provider, model,
+                            input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
+                            cost_usd, blocked, block_reason, session_id, request_hash,
+                            latency_ms, http_status, tags
+                     FROM requests WHERE blocked = 0
+                     ORDER BY timestamp DESC LIMIT 1",
+                    [],
+                    row_to_request,
+                )
+                .optional()?;
+            Ok(r)
+        })
+    }
+
+    /// Most recent non-blocked request timestamp per provider. Powers the
+    /// coverage readout: a provider that appears here has been seen routing
+    /// through the proxy, so the tool that talks to it is actually protected
+    /// (the originating *tool* isn't recoverable from proxied HTTP, but each
+    /// provider maps to a known set of tools — see `crate::coverage`).
+    pub fn provider_last_seen(&self) -> Result<Vec<(String, DateTime<Utc>)>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT provider, MAX(timestamp) AS last
+                 FROM requests WHERE blocked = 0
+                 GROUP BY provider",
+            )?;
+            let rows: rusqlite::Result<Vec<(String, DateTime<Utc>)>> = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get::<_, DateTime<Utc>>(1)?)))?
+                .collect();
+            Ok(rows?)
+        })
+    }
+
+    /// Per-session spend for a local date (sessions only — rows with a non-empty
+    /// `session_id`), newest-spend first. Powers the "by session / swarm" view
+    /// for users who set the opt-in `x-burnwall-session` header. Returns
+    /// `(session_id, cost_usd, requests)`.
+    pub fn session_costs_for_date(&self, date: &str) -> Result<Vec<(String, f64, i64)>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT session_id, COALESCE(SUM(cost_usd), 0.0) AS cost, COUNT(*) AS n
+                 FROM requests
+                 WHERE DATE(timestamp, 'localtime') = ?1
+                   AND session_id IS NOT NULL AND session_id <> ''
+                 GROUP BY session_id
+                 ORDER BY cost DESC",
+            )?;
+            let rows: rusqlite::Result<Vec<(String, f64, i64)>> = stmt
+                .query_map(params![date], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?
+                .collect();
+            Ok(rows?)
+        })
+    }
+
     /// All requests within the given local date, oldest first.
     pub fn requests_for_date(&self, date: &str) -> Result<Vec<RequestRecord>> {
         self.with_conn(|conn| {
@@ -291,7 +385,7 @@ impl Storage {
                 "SELECT id, timestamp, provider, model,
                         input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
                         cost_usd, blocked, block_reason, session_id, request_hash,
-                        latency_ms, http_status
+                        latency_ms, http_status, tags
                  FROM requests
                  WHERE DATE(timestamp, 'localtime') = ?1
                  ORDER BY timestamp ASC",
@@ -307,8 +401,11 @@ impl Storage {
     pub fn daily_totals(&self, days: i64) -> Result<Vec<DailyTotal>> {
         self.with_conn(|conn| {
             // `DATE('now', 'localtime', '-N days')` gives the local date N
-            // days ago. Bind `-N days` as a parameter, not concatenated.
-            let offset = format!("-{} days", days);
+            // days ago. A window of `days` days *includes* today, so the
+            // earliest included date is `days - 1` back — matching the other
+            // `*_since_days` queries. Bind `-N days` as a parameter, not
+            // concatenated.
+            let offset = format!("-{} days", days - 1);
             let mut stmt = conn.prepare(
                 "SELECT
                     DATE(timestamp, 'localtime')                            AS date,
@@ -365,18 +462,7 @@ impl Storage {
                  ORDER BY cost DESC",
             )?;
             let rows: rusqlite::Result<Vec<ModelBreakdown>> = stmt
-                .query_map(params![date], |row| {
-                    Ok(ModelBreakdown {
-                        provider: row.get(0)?,
-                        model: row.get(1)?,
-                        cost: row.get(2)?,
-                        requests: row.get(3)?,
-                        input_tokens: row.get::<_, i64>(4)? as u64,
-                        cache_creation_tokens: row.get::<_, i64>(5)? as u64,
-                        cache_read_tokens: row.get::<_, i64>(6)? as u64,
-                        output_tokens: row.get::<_, i64>(7)? as u64,
-                    })
-                })?
+                .query_map(params![date], row_to_model_breakdown)?
                 .collect();
             Ok(rows?)
         })
@@ -417,18 +503,29 @@ impl Storage {
                  ORDER BY cost DESC",
             )?;
             let rows: rusqlite::Result<Vec<ModelBreakdown>> = stmt
-                .query_map(params![offset], |row| {
-                    Ok(ModelBreakdown {
-                        provider: row.get(0)?,
-                        model: row.get(1)?,
-                        cost: row.get(2)?,
-                        requests: row.get(3)?,
-                        input_tokens: row.get::<_, i64>(4)? as u64,
-                        cache_creation_tokens: row.get::<_, i64>(5)? as u64,
-                        cache_read_tokens: row.get::<_, i64>(6)? as u64,
-                        output_tokens: row.get::<_, i64>(7)? as u64,
-                    })
-                })?
+                .query_map(params![offset], row_to_model_breakdown)?
+                .collect();
+            Ok(rows?)
+        })
+    }
+
+    /// Per-request `(tags_json, cost_usd)` for forwarded rows that carry
+    /// attribution tags, over the last `days` local days. Drives the
+    /// `burnwall tags` report, which parses each JSON object and rolls spend up
+    /// by key/value in Rust (so we don't depend on SQLite's JSON1 extension).
+    /// Blocked rows are excluded — they cost nothing.
+    pub fn tag_rows_since_days(&self, days: i64) -> Result<Vec<(String, f64)>> {
+        self.with_conn(|conn| {
+            let offset = format!("-{} days", days - 1);
+            let mut stmt = conn.prepare(
+                "SELECT tags, COALESCE(cost_usd, 0.0)
+                 FROM requests
+                 WHERE DATE(timestamp, 'localtime') >= DATE('now', 'localtime', ?1)
+                   AND blocked = 0
+                   AND tags IS NOT NULL AND tags <> ''",
+            )?;
+            let rows: rusqlite::Result<Vec<(String, f64)>> = stmt
+                .query_map(params![offset], |row| Ok((row.get(0)?, row.get(1)?)))?
                 .collect();
             Ok(rows?)
         })
@@ -438,6 +535,7 @@ impl Storage {
     /// for forwarded (non-blocked) requests that recorded a latency. Drives
     /// `burnwall metrics`. Blocked rows are excluded — they never reached an
     /// upstream, so they carry no latency/status.
+    #[cfg(feature = "observe")]
     pub fn latency_samples_since_days(
         &self,
         days: i64,
@@ -503,6 +601,24 @@ impl Storage {
         })
     }
 
+    /// Per-`event_type` security-event counts on the given date. Lets surfaces
+    /// partition enforcement blocks from advisory alerts (via
+    /// `security::catalog::is_advisory`) instead of presenting one conflated
+    /// number as "blocked".
+    pub fn security_event_type_counts_for_date(&self, date: &str) -> Result<Vec<(String, i64)>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT event_type, COUNT(*) FROM security_events
+                 WHERE DATE(timestamp, 'localtime') = ?1
+                 GROUP BY event_type",
+            )?;
+            let rows: rusqlite::Result<Vec<(String, i64)>> = stmt
+                .query_map(params![date], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect();
+            Ok(rows?)
+        })
+    }
+
     /// All security events from the last `days` local days, newest first.
     /// `days = 1` = today only.
     pub fn security_events_since_days(&self, days: i64) -> Result<Vec<SecurityEvent>> {
@@ -515,16 +631,7 @@ impl Storage {
                  ORDER BY timestamp DESC",
             )?;
             let rows: rusqlite::Result<Vec<SecurityEvent>> = stmt
-                .query_map(params![offset], |row| {
-                    Ok(SecurityEvent {
-                        id: Some(row.get(0)?),
-                        timestamp: row.get::<_, DateTime<Utc>>(1)?,
-                        event_type: row.get(2)?,
-                        details: row.get(3)?,
-                        provider: row.get(4)?,
-                        model: row.get(5)?,
-                    })
-                })?
+                .query_map(params![offset], row_to_security_event)?
                 .collect();
             Ok(rows?)
         })
@@ -594,18 +701,8 @@ impl Storage {
                  WHERE DATE(timestamp, 'localtime') >= DATE('now', 'localtime', ?1)
                  ORDER BY timestamp DESC",
             )?;
-            let rows: rusqlite::Result<Vec<McpEvent>> = stmt
-                .query_map(params![offset], |row| {
-                    Ok(McpEvent {
-                        id: Some(row.get(0)?),
-                        timestamp: row.get::<_, DateTime<Utc>>(1)?,
-                        tool_name: row.get(2)?,
-                        rpc_id: row.get(3)?,
-                        upstream_status: row.get(4)?,
-                        upstream_uri: row.get(5)?,
-                    })
-                })?
-                .collect();
+            let rows: rusqlite::Result<Vec<McpEvent>> =
+                stmt.query_map(params![offset], row_to_mcp_event)?.collect();
             Ok(rows?)
         })
     }
@@ -619,18 +716,8 @@ impl Storage {
                  WHERE DATE(timestamp, 'localtime') = ?1
                  ORDER BY timestamp DESC",
             )?;
-            let rows: rusqlite::Result<Vec<McpEvent>> = stmt
-                .query_map(params![date], |row| {
-                    Ok(McpEvent {
-                        id: Some(row.get(0)?),
-                        timestamp: row.get::<_, DateTime<Utc>>(1)?,
-                        tool_name: row.get(2)?,
-                        rpc_id: row.get(3)?,
-                        upstream_status: row.get(4)?,
-                        upstream_uri: row.get(5)?,
-                    })
-                })?
-                .collect();
+            let rows: rusqlite::Result<Vec<McpEvent>> =
+                stmt.query_map(params![date], row_to_mcp_event)?.collect();
             Ok(rows?)
         })
     }
@@ -677,7 +764,7 @@ impl Storage {
                 "SELECT id, timestamp, provider, model,
                         input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
                         cost_usd, blocked, block_reason, session_id, request_hash,
-                        latency_ms, http_status
+                        latency_ms, http_status, tags
                  FROM requests
                  WHERE id NOT IN (SELECT source_id FROM audit_receipts WHERE source = 'request')
                  ORDER BY id ASC",
@@ -784,23 +871,40 @@ impl Storage {
                  ORDER BY timestamp ASC",
             )?;
             let rows: rusqlite::Result<Vec<SecurityEvent>> = stmt
-                .query_map(params![date], |row| {
-                    Ok(SecurityEvent {
-                        id: Some(row.get(0)?),
-                        timestamp: row.get::<_, DateTime<Utc>>(1)?,
-                        event_type: row.get(2)?,
-                        details: row.get(3)?,
-                        provider: row.get(4)?,
-                        model: row.get(5)?,
-                    })
-                })?
+                .query_map(params![date], row_to_security_event)?
                 .collect();
             Ok(rows?)
         })
     }
+
+    /// Read a value from the generic `meta` key/value store. `None` when the
+    /// key was never set. Used for small CLI state (e.g. the once/day nudge
+    /// gate) — metadata only, never prompt content.
+    pub fn meta_get(&self, key: &str) -> Result<Option<String>> {
+        self.with_conn(|conn| {
+            let v = conn
+                .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
+                    r.get::<_, String>(0)
+                })
+                .optional()?;
+            Ok(v)
+        })
+    }
+
+    /// Upsert a value into the generic `meta` key/value store.
+    pub fn meta_set(&self, key: &str, value: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO meta(key, value, updated_at) VALUES (?1, ?2, datetime('now'))
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
+                params![key, value],
+            )?;
+            Ok(())
+        })
+    }
 }
 
-fn row_to_security_event(row: &rusqlite::Row) -> rusqlite::Result<SecurityEvent> {
+fn row_to_security_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<SecurityEvent> {
     Ok(SecurityEvent {
         id: Some(row.get(0)?),
         timestamp: row.get::<_, DateTime<Utc>>(1)?,
@@ -811,7 +915,7 @@ fn row_to_security_event(row: &rusqlite::Row) -> rusqlite::Result<SecurityEvent>
     })
 }
 
-fn row_to_receipt(row: &rusqlite::Row) -> rusqlite::Result<ReceiptRow> {
+fn row_to_receipt(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReceiptRow> {
     Ok(ReceiptRow {
         seq: row.get(0)?,
         sealed_at: row.get(1)?,
@@ -829,7 +933,7 @@ fn row_to_receipt(row: &rusqlite::Row) -> rusqlite::Result<ReceiptRow> {
     })
 }
 
-fn row_to_request(row: &rusqlite::Row) -> rusqlite::Result<RequestRecord> {
+fn row_to_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<RequestRecord> {
     Ok(RequestRecord {
         id: Some(row.get(0)?),
         timestamp: row.get::<_, DateTime<Utc>>(1)?,
@@ -846,5 +950,33 @@ fn row_to_request(row: &rusqlite::Row) -> rusqlite::Result<RequestRecord> {
         request_hash: row.get(12)?,
         latency_ms: row.get(13)?,
         http_status: row.get(14)?,
+        tags: row.get(15)?,
+    })
+}
+
+/// Column order: `id, timestamp, tool_name, rpc_id, upstream_status, upstream_uri`.
+fn row_to_mcp_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<McpEvent> {
+    Ok(McpEvent {
+        id: Some(row.get(0)?),
+        timestamp: row.get::<_, DateTime<Utc>>(1)?,
+        tool_name: row.get(2)?,
+        rpc_id: row.get(3)?,
+        upstream_status: row.get(4)?,
+        upstream_uri: row.get(5)?,
+    })
+}
+
+/// Column order: `provider, model, cost, requests, input_tokens,
+/// cache_creation_tokens, cache_read_tokens, output_tokens`.
+fn row_to_model_breakdown(row: &rusqlite::Row<'_>) -> rusqlite::Result<ModelBreakdown> {
+    Ok(ModelBreakdown {
+        provider: row.get(0)?,
+        model: row.get(1)?,
+        cost: row.get(2)?,
+        requests: row.get(3)?,
+        input_tokens: row.get::<_, i64>(4)? as u64,
+        cache_creation_tokens: row.get::<_, i64>(5)? as u64,
+        cache_read_tokens: row.get::<_, i64>(6)? as u64,
+        output_tokens: row.get::<_, i64>(7)? as u64,
     })
 }

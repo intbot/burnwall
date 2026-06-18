@@ -61,5 +61,5 @@ pub trait WasteRule {
 
     /// Inspect the context; return `Some(Finding)` to surface, `None` to stay
     /// quiet. Must not panic and must not read prompt/response content.
-    fn evaluate(&self, ctx: &WasteContext) -> Option<Finding>;
+    fn evaluate(&self, ctx: &WasteContext<'_>) -> Option<Finding>;
 }

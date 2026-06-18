@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::thread;
 
 use burnwall::budget::{
-    check_daily, BudgetConfig, BudgetStatus, BudgetTracker, LoopConfig, LoopDetector, LoopVerdict,
+    BudgetConfig, BudgetStatus, BudgetTracker, LoopConfig, LoopDetector, LoopVerdict, check_daily,
+    check_hourly,
 };
 use burnwall::providers::TokenUsage;
 use burnwall::storage::{RequestRecord, Storage};
@@ -20,10 +21,166 @@ fn cfg(daily: f64, warn: u8) -> BudgetConfig {
         daily_usd: daily,
         monthly_usd: 0.0,
         warn_percent: warn,
+        per_session_usd: 0.0,
+        per_hour_usd: 0.0,
+        enforce_on_plan: false,
+        fallback_model: String::new(),
+    }
+}
+
+fn cfg_session(per_session: f64) -> BudgetConfig {
+    BudgetConfig {
+        daily_usd: 0.0,
+        monthly_usd: 0.0,
+        warn_percent: 80,
+        per_session_usd: per_session,
+        per_hour_usd: 0.0,
+        enforce_on_plan: false,
+        fallback_model: String::new(),
+    }
+}
+
+fn cfg_hourly(per_hour: f64) -> BudgetConfig {
+    BudgetConfig {
+        daily_usd: 0.0, // isolate the hourly brake
+        monthly_usd: 0.0,
+        warn_percent: 80,
+        per_session_usd: 0.0,
+        per_hour_usd: per_hour,
+        enforce_on_plan: false,
+        fallback_model: String::new(),
     }
 }
 
 const EPS: f64 = 1e-9;
+
+// ───────────────────── Monthly cap (B-H2) ─────────────────────
+
+fn cfg_monthly(monthly: f64) -> BudgetConfig {
+    BudgetConfig {
+        daily_usd: 0.0, // unlimited daily, isolate the monthly check
+        monthly_usd: monthly,
+        warn_percent: 80,
+        per_session_usd: 0.0,
+        per_hour_usd: 0.0,
+        enforce_on_plan: false,
+        fallback_model: String::new(),
+    }
+}
+
+#[test]
+fn monthly_cap_unlimited_when_zero() {
+    let t = BudgetTracker::new(cfg_monthly(0.0));
+    t.record(1_000.0);
+    assert!(matches!(t.check_monthly(), BudgetStatus::Ok));
+}
+
+#[test]
+fn monthly_cap_blocks_when_exceeded() {
+    let t = BudgetTracker::new(cfg_monthly(100.0));
+    t.record(99.0);
+    assert!(matches!(t.check_monthly(), BudgetStatus::Ok));
+    t.record(2.0); // 101 > 100
+    assert!(
+        matches!(t.check_monthly(), BudgetStatus::Exceeded { .. }),
+        "monthly cap should block once exceeded"
+    );
+    // The daily check is independent and unlimited here.
+    assert!(matches!(t.check(), BudgetStatus::Ok));
+}
+
+#[test]
+fn record_accumulates_into_both_day_and_month() {
+    let t = BudgetTracker::new(BudgetConfig {
+        daily_usd: 0.0,
+        monthly_usd: 0.0,
+        warn_percent: 80,
+        per_session_usd: 0.0,
+        per_hour_usd: 0.0,
+        enforce_on_plan: false,
+        fallback_model: String::new(),
+    });
+    t.record(3.0);
+    t.record(4.0);
+    assert!((t.today_spent() - 7.0).abs() < EPS);
+    assert!((t.month_spent() - 7.0).abs() < EPS);
+}
+
+#[test]
+fn reset_zeroes_day_but_not_month() {
+    let t = BudgetTracker::new(cfg_monthly(0.0));
+    t.record(5.0);
+    t.reset();
+    assert!((t.today_spent()).abs() < EPS, "daily reset to zero");
+    assert!(
+        (t.month_spent() - 5.0).abs() < EPS,
+        "month untouched by daily reset"
+    );
+}
+
+// ──────────────── Hourly brake + burn-rate speedometer (#2) ────────────────
+
+#[test]
+fn hourly_cap_unlimited_when_zero() {
+    // Brake disarmed (per_hour_usd = 0) → always Ok, regardless of spend.
+    let t = BudgetTracker::new(cfg_hourly(0.0));
+    t.record(1_000.0);
+    assert!(matches!(t.check_hourly(), BudgetStatus::Ok));
+    // Pure check agrees.
+    assert_eq!(check_hourly(1_000.0, &cfg_hourly(0.0)), BudgetStatus::Ok);
+}
+
+#[test]
+fn hourly_cap_blocks_when_exceeded() {
+    let t = BudgetTracker::new(cfg_hourly(5.0));
+    t.record(3.0);
+    assert!(matches!(t.check_hourly(), BudgetStatus::Ok));
+    t.record(2.5); // 5.5 > 5.0
+    assert!(
+        matches!(t.check_hourly(), BudgetStatus::Exceeded { .. }),
+        "hourly brake should block once the rolling hour exceeds the ceiling"
+    );
+    // The daily check is independent (unlimited here).
+    assert!(matches!(t.check(), BudgetStatus::Ok));
+}
+
+#[test]
+fn hourly_cap_pure_check_boundary() {
+    // `>=` ceiling blocks, under it is Ok.
+    let c = cfg_hourly(10.0);
+    assert!(matches!(check_hourly(9.99, &c), BudgetStatus::Ok));
+    assert!(matches!(
+        check_hourly(10.0, &c),
+        BudgetStatus::Exceeded { .. }
+    ));
+    assert!(matches!(
+        check_hourly(11.0, &c),
+        BudgetStatus::Exceeded { .. }
+    ));
+}
+
+#[test]
+fn burn_rate_scales_short_window_to_hourly() {
+    // $0.50 spent "now" read over a 5-minute window should extrapolate to
+    // ~$6.00/hour (×12). The window holds everything just recorded.
+    let t = BudgetTracker::new(cfg_hourly(0.0));
+    t.record(0.50);
+    let rate = t.burn_rate_per_hour(5);
+    assert!(
+        (rate - 6.0).abs() < 1e-6,
+        "expected ~$6.00/hr, got ${rate:.4}"
+    );
+    // Over the full hour window the same $0.50 reads as $0.50/hr (×1).
+    let hourly = t.burn_rate_per_hour(60);
+    assert!((hourly - 0.50).abs() < 1e-6, "got ${hourly:.4}");
+}
+
+#[test]
+fn burn_rate_is_zero_with_no_spend() {
+    let t = BudgetTracker::new(cfg_hourly(0.0));
+    assert_eq!(t.burn_rate_per_hour(5), 0.0);
+    assert_eq!(t.hour_spent(), 0.0);
+}
 
 // ───────────────────────────── Pure check ─────────────────────────────
 
@@ -251,8 +408,15 @@ fn loop_cfg(max_identical: u32, window: u32, max_cost: f64) -> LoopConfig {
         max_identical_requests: max_identical,
         window_seconds: window,
         max_cost_per_window: max_cost,
-        hash_prefix_bytes: 200,
+        cost_spiral_enforce: false,
+        action_repeat_threshold: 10,
+        action_repeat_enforce: false,
     }
+}
+
+/// Hash a body with the standard method/provider/path context.
+fn lh(det: &LoopDetector, body: &[u8]) -> u64 {
+    det.hash("POST", "anthropic", "/v1/messages", body)
 }
 
 #[test]
@@ -264,43 +428,62 @@ fn loop_detector_passes_unique_requests() {
         b"third body".as_slice(),
     ];
     for body in &bodies {
-        let h = det.hash(body);
+        let h = lh(&det, body);
         assert_eq!(det.check_request(h), LoopVerdict::Ok);
+        det.record_arrival(h);
     }
 }
 
 #[test]
-fn loop_detector_blocks_on_nth_identical_request() {
-    // max_identical_requests = 3 -> the 3rd identical request triggers the block.
+fn loop_detector_blocks_after_max_identical_successes() {
+    // peek/record model: N identical *successful* requests are tolerated (each
+    // recorded by the tee on a 2xx); the next identical peek blocks.
     let det = LoopDetector::new(loop_cfg(3, 60, 0.0));
-    let body = b"identical body";
-    let h = det.hash(body);
+    let h = lh(&det, b"identical body");
 
-    assert_eq!(det.check_request(h), LoopVerdict::Ok, "1st should pass");
-    assert_eq!(det.check_request(h), LoopVerdict::Ok, "2nd should pass");
+    for _ in 0..3 {
+        assert_eq!(det.check_request(h), LoopVerdict::Ok);
+        det.record_arrival(h);
+    }
     let v = det.check_request(h);
     assert!(
         matches!(v, LoopVerdict::Repeated { count: 3, .. }),
-        "3rd should block, got {:?}",
+        "should block once 3 successes are recorded, got {:?}",
         v
     );
 }
 
 #[test]
-fn loop_detector_hashes_only_prefix_bytes() {
-    // Same prefix (200 bytes by default), different suffix -> same hash.
+fn loop_detector_check_is_read_only() {
+    // The death-spiral regression (B-C2): check_request never records, so a
+    // client hammering a 429 can't keep its own window full.
+    let det = LoopDetector::new(loop_cfg(3, 60, 0.0));
+    let h = lh(&det, b"retry body");
+    for _ in 0..50 {
+        assert_eq!(det.check_request(h), LoopVerdict::Ok);
+    }
+}
+
+#[test]
+fn loop_detector_hashes_full_body() {
+    // Same long prefix, different suffix -> DIFFERENT hash. Agentic clients
+    // resend the whole (growing) transcript every turn, so a shared prefix
+    // is normal session traffic, not a loop — only byte-identical bodies
+    // may collide.
     let mut a = vec![b'A'; 200];
     let mut b = a.clone();
     a.extend_from_slice(b"-different-suffix-A");
     b.extend_from_slice(b"-different-suffix-B");
     let det = LoopDetector::with_defaults();
-    assert_eq!(det.hash(&a), det.hash(&b));
+    assert_ne!(lh(&det, &a), lh(&det, &b));
 
-    // Different first 200 bytes -> different hash.
-    let mut c = vec![b'A'; 200];
+    // Identical bodies -> identical hash.
+    assert_eq!(lh(&det, &a), lh(&det, &a.clone()));
+
+    // Different content -> different hash.
+    let c = vec![b'A'; 200];
     let d = vec![b'B'; 200];
-    c[0] = b'X';
-    assert_ne!(det.hash(&c), det.hash(&d));
+    assert_ne!(lh(&det, &c), lh(&det, &d));
 }
 
 #[test]
@@ -309,20 +492,24 @@ fn loop_detector_disabled_returns_ok() {
         enabled: false,
         ..loop_cfg(1, 60, 1.0) // would block immediately if enabled
     });
-    let h = det.hash(b"any");
-    assert_eq!(det.check_request(h), LoopVerdict::Ok);
+    let h = lh(&det, b"any");
+    det.record_arrival(h);
+    det.record_arrival(h);
     assert_eq!(det.check_request(h), LoopVerdict::Ok);
 }
 
 #[test]
 fn loop_detector_independent_hashes_dont_cross_count() {
     let det = LoopDetector::new(loop_cfg(2, 60, 0.0));
-    let h1 = det.hash(b"body one");
-    let h2 = det.hash(b"body two");
+    let h1 = lh(&det, b"body one");
+    let h2 = lh(&det, b"body two");
 
+    // Record one arrival under each — neither reaches the cap of 2.
+    det.record_arrival(h1);
+    det.record_arrival(h2);
     assert_eq!(det.check_request(h1), LoopVerdict::Ok);
-    assert_eq!(det.check_request(h2), LoopVerdict::Ok);
-    // Each hash now has count=1, neither should block.
+    // A second success under h2 brings it to the cap; the next peek blocks.
+    det.record_arrival(h2);
     let v = det.check_request(h2);
     assert!(matches!(v, LoopVerdict::Repeated { count: 2, .. }));
 }
@@ -364,10 +551,10 @@ fn current_window_cost_excludes_expired_entries() {
 
 #[test]
 fn loop_detector_safe_under_concurrent_writers() {
-    // 8 threads pounding the same hash. Set max_identical=1 so every call
-    // returns Repeated{count}, letting us verify no increments are lost.
+    // 8 threads recording arrivals under the same hash; verify no increments
+    // are lost under contention (the arrival path is what mutates state now).
     let det = Arc::new(LoopDetector::new(loop_cfg(1, 60, 0.0)));
-    let h = det.hash(b"shared body");
+    let h = lh(&det, b"shared body");
     let threads = 8;
     let per_thread = 1000;
     let mut handles = Vec::with_capacity(threads);
@@ -375,18 +562,53 @@ fn loop_detector_safe_under_concurrent_writers() {
         let d = det.clone();
         handles.push(std::thread::spawn(move || {
             for _ in 0..per_thread {
-                let _ = d.check_request(h);
+                d.record_arrival(h);
             }
         }));
     }
-    for h in handles {
-        h.join().unwrap();
+    for handle in handles {
+        handle.join().unwrap();
     }
-    let final_verdict = det.check_request(h);
-    let final_count = match final_verdict {
+    let final_count = match det.check_request(h) {
         LoopVerdict::Repeated { count, .. } => count,
         v => panic!("expected Repeated, got {:?}", v),
     };
-    let expected = (threads * per_thread + 1) as u32;
+    let expected = (threads * per_thread) as u32;
     assert_eq!(final_count, expected, "lost increments under contention");
+}
+
+// ─────────────── Per-session / swarm budget ceiling (v0.9.9) ───────────────
+
+#[test]
+fn per_session_off_by_default_is_unlimited() {
+    let t = BudgetTracker::new(cfg(50.0, 80)); // per_session_usd = 0
+    t.record_session("swarm-1", 100.0); // no-op when capping off
+    assert!(matches!(t.check_session("swarm-1"), BudgetStatus::Ok));
+    assert!((t.session_spent("swarm-1")).abs() < EPS); // not even recorded
+}
+
+#[test]
+fn per_session_accumulates_and_blocks_at_cap() {
+    let t = BudgetTracker::new(cfg_session(2.0));
+    t.record_session("swarm-1", 0.80);
+    t.record_session("swarm-1", 0.80);
+    assert!(matches!(t.check_session("swarm-1"), BudgetStatus::Ok));
+    assert!((t.session_spent("swarm-1") - 1.60).abs() < 1e-6);
+    t.record_session("swarm-1", 0.50); // → 2.10 ≥ 2.0
+    assert!(matches!(
+        t.check_session("swarm-1"),
+        BudgetStatus::Exceeded { .. }
+    ));
+}
+
+#[test]
+fn per_session_is_isolated_per_session_id() {
+    let t = BudgetTracker::new(cfg_session(1.0));
+    t.record_session("a", 1.5);
+    assert!(matches!(
+        t.check_session("a"),
+        BudgetStatus::Exceeded { .. }
+    ));
+    // A different session/swarm is unaffected by sibling spend.
+    assert!(matches!(t.check_session("b"), BudgetStatus::Ok));
 }

@@ -31,8 +31,9 @@
 //! the parser yields nothing.
 
 use std::path::PathBuf;
+use std::time::SystemTime;
 
-use chrono::{DateTime, Utc};
+use chrono::DateTime;
 use serde_json::Value;
 
 use super::UsageEntry;
@@ -48,13 +49,26 @@ pub fn parse_str(contents: &str) -> Vec<UsageEntry> {
 /// Read and parse the Aider analytics log. Fail-open: returns empty if the
 /// file is absent or unreadable (analytics off, or never run).
 pub fn collect() -> Vec<UsageEntry> {
+    collect_since(None)
+}
+
+/// [`collect`] with an optional mtime cutoff: an analytics log untouched
+/// since before the window start (minus the safety margin) is skipped
+/// unread; otherwise it is streamed line by line, never slurped whole.
+pub fn collect_since(cutoff: Option<SystemTime>) -> Vec<UsageEntry> {
     let Some(path) = analytics_path() else {
         return Vec::new();
     };
-    let Ok(contents) = std::fs::read_to_string(&path) else {
+    if super::path_is_stale(&path, cutoff) {
         return Vec::new();
-    };
-    parse_str(&contents)
+    }
+    let mut out = Vec::new();
+    super::for_each_line(&path, |line| {
+        if let Some(entry) = parse_line(line) {
+            out.push(entry);
+        }
+    });
+    out
 }
 
 /// Path to Aider's analytics log. `BURNWALL_AIDER_ANALYTICS` overrides it

@@ -33,9 +33,14 @@ fn seed_storage(dir: &PathBuf) {
     r.timestamp = Utc::now();
     storage.insert_request(&r).unwrap();
 
+    // One enforcement block + one advisory alert, so surfaces must show the
+    // split (an alert presented as a "block" was a real dogfooding bug).
     let evt = SecurityEvent::new("path_blocked", "~/.ssh/id_rsa")
         .with_provider("anthropic", "claude-sonnet-4-6");
     storage.insert_security_event(&evt).unwrap();
+    let alert = SecurityEvent::new("slow_drip_alert", "host targeted unusually often")
+        .with_provider("anthropic", "claude-sonnet-4-6");
+    storage.insert_security_event(&alert).unwrap();
 }
 
 // ─────────────────────────────── status ───────────────────────────────
@@ -53,7 +58,7 @@ fn status_table_shows_seeded_data() {
         .stdout(predicate::str::contains("Today ("))
         .stdout(predicate::str::contains("anthropic/claude-sonnet-4-6"))
         .stdout(predicate::str::contains("$0.01"))
-        .stdout(predicate::str::contains("Security: 1 blocked attempt"));
+        .stdout(predicate::str::contains("Security: 1 request blocked · 1 alert"));
 }
 
 #[test]
@@ -70,7 +75,10 @@ fn status_json_emits_valid_structure() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
     assert!(v["total_cost_usd"].as_f64().unwrap() > 0.0);
-    assert_eq!(v["security_events"], 1);
+    // Total kept for compatibility; the split fields carry the honest story.
+    assert_eq!(v["security_events"], 2);
+    assert_eq!(v["security_blocked"], 1);
+    assert_eq!(v["security_alerts"], 1);
     assert_eq!(v["breakdown"][0]["provider"], "anthropic");
 }
 
@@ -102,6 +110,235 @@ fn history_table_includes_seeded_day() {
         .stdout(predicate::str::contains("Total"))
         .stdout(predicate::str::contains("Monthly burndown"))
         .stdout(predicate::str::contains("Projected EOM"));
+}
+
+/// Seed several local days of activity so the delta chips (today vs yesterday,
+/// window vs prior window) and the spend sparkline have data to render.
+fn seed_multiday(dir: &PathBuf) {
+    fs::create_dir_all(dir).unwrap();
+    let path = dir.join("burnwall.db");
+    let storage = Storage::open(&path).expect("open");
+    // Distinct per-day cost so the sparkline has shape and the deltas are
+    // non-flat. Day 0 = today, increasing days = further back.
+    let daily_cost = [0.80f64, 0.20, 0.55, 0.05, 0.40, 0.10, 0.30];
+    for (days_ago, cost) in daily_cost.iter().enumerate() {
+        let usage = TokenUsage {
+            input_tokens: 1000,
+            output_tokens: 400,
+            cache_creation_tokens: 0,
+            // Some cache reads on recent days so the cache-hit delta moves.
+            cache_read_tokens: if days_ago < 3 { 4000 } else { 0 },
+        };
+        let mut r =
+            RequestRecord::successful("anthropic", "claude-sonnet-4-6", &usage, *cost, None);
+        r.timestamp = Utc::now() - chrono::Duration::days(days_ago as i64);
+        storage.insert_request(&r).unwrap();
+    }
+    // A second model today so the share-of-spend bars have >1 row.
+    let usage = TokenUsage {
+        input_tokens: 800,
+        output_tokens: 300,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+    };
+    let mut r2 = RequestRecord::successful("openai", "gpt-4o", &usage, 0.15, None);
+    r2.timestamp = Utc::now();
+    storage.insert_request(&r2).unwrap();
+    // A block today and a block yesterday → a non-flat Blocked delta.
+    for days_ago in [0i64, 1] {
+        let mut evt = SecurityEvent::new("path_blocked", "~/.ssh/id_rsa")
+            .with_provider("anthropic", "claude-sonnet-4-6");
+        evt.timestamp = Utc::now() - chrono::Duration::days(days_ago);
+        storage.insert_security_event(&evt).unwrap();
+    }
+}
+
+#[test]
+fn status_shows_share_bars_and_spend_sparkline() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    seed_multiday(&path);
+
+    let out = burnwall(&path).arg("status").output().expect("run");
+    assert!(out.status.success());
+    let s = String::from_utf8(out.stdout).unwrap();
+    // Share-of-spend column + a filled bar cell in the Cost-by-model table.
+    assert!(s.contains("Share"), "missing Share column:\n{s}");
+    assert!(s.contains('▓'), "missing share fill bar:\n{s}");
+    // 7-day spend trend sparkline (any block glyph).
+    assert!(s.contains("7-day spend"), "missing sparkline label:\n{s}");
+    assert!(
+        s.chars().any(|c| "▁▂▃▄▅▆▇█".contains(c)),
+        "missing sparkline glyphs:\n{s}"
+    );
+}
+
+#[test]
+fn status_shows_delta_chip_vs_yesterday() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    seed_multiday(&path);
+
+    let out = burnwall(&path).arg("status").output().expect("run");
+    assert!(out.status.success());
+    let s = String::from_utf8(out.stdout).unwrap();
+    // Today ($0.95) vs yesterday ($0.20) — spend is up, so an up chip renders.
+    assert!(
+        s.contains('▲') || s.contains('▼'),
+        "expected a delta chip vs yesterday:\n{s}"
+    );
+}
+
+#[test]
+fn status_json_includes_spend_series_and_previous_day() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    seed_multiday(&path);
+
+    let out = burnwall(&path)
+        .args(["status", "--json"])
+        .output()
+        .expect("run");
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let series = v["spend_series"].as_array().expect("spend_series array");
+    assert_eq!(series.len(), 7, "expected a dense 7-day series");
+    assert!(v["previous_day"]["cost_usd"].as_f64().unwrap() > 0.0);
+}
+
+#[test]
+fn history_shows_sparkline_and_delta_chips() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    seed_multiday(&path);
+
+    let out = burnwall(&path)
+        .args(["history", "--days", "5"])
+        .output()
+        .expect("run");
+    assert!(out.status.success());
+    let s = String::from_utf8(out.stdout).unwrap();
+    assert!(s.contains("Daily spend"), "missing sparkline label:\n{s}");
+    assert!(
+        s.chars().any(|c| "▁▂▃▄▅▆▇█".contains(c)),
+        "missing sparkline glyphs:\n{s}"
+    );
+    // Window vs prior window → at least one delta chip.
+    assert!(
+        s.contains('▲') || s.contains('▼'),
+        "expected a window delta chip:\n{s}"
+    );
+}
+
+#[test]
+fn accuracy_shows_overstatement_for_cache_heavy_spend() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    let storage = Storage::open(path.join("burnwall.db")).unwrap();
+    // A cache-heavy request, stored at its REAL cache-aware cost — so the naive
+    // sticker-rate tally must over-state it.
+    let usage = TokenUsage {
+        input_tokens: 2000,
+        output_tokens: 3000,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 120_000,
+    };
+    let model = "claude-sonnet-4-6";
+    let cost = burnwall::pricing::calculate_cost(model, &usage).unwrap();
+    let mut r = RequestRecord::successful("anthropic", model, &usage, cost, None);
+    r.timestamp = Utc::now();
+    storage.insert_request(&r).unwrap();
+
+    // Table view.
+    burnwall(&path)
+        .arg("accuracy")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Cost accuracy"))
+        .stdout(predicate::str::contains("On-wire"))
+        .stdout(predicate::str::contains("Naive tally"));
+
+    // JSON view: naive must exceed on-wire for a cache-heavy workload.
+    let out = burnwall(&path)
+        .args(["accuracy", "--json"])
+        .output()
+        .expect("run");
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let wire = v["on_wire_usd"].as_f64().unwrap();
+    let naive = v["naive_tally_usd"].as_f64().unwrap();
+    assert!(naive > wire, "naive {naive} should exceed on-wire {wire}");
+    assert!(v["overstated_usd"].as_f64().unwrap() > 0.0);
+}
+
+#[test]
+fn tags_reports_spend_by_attribution_label() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    let storage = Storage::open(path.join("burnwall.db")).unwrap();
+    let usage = TokenUsage {
+        input_tokens: 1000,
+        output_tokens: 500,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+    };
+    for (client, cost) in [("acme", 0.40), ("acme", 0.20), ("globex", 0.10)] {
+        let mut r = RequestRecord::successful("anthropic", "claude-sonnet-4-6", &usage, cost, None)
+            .with_tags(Some(format!(r#"{{"client":"{client}","feature":"auth"}}"#)));
+        r.timestamp = Utc::now();
+        storage.insert_request(&r).unwrap();
+    }
+
+    // Table view groups by key and lists values.
+    burnwall(&path)
+        .arg("tags")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Attribution tags"))
+        .stdout(predicate::str::contains("By client"))
+        .stdout(predicate::str::contains("acme"))
+        .stdout(predicate::str::contains("globex"));
+
+    // JSON view: client=acme rolls up to 0.60 across two requests.
+    let out = burnwall(&path)
+        .args(["tags", "--key", "client", "--json"])
+        .output()
+        .expect("run");
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let client = v["by_key"]["client"].as_array().unwrap();
+    let acme = client.iter().find(|e| e["value"] == "acme").unwrap();
+    assert!((acme["cost_usd"].as_f64().unwrap() - 0.60).abs() < 1e-9);
+    assert_eq!(acme["requests"].as_i64().unwrap(), 2);
+    // Filtering by key excludes the other key entirely.
+    assert!(v["by_key"].get("feature").is_none());
+}
+
+#[test]
+fn tags_empty_db_explains_the_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    burnwall(&path)
+        .arg("tags")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no tagged requests"))
+        .stdout(predicate::str::contains("x-burnwall-tags"));
+}
+
+#[test]
+fn accuracy_empty_db_does_not_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    burnwall(&path)
+        .arg("accuracy")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no proxied spend"));
 }
 
 #[test]
@@ -367,9 +604,10 @@ fn security_command_lists_seeded_event() {
         .success()
         .stdout(predicate::str::contains("Security events"))
         .stdout(predicate::str::contains("path_blocked"))
+        .stdout(predicate::str::contains("slow_drip_alert"))
         .stdout(predicate::str::contains("anthropic/claude-sonnet-4-6"))
         .stdout(predicate::str::contains("~/.ssh/id_rsa"))
-        .stdout(predicate::str::contains("Total: 1 event"));
+        .stdout(predicate::str::contains("Total: 2 event"));
 }
 
 #[test]
@@ -384,9 +622,15 @@ fn security_command_json_emits_array() {
         .expect("run");
     assert!(output.status.success());
     let v: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(v["count"], 1);
-    assert_eq!(v["events"][0]["event_type"], "path_blocked");
-    assert_eq!(v["events"][0]["details"], "~/.ssh/id_rsa");
+    assert_eq!(v["count"], 2);
+    let types: Vec<&str> = v["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["event_type"].as_str().unwrap())
+        .collect();
+    assert!(types.contains(&"path_blocked"), "got: {types:?}");
+    assert!(types.contains(&"slow_drip_alert"), "got: {types:?}");
 }
 
 #[test]
@@ -512,7 +756,7 @@ fn digest_table_shows_bill_of_materials() {
         .success()
         .stdout(predicate::str::contains("Agent Bill of Materials"))
         .stdout(predicate::str::contains("anthropic/claude-sonnet-4-6"))
-        .stdout(predicate::str::contains("Security checks fired: 1"));
+        .stdout(predicate::str::contains("Security checks fired: 2"));
 }
 
 #[test]
@@ -530,4 +774,345 @@ fn digest_json_is_valid() {
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
     assert_eq!(v["models"][0]["provider"], "anthropic");
     assert_eq!(v["security_by_type"][0]["event_type"], "path_blocked");
+}
+
+// ─────────────────────────────── pricing ───────────────────────────────
+
+#[test]
+fn pricing_list_shows_builtin_and_local_override() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    // A local override for an unknown model + a shadow of a built-in.
+    fs::write(
+        path.join("pricing.toml"),
+        "[[model]]\nname = \"claude-opus-4-9\"\ninput_per_mtok = 5.0\noutput_per_mtok = 25.0\n",
+    )
+    .unwrap();
+
+    burnwall(&path)
+        .args(["pricing", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude-opus-4-9"))
+        .stdout(predicate::str::contains("override (new)"))
+        .stdout(predicate::str::contains("claude-sonnet-4-6")) // built-in still listed
+        .stdout(predicate::str::contains("1 override(s) active"));
+}
+
+#[test]
+fn pricing_path_init_writes_starter_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+
+    burnwall(&path)
+        .args(["pricing", "path", "--init"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("starter file"));
+    assert!(path.join("pricing.toml").exists());
+}
+
+/// Pull the hex public key out of `rules keygen` stdout (last non-empty line).
+fn keygen_public_key(dir: &PathBuf, seed_path: &std::path::Path) -> String {
+    let output = burnwall(dir)
+        .args(["rules", "keygen"])
+        .arg(seed_path)
+        .output()
+        .expect("keygen");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    stdout
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())
+        .expect("a public key line")
+        .to_string()
+}
+
+#[test]
+fn pricing_sign_then_verify_roundtrips_and_rejects_tamper() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+
+    let seed = path.join("key.seed");
+    let pubkey = keygen_public_key(&path, &seed);
+
+    let card = path.join("card.toml");
+    fs::write(
+        &card,
+        "[[model]]\nname = \"gpt-6\"\ninput_per_mtok = 2.5\noutput_per_mtok = 12.0\n",
+    )
+    .unwrap();
+    let sig = path.join("card.sig");
+
+    // Sign with the secret seed.
+    burnwall(&path)
+        .args(["pricing", "sign"])
+        .arg(&card)
+        .arg("--key")
+        .arg(&seed)
+        .arg("--out")
+        .arg(&sig)
+        .assert()
+        .success();
+
+    // Verify against the matching public key → trusted.
+    burnwall(&path)
+        .args(["pricing", "verify"])
+        .arg(&card)
+        .arg("--sig")
+        .arg(&sig)
+        .arg("--publisher")
+        .arg(&pubkey)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Signature verifies"));
+
+    // Tamper with the card → verification must fail (non-zero exit).
+    fs::write(
+        &card,
+        "[[model]]\nname = \"gpt-6\"\ninput_per_mtok = 0.01\noutput_per_mtok = 0.01\n",
+    )
+    .unwrap();
+    burnwall(&path)
+        .args(["pricing", "verify"])
+        .arg(&card)
+        .arg("--sig")
+        .arg(&sig)
+        .arg("--publisher")
+        .arg(&pubkey)
+        .assert()
+        .failure();
+}
+
+#[test]
+fn pricing_verify_without_publishers_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    let card = path.join("card.toml");
+    fs::write(
+        &card,
+        "[[model]]\nname = \"x\"\ninput_per_mtok = 1.0\noutput_per_mtok = 1.0\n",
+    )
+    .unwrap();
+    let sig = path.join("card.sig");
+    fs::write(&sig, "deadbeef").unwrap();
+
+    // No [pricing].publishers and no --publisher → refuse, don't fail-open.
+    burnwall(&path)
+        .args(["pricing", "verify"])
+        .arg(&card)
+        .arg("--sig")
+        .arg(&sig)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no trusted publishers"));
+}
+
+// ─────────────────────────────── statusline ───────────────────────────────
+
+#[test]
+fn statusline_renders_ribbon_from_claude_code_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+
+    let json = r#"{"session_id":"s1","model":{"id":"claude-sonnet-4-6"},"cost":{"total_cost_usd":0.16},"context_window":{"used_percentage":22,"current_usage":{"input_tokens":5000,"output_tokens":615,"cache_creation_input_tokens":3000,"cache_read_input_tokens":5000}}}"#;
+
+    burnwall(&path)
+        .args(["statusline", "--no-color"])
+        // Force the unprotected/direct path deterministically: if `cargo test`
+        // is run from a burnwall-routed shell, a leaked ANTHROPIC_BASE_URL would
+        // otherwise flip the ribbon to proxied and change what renders.
+        .env_remove("ANTHROPIC_BASE_URL")
+        .env_remove("OPENAI_BASE_URL")
+        .env_remove("BURNWALL_BYPASS")
+        .write_stdin(json)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("🔥 burnwall · sonnet-4.6"))
+        .stdout(predicate::str::contains("↑13k ↓615")) // input buckets summed
+        // Direct = the proxy isn't in the path, so the cost/plan cluster is
+        // suppressed (it would be stale). Both the plain and degraded direct
+        // variants share this substring; the stdin-derived token + context
+        // segments stay because they don't depend on the proxy.
+        .stdout(predicate::str::contains("DIRECT (unprotected)"))
+        .stdout(predicate::str::contains("sess").not())
+        .stdout(predicate::str::contains("ctx [▓▓"))
+        .stdout(predicate::str::contains("22%"));
+}
+
+#[test]
+fn statusline_is_fail_open_on_garbage_stdin() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+
+    // Non-JSON stdin must still produce a line (zeroed), never an error.
+    burnwall(&path)
+        .args(["statusline", "--no-color"])
+        .write_stdin("not json at all")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("🔥"));
+}
+
+// ─────────────────────────────── watch ───────────────────────────────
+
+#[test]
+fn watch_once_renders_cross_tool_ribbon() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    seed_storage(&path); // one anthropic/claude-sonnet-4-6 request
+
+    burnwall(&path)
+        .args(["watch", "--once", "--oneline", "--no-color"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("🔥 burnwall · sonnet-4.6"))
+        .stdout(predicate::str::contains("today"));
+}
+
+#[test]
+fn watch_once_empty_db_is_safe() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    burnwall(&path)
+        .args(["watch", "--once", "--no-color"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("🔥"));
+}
+
+// ─────────────────────────────── savings ───────────────────────────────
+
+#[test]
+fn savings_reports_spend_and_is_json_valid() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    seed_storage(&path); // one anthropic/claude-sonnet-4-6 request, cost > 0
+
+    burnwall(&path)
+        .args(["savings", "--days", "30"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Savings & cost"))
+        .stdout(predicate::str::contains("Real spend"));
+
+    let output = burnwall(&path)
+        .args(["savings", "--json"])
+        .output()
+        .expect("run");
+    assert!(output.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON");
+    assert!(v["real_spend_usd"].as_f64().is_some());
+    assert!(v["opportunities"].is_array());
+}
+
+#[test]
+fn status_shows_protection_heartbeat() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    seed_storage(&path);
+    // Proxy isn't running in the test sandbox → the "not running" heartbeat.
+    burnwall(&path)
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Proxy not running"));
+}
+
+// ───────────────────── per-session attribution (v0.9.9) ─────────────────────
+
+#[test]
+fn status_shows_by_session_when_sessions_present() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    // Seed two requests carrying an x-burnwall-session id.
+    let db = Storage::open(path.join("burnwall.db")).unwrap();
+    let usage = TokenUsage {
+        input_tokens: 1000,
+        output_tokens: 200,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+    };
+    for cost in [0.02_f64, 0.03] {
+        let mut r = RequestRecord::successful(
+            "anthropic",
+            "claude-sonnet-4-6",
+            &usage,
+            cost,
+            Some("swarm-7".into()),
+        );
+        r.timestamp = Utc::now();
+        db.insert_request(&r).unwrap();
+    }
+    burnwall(&path)
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("By session"))
+        .stdout(predicate::str::contains("swarm-7"));
+}
+
+// ─────────────────────────────── share ───────────────────────────────
+
+#[test]
+fn share_emits_signed_value_card() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    burnwall(&path)
+        .args(["share", "--days", "30"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Burnwall · last 30 days"))
+        .stdout(predicate::str::contains("signed"))
+        .stdout(predicate::str::contains("verify: payload"));
+}
+
+#[test]
+fn share_no_sign_emits_unsigned_card() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    burnwall(&path)
+        .args(["share", "--no-sign"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("unsigned"));
+}
+
+// ─────────────────────────────── upgrade ───────────────────────────────
+
+#[test]
+fn upgrade_dry_run_prints_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    burnwall(&path)
+        .args(["upgrade", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("latest release"))
+        .stdout(predicate::str::contains("releases/latest/download"))
+        .stdout(predicate::str::contains("stop the proxy"));
+}
+
+#[test]
+fn self_upgrade_alias_works() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    fs::create_dir_all(&path).unwrap();
+    burnwall(&path)
+        .args(["self-upgrade", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Upgrading Burnwall"));
 }

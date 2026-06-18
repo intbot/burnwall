@@ -14,8 +14,18 @@ REPO="intbot/burnwall"
 INSTALL_DIR="${BURNWALL_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${BURNWALL_VERSION:-latest}"
 
-info() { printf "burnwall: %s\n" "$*"; }
-die() { printf "burnwall installer error: %s\n" "$*" >&2; exit 1; }
+# Colors — only when stdout is a TTY and NO_COLOR is unset, so piped/redirected
+# output (and `| sh` from a pipe) stays clean.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    C_INFO='\033[36m'; C_OK='\033[32m'; C_WARN='\033[33m'; C_ERR='\033[31m'; C_RST='\033[0m'
+else
+    C_INFO=''; C_OK=''; C_WARN=''; C_ERR=''; C_RST=''
+fi
+
+info() { printf "${C_INFO}burnwall:${C_RST} %s\n" "$*"; }
+ok()   { printf "${C_OK}%s${C_RST}\n" "$*"; }
+warn() { printf "${C_WARN}%s${C_RST}\n" "$*"; }
+die()  { printf "${C_ERR}burnwall installer error:${C_RST} %s\n" "$*" >&2; exit 1; }
 
 # Need curl and tar
 command -v curl >/dev/null 2>&1 || die "curl is required but not installed"
@@ -76,7 +86,7 @@ mv "$bin_path" "${INSTALL_DIR}/burnwall"
 chmod 755 "${INSTALL_DIR}/burnwall"
 
 info ""
-info "installed ${tag} to ${INSTALL_DIR}/burnwall"
+ok "✓ installed ${tag} to ${INSTALL_DIR}/burnwall"
 "${INSTALL_DIR}/burnwall" --version 2>/dev/null || true
 
 # PATH hint
@@ -84,7 +94,7 @@ case ":${PATH}:" in
     *":${INSTALL_DIR}:"*) ;;
     *)
         info ""
-        info "NOTE: ${INSTALL_DIR} is not on your PATH."
+        warn "NOTE: ${INSTALL_DIR} is not on your PATH."
         info "Add this line to your shell rc (~/.zshrc, ~/.bashrc, ~/.profile):"
         info ""
         info "    export PATH=\"${INSTALL_DIR}:\$PATH\""
@@ -92,6 +102,6 @@ case ":${PATH}:" in
 esac
 
 info ""
-info "next steps:"
-info "  burnwall init --apply    # detect AI tools and configure env vars"
-info "  burnwall start           # run the proxy"
+printf "next steps:\n"
+ok "  burnwall init --apply    # detect AI tools and configure env vars"
+ok "  burnwall start           # run the proxy"

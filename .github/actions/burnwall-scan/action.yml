@@ -1,0 +1,63 @@
+name: 'Burnwall Scan'
+description: >-
+  Scan agent config files (CLAUDE.md, .cursorrules, .mcp.json, .claude/ and
+  friends) for committed credentials and hidden-instruction smuggling, and
+  upload the findings as SARIF to the repository Security tab.
+author: 'Burnwall'
+branding:
+  icon: 'shield'
+  color: 'orange'
+
+inputs:
+  paths:
+    description: 'Space-separated files or directories to scan.'
+    required: false
+    default: '.'
+  all-files:
+    description: 'Scan every text file in directories, not just known agent configs.'
+    required: false
+    default: 'false'
+  fail-on-findings:
+    description: 'Fail the job when anything is found (in addition to the SARIF upload).'
+    required: false
+    default: 'false'
+  upload-sarif:
+    description: >-
+      Upload the SARIF report to GitHub code scanning. Requires the
+      `security-events: write` permission on the job. Set to false to only
+      print findings (and optionally gate via fail-on-findings).
+    required: false
+    default: 'true'
+  burnwall-version:
+    description: 'Burnwall release to install (for example "0.9.15"). Defaults to the latest release.'
+    required: false
+    default: 'latest'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install Burnwall
+      shell: bash
+      run: |
+        if [ "${{ inputs.burnwall-version }}" != "latest" ]; then
+          export BURNWALL_VERSION="${{ inputs.burnwall-version }}"
+        fi
+        curl -fsSL https://raw.githubusercontent.com/intbot/burnwall/main/install.sh | sh
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+    - name: Scan agent configs
+      shell: bash
+      run: |
+        ARGS=""
+        if [ "${{ inputs.all-files }}" = "true" ]; then ARGS="$ARGS --all-files"; fi
+        if [ "${{ inputs.fail-on-findings }}" = "true" ]; then ARGS="$ARGS --fail-on-findings"; fi
+        # fail-on-findings exits non-zero AFTER writing the SARIF report, so
+        # the upload step still runs (`if: always()` below) and the Security
+        # tab gets the findings either way.
+        burnwall scan ${{ inputs.paths }} --sarif burnwall-scan.sarif $ARGS
+
+    - name: Upload SARIF to code scanning
+      if: ${{ always() && inputs.upload-sarif == 'true' }}
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: burnwall-scan.sarif

@@ -32,6 +32,7 @@
 //! block, or reports zero tokens, contributes nothing.
 
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -44,11 +45,18 @@ const TOOL: &str = "opencode";
 /// Discover and parse every OpenCode message file under the message root.
 /// Fail-open: returns empty if the directory is absent or unreadable.
 pub fn collect() -> Vec<UsageEntry> {
+    collect_since(None)
+}
+
+/// [`collect`] with an optional mtime cutoff: message files untouched since
+/// before the window start (minus the safety margin) are skipped unread.
+/// Each file is one small JSON object (not JSONL), so whole-file reads stay.
+pub fn collect_since(cutoff: Option<SystemTime>) -> Vec<UsageEntry> {
     let Some(root) = message_root() else {
         return Vec::new();
     };
     let mut out = Vec::new();
-    for path in super::find_files_with_ext(&root, "json") {
+    for path in super::find_files_with_ext(&root, "json", cutoff) {
         let Ok(contents) = std::fs::read_to_string(&path) else {
             continue;
         };

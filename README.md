@@ -87,9 +87,10 @@ Works on macOS (arm64 + x86_64) and Linuxbrew.
 Prebuilt archives for every release are at
 <https://github.com/intbot/burnwall/releases>:
 
-- `burnwall-aarch64-apple-darwin.tar.gz` — macOS Apple Silicon
-- `burnwall-x86_64-apple-darwin.tar.gz` — macOS Intel
-- `burnwall-x86_64-unknown-linux-gnu.tar.gz` — Linux x86_64
+- `burnwall-aarch64-apple-darwin.tar.xz` — macOS Apple Silicon
+- `burnwall-x86_64-apple-darwin.tar.xz` — macOS Intel
+- `burnwall-aarch64-unknown-linux-gnu.tar.xz` — Linux arm64
+- `burnwall-x86_64-unknown-linux-gnu.tar.xz` — Linux x86_64
 - `burnwall-x86_64-pc-windows-msvc.zip` — Windows x86_64
 
 Extract and put the `burnwall` binary anywhere on your `PATH`.
@@ -100,6 +101,49 @@ Extract and put the `burnwall` binary anywhere on your `PATH`.
 cargo install burnwall                                         # from crates.io
 git clone https://github.com/intbot/burnwall && cd burnwall && cargo build --release   # from source
 ```
+
+### Verify your download
+
+Every release binary carries a GitHub Artifact Attestation (Sigstore keyless
+build provenance, SLSA Build L2) — proof it was built from this repo's CI, not
+swapped out. Verify before trusting a binary in your traffic path:
+
+```bash
+gh attestation verify burnwall-x86_64-unknown-linux-gnu.tar.xz --repo intbot/burnwall
+```
+
+Each release also ships per-file `.sha256` checksums and a combined `sha256.sum`:
+
+```bash
+sha256sum --ignore-missing -c sha256.sum
+```
+
+See [`SECURITY.md`](SECURITY.md) for the full integrity + TLS-handling statement.
+
+### Windows: if Defender or SmartScreen flags it
+
+The release binaries aren't code-signed yet, so Windows SmartScreen may show an
+"unknown publisher" prompt on first run, and Defender's machine-learning
+heuristic can occasionally flag the binary as a false positive — ironically,
+partly *because* a local security proxy looks structurally like the things it
+protects against. It's a false positive; the binary is the one built by this
+repo's CI (verify it with the attestation command above).
+
+If Defender quarantines the binary while the proxy is running, your AI tools may
+start failing with `ConnectionRefused` (they're still pointed at the now-gone
+local proxy). To recover:
+
+```
+burnwall recover         # pauses routing so new terminals go direct, and tells you what to restart
+```
+
+To prevent re-quarantine, exclude Burnwall's directory in an elevated PowerShell:
+
+```powershell
+Add-MpPreference -ExclusionPath "$env:USERPROFILE\.burnwall"
+```
+
+You can report the false positive to Microsoft at <https://www.microsoft.com/wdsi>.
 
 ## How It Works
 
@@ -123,11 +167,32 @@ Every API call flows through Burnwall:
 
 Responses are **never modified** — Burnwall reads them, logs the cost, and passes them through unchanged.
 
+### Defense-in-depth, not a silver bullet
+
+Security rules are evaluated **before the request leaves your machine** — a
+blocked request never reaches the provider. That's the point: it's another layer
+that holds even when a tool's own approval prompt, allowlist, or sandbox is
+bypassed (and those have been, repeatedly). Burnwall doesn't claim you're under
+attack; it claims that *if* a prompt-injected agent tries to read `~/.ssh` or
+pipe a secret to the network, the rule fires locally first. Pair it with your
+tool's native controls — it's designed to complement them, not replace them.
+
 ## Scope: What Burnwall Guards
 
 Burnwall sits on the **LLM API path** — the HTTP traffic between your AI tool and Anthropic/OpenAI. Security scanning, budget enforcement, and cost tracking all operate on that traffic.
 
-It does **not** intercept **MCP** (Model Context Protocol) traffic. When your agent calls an MCP server's tools, that traffic flows through your AI tool directly — Burnwall never sees it, so it can't scan or block it. MCP-layer protection is a separate concern; dedicated MCP-firewall tools exist and run cleanly alongside Burnwall.
+The LLM-path proxy does **not** automatically see **MCP** (Model Context Protocol) traffic — that flows from your AI tool to MCP servers directly. For that layer, Burnwall ships a dedicated **MCP firewall** you put in front of your MCP servers (`burnwall mcp-watch`): it detects tool-poisoning and "rug-pull" (silent post-approval redefinition) attacks and enforces an approval workflow. Run it alongside the main proxy for end-to-end coverage.
+
+### The coverage boundary
+
+Burnwall protects the traffic that **flows through it**. It does not man-in-the-middle TLS — it forwards via base-URL routing — so a tool that talks to a provider over a path the base URL can't redirect is simply not visible to it. By design, no proxy that avoids TLS interception can see that traffic.
+
+In practice:
+
+- **Routable, fully protected:** Claude Code (including on a Pro/Max subscription), Codex CLI in **API-key mode**, Aider, OpenCode, and other tools that honor `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` or an equivalent API-base setting.
+- **Not routable, bypasses entirely:** Codex CLI signed in with **ChatGPT login**, which talks to the ChatGPT backend over OAuth. Codex in **API-key mode** routes through Burnwall and can be protected — but it bills per-token instead of your flat subscription, so weigh the cost trade-off before switching.
+
+So you're never left guessing, Burnwall tells you which of your installed tools are actually behind the firewall: `burnwall init` warns at setup if a tool is in a bypassing mode, and `burnwall status` (and `burnwall watch`) show a per-tool **Coverage** readout — *protected*, *installed but unseen*, or *bypasses*.
 
 ## Supported Tools
 
@@ -135,6 +200,7 @@ It does **not** intercept **MCP** (Model Context Protocol) traffic. When your ag
 |------|---------|---------------|
 | Claude Code | ✅ Full | `ANTHROPIC_BASE_URL` |
 | Codex CLI (API key mode) | ✅ Full | `OPENAI_BASE_URL` |
+| Codex CLI (ChatGPT login) | ❌ | Not interceptable (OAuth backend) |
 | Aider | ✅ Full | `--openai-api-base` |
 | OpenCode | ✅ Full | Settings |
 | Cline | ✅ Full | Extension settings |
@@ -163,6 +229,23 @@ When a rule triggers:
    Request returned 403 — file was never accessed.
 ```
 
+### False positives
+
+Every block explains what matched and why, and points at the escape hatches —
+all of which take effect on the **running** proxy, with no restart of the proxy
+or your AI tool (your agent session survives):
+
+```bash
+burnwall allow-once    # let just the NEXT request through, then auto-restore
+burnwall pause 5m      # relay everything unchecked for a bounded window
+burnwall resume        # restore protection early
+burnwall report-bug    # write a sanitized local report (nothing is sent)
+```
+
+Pauses auto-expire (default 5 minutes, capped at 24 hours) and every status
+surface shows a loud `⏸ PAUSED` warning for the whole window — the escape
+hatch can't silently outlive the emergency.
+
 ## Cost Output
 
 ```
@@ -182,13 +265,26 @@ $ burnwall status
    Cache savings today: $47.82
 ```
 
-## Privacy
+## Trust & privacy
 
-- **100% local.** No data ever leaves your machine (except API forwarding).
+Burnwall sits in your API traffic path, so it earns that position by being
+verifiable, not by asking for trust:
+
+- **100% local.** No data ever leaves your machine except the API forwarding you
+  asked for. Works offline (apart from the forwarding itself).
 - **Zero telemetry.** No analytics, no phone-home, no tracking. Ever.
 - **No prompt logging.** Only metadata is stored (model, tokens, cost, timestamp).
 - **No API key storage.** Keys pass through in headers and are never written to disk.
-- **Open source.** Audit the code yourself.
+- **Your data, portable.** All metadata lives in a single SQLite file under
+  `~/.burnwall` (`burnwall.db`). Back it up by copying that one file; export it
+  any time with `burnwall export --format csv|json`. See
+  [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+- **Read-only on responses.** Burnwall inspects responses to compute cost and
+  **never modifies them** — your tool gets the provider's bytes unchanged.
+- **Single binary, signed releases.** Install from a checksummed, signed release
+  (or `cargo install` from source). No background services you didn't ask for.
+- **Open source.** The "no network calls except forwarding" claim is auditable —
+  read the proxy code yourself.
 
 ## Terms of service
 

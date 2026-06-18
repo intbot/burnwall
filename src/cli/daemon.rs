@@ -105,6 +105,68 @@ pub fn running_pid() -> anyhow::Result<Option<u32>> {
     }
 }
 
+/// How the previous daemon run ended, inferred at the next start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriorExit {
+    /// No evidence of an unclean prior exit (no leftover PID file).
+    Clean,
+    /// A PID file from a previous run was left behind with no live burnwall
+    /// behind it: the last run was terminated WITHOUT running any cleanup —
+    /// a crash, a forced kill, an **antivirus quarantine of the binary**, or
+    /// an unclean shutdown/reboot. `consecutive` is how many starts in a row
+    /// have seen this (a rising count is the signature of an AV repeatedly
+    /// quarantining the binary, vs. a one-off reboot).
+    Abnormal { consecutive: u32 },
+}
+
+/// Path to the consecutive-unclean-exit counter (`<data dir>/burnwall.crashes`).
+fn crash_counter_path() -> anyhow::Result<PathBuf> {
+    Ok(data_dir()
+        .context("locating the Burnwall data directory")?
+        .join("burnwall.crashes"))
+}
+
+fn read_crash_counter() -> u32 {
+    crash_counter_path()
+        .ok()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+fn write_crash_counter(n: u32) {
+    if let Ok(p) = crash_counter_path() {
+        if let Some(parent) = p.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(p, n.to_string());
+    }
+}
+
+/// Inspect (and record) how the previous run ended, BEFORE the normal
+/// stale-PID cleanup in [`running_pid`] erases the evidence. A leftover PID
+/// file with no live burnwall behind it means the last run never ran its
+/// shutdown path. Bumps the consecutive-occurrence counter on an unclean
+/// exit so the caller can escalate its message when it keeps happening. Call
+/// once, early in `start` (before `running_pid`). Idempotent within a start:
+/// the daemon launcher removes the PID file before re-spawning, so the child
+/// sees `Clean` and the count isn't double-bumped.
+pub fn take_prior_exit_status() -> PriorExit {
+    let stale = matches!(read_pid_file(), Ok(Some(pid)) if !process_is_alive(pid));
+    if !stale {
+        return PriorExit::Clean;
+    }
+    let consecutive = read_crash_counter().saturating_add(1);
+    write_crash_counter(consecutive);
+    PriorExit::Abnormal { consecutive }
+}
+
+/// Reset the unclean-exit counter — called after a clean shutdown so a single
+/// healthy run clears the "this keeps crashing" escalation.
+pub fn note_clean_exit() {
+    write_crash_counter(0);
+}
+
 /// Re-exec `burnwall start` (without `--daemon`) as a detached background
 /// process, then wait for it to write its PID file before returning.
 pub async fn spawn_background(args: &StartArgs) -> anyhow::Result<()> {
@@ -126,7 +188,27 @@ pub async fn spawn_background(args: &StartArgs) -> anyhow::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(pid) = read_pid_file()? {
-            println!("\u{1f6e1}\u{fe0f}  Burnwall is running in the background (PID {pid}).");
+            let sty = crate::term::Styler::stdout();
+            println!(
+                "{}",
+                sty.green(&format!(
+                    "\u{1f6e1}\u{fe0f}  Burnwall is running in the background (PID {pid})."
+                ))
+            );
+            // The child was spawned with --no-routing: it is detached, so its
+            // routing report would go nowhere. The launcher resumes routing
+            // here instead, once the child is confirmed serving.
+            if !args.no_routing {
+                super::start::resume_and_report(&format!(
+                    "http://localhost:{}",
+                    resolved_port(args)
+                ));
+            }
+            // Name the log file so a later crash is diagnosable (L-H2) —
+            // before this, a dead daemon left nothing to look at.
+            if let Some(log) = resolved_child_log_path() {
+                println!("   Logs:     {}", log.display());
+            }
             println!("   Check it with `burnwall status`; stop it with `burnwall stop`.");
             return Ok(());
         }
@@ -148,8 +230,18 @@ pub async fn spawn_background(args: &StartArgs) -> anyhow::Result<()> {
 }
 
 /// Rebuild the `start` argument list for the child, dropping `--daemon`.
+/// The child gets `--no-routing` (the launcher handles the resume and its
+/// messaging after readiness) plus `--pause-routing-on-exit` so a *gracefully*
+/// exiting daemon still pauses routing itself — `burnwall stop` covers the
+/// normal path, but a child that shuts down without `stop` (SIGTERM from the
+/// OS, session logout) must not strand Active env files (L-C1). Hard kills get
+/// no cleanup anywhere — the liveness-gated env files cover that case.
 fn child_args(args: &StartArgs) -> Vec<String> {
-    let mut out = vec!["start".to_string()];
+    let mut out = vec![
+        "start".to_string(),
+        "--no-routing".to_string(),
+        "--pause-routing-on-exit".to_string(),
+    ];
     if let Some(port) = args.port {
         out.push("--port".to_string());
         out.push(port.to_string());
@@ -162,34 +254,135 @@ fn child_args(args: &StartArgs) -> Vec<String> {
     out.push(args.upstream_anthropic.clone());
     out.push("--upstream-openai".to_string());
     out.push(args.upstream_openai.clone());
+    out.push("--upstream-google".to_string());
+    out.push(args.upstream_google.clone());
+    if args.rewrite_anthropic_cache {
+        out.push("--rewrite-anthropic-cache".to_string());
+    }
     out
 }
 
+/// The log file the daemon child will write — same config resolution the
+/// child itself performs.
+fn resolved_child_log_path() -> Option<std::path::PathBuf> {
+    let cfg = crate::config::default_path()
+        .ok()
+        .and_then(|p| crate::config::load_or_default(&p).ok())?;
+    super::start::resolved_log_path(&cfg.logging)
+}
+
+/// The port the child will serve on: the explicit flag, else the configured
+/// port, else the built-in default — same resolution `start` itself uses.
+fn resolved_port(args: &StartArgs) -> u16 {
+    if let Some(p) = args.port {
+        return p;
+    }
+    crate::config::default_path()
+        .ok()
+        .and_then(|p| crate::config::load_or_default(&p).ok())
+        .map(|c| c.proxy.port)
+        .unwrap_or(4100)
+}
+
+/// Absolute path to the graceful-shutdown request file:
+/// `<data dir>/burnwall.shutdown` (honors `BURNWALL_DATA_DIR`).
+///
+/// This file is the only "signal" deliverable to a detached Windows process
+/// — there is no SIGTERM equivalent that reaches a `DETACHED_PROCESS`.
+/// `stop` writes it; the running daemon polls for it and shuts down
+/// gracefully (drain in-flight requests, then exit) when it appears.
+pub fn shutdown_file_path() -> anyhow::Result<PathBuf> {
+    Ok(data_dir()
+        .context("locating the Burnwall data directory")?
+        .join("burnwall.shutdown"))
+}
+
+/// Ask a running daemon to shut down gracefully: stop accepting, drain
+/// in-flight requests (bounded — see the proxy's drain window), then exit
+/// on its own. Writes the shutdown file (works on every platform); on Unix
+/// also sends SIGTERM so the reaction is immediate instead of waiting for
+/// the next poll tick.
+pub fn request_graceful_shutdown(_pid: u32) -> anyhow::Result<()> {
+    let path = shutdown_file_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating data directory {}", parent.display()))?;
+    }
+    fs::write(&path, "graceful shutdown requested by `burnwall stop`")
+        .with_context(|| format!("writing {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        let _ = terminate_process(_pid);
+    }
+    Ok(())
+}
+
+/// Best-effort removal of the shutdown request file. Called by `stop` after
+/// the daemon is gone (a hard-killed daemon never consumes the file, and a
+/// leftover request would kill the NEXT daemon the moment it starts).
+pub fn clear_shutdown_file() {
+    if let Ok(path) = shutdown_file_path() {
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// How often the daemon checks for the shutdown request file. One `stat()`
+/// of a usually-absent file — the same budget as the pause-file check the
+/// handler already does per request.
+const SHUTDOWN_POLL: Duration = Duration::from_millis(250);
+
 /// Resolve when the process is asked to shut down: Ctrl-C on any platform,
-/// or SIGTERM on Unix (which is what `burnwall stop` sends).
+/// SIGTERM on Unix, or the shutdown request file appearing (the mechanism
+/// `burnwall stop` uses — the only one that can reach a detached Windows
+/// process). The resolved signal starts the proxy's graceful drain.
 pub async fn shutdown_signal() {
+    // Clear any stale request left behind by a crashed `stop` — without
+    // this, a leftover file would shut the daemon down the moment it starts.
+    let shutdown_file = shutdown_file_path().ok();
+    if let Some(p) = &shutdown_file {
+        let _ = fs::remove_file(p);
+    }
+    let file_request = async {
+        match shutdown_file {
+            Some(p) => loop {
+                if p.exists() {
+                    let _ = fs::remove_file(&p);
+                    return;
+                }
+                tokio::time::sleep(SHUTDOWN_POLL).await;
+            },
+            None => std::future::pending::<()>().await,
+        }
+    };
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         let mut sigterm = match signal(SignalKind::terminate()) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("could not install SIGTERM handler: {e}");
-                ctrl_c.await;
+                tokio::select! {
+                    _ = ctrl_c => {}
+                    _ = file_request => {}
+                }
                 return;
             }
         };
         tokio::select! {
             _ = ctrl_c => {}
             _ = sigterm.recv() => {}
+            _ = file_request => {}
         }
     }
     #[cfg(not(unix))]
     {
-        ctrl_c.await;
+        tokio::select! {
+            _ = ctrl_c => {}
+            _ = file_request => {}
+        }
     }
 }
 
@@ -231,7 +424,7 @@ fn spawn_detached(exe: &std::path::Path, args: &[String]) -> anyhow::Result<u32>
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{
-        CreateProcessW, CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS, PROCESS_INFORMATION,
+        CREATE_NEW_PROCESS_GROUP, CreateProcessW, DETACHED_PROCESS, PROCESS_INFORMATION,
         STARTUPINFOW,
     };
 
@@ -322,14 +515,55 @@ fn append_arg_quoted(cmd: &mut Vec<u16>, arg: &std::ffi::OsStr) {
     }
 }
 
-/// Is a process with this PID currently alive?
+/// Is a process with this PID currently alive **and actually burnwall**?
+///
+/// PID files have an inherent reuse hazard (L-H1): after a reboot or crash the
+/// stale file's PID is frequently reassigned to an unrelated process. Without
+/// an identity check, autostart would bail "already running" against a random
+/// process (so the proxy never starts while env files claim routing), and
+/// `burnwall stop` could hard-kill an innocent process — the user's browser or
+/// IDE. A PID that exists but isn't burnwall is treated as *stale*.
 #[cfg(unix)]
 pub fn process_is_alive(pid: u32) -> bool {
     // kill(pid, 0) sends no signal — it just reports whether the process
     // exists and is signalable. EPERM means it exists but is owned by
-    // someone else, which still counts as "alive".
+    // someone else (and so is certainly not our daemon).
     let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    ret == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    if ret != 0 {
+        return false;
+    }
+    process_is_burnwall(pid)
+}
+
+/// Identity check via the process image name. Fail-open: if the platform
+/// lookup fails (permissions, exotic kernel), assume it IS burnwall — wrongly
+/// treating a live daemon as stale would double-start, which is worse than the
+/// rare false "already running".
+#[cfg(unix)]
+fn process_is_burnwall(pid: u32) -> bool {
+    // Linux: /proc/<pid>/exe symlink. macOS: no /proc — fall back to `ps`.
+    #[cfg(target_os = "linux")]
+    {
+        match std::fs::read_link(format!("/proc/{pid}/exe")) {
+            Ok(p) => p
+                .file_name()
+                .map(|n| n.to_string_lossy().contains("burnwall"))
+                .unwrap_or(true),
+            Err(_) => true,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        match std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "comm="])
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                String::from_utf8_lossy(&out.stdout).contains("burnwall")
+            }
+            _ => true,
+        }
+    }
 }
 
 /// Ask the process to terminate. Unix sends SIGTERM, which the proxy
@@ -345,12 +579,14 @@ pub fn terminate_process(pid: u32) -> anyhow::Result<()> {
     }
 }
 
-/// Is a process with this PID currently alive?
+/// Is a process with this PID currently alive **and actually burnwall**?
+/// See the Unix variant for why the identity check matters (PID reuse, L-H1).
 #[cfg(windows)]
 pub fn process_is_alive(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{
         GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
     };
     // A process that has fully exited reports an exit code other than
     // STILL_ACTIVE (259). A process that genuinely exits *with* 259 would be
@@ -363,8 +599,23 @@ pub fn process_is_alive(pid: u32) -> bool {
         }
         let mut exit_code: u32 = 0;
         let queried = GetExitCodeProcess(handle, &mut exit_code);
+        if queried == 0 || exit_code != STILL_ACTIVE {
+            CloseHandle(handle);
+            return false;
+        }
+        // Identity check (L-H1): the PID is live, but is it burnwall? A reused
+        // PID belonging to another program must read as stale — otherwise
+        // autostart bails against a random process and `stop` could kill it.
+        // Fail-open on lookup failure (assume burnwall) — see the Unix variant.
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut len);
         CloseHandle(handle);
-        queried != 0 && exit_code == STILL_ACTIVE
+        if ok == 0 {
+            return true;
+        }
+        let image = String::from_utf16_lossy(&buf[..len as usize]).to_ascii_lowercase();
+        image.contains("burnwall")
     }
 }
 
@@ -375,7 +626,7 @@ pub fn process_is_alive(pid: u32) -> bool {
 #[cfg(windows)]
 pub fn terminate_process(pid: u32) -> anyhow::Result<()> {
     use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
     unsafe {
         let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
         if handle.is_null() {

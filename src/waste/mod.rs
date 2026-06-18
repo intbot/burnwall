@@ -23,6 +23,7 @@ use crate::logscrape::UsageEntry;
 pub fn default_rules() -> Vec<Box<dyn WasteRule>> {
     vec![
         Box::new(rules::CacheHitStarvation::default()),
+        Box::new(rules::CacheDeadZone::default()),
         Box::new(rules::ModelOverreliance::default()),
         Box::new(rules::ReasoningEffortOveruse::default()),
         Box::new(rules::ContextWindowSaturation::default()),

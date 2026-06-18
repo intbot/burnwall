@@ -5,12 +5,11 @@ use chrono::{Duration, Utc};
 use burnwall::logscrape::UsageEntry;
 use burnwall::providers::TokenUsage;
 use burnwall::waste::{
-    self,
+    self, Finding, Severity, WasteRule,
     rules::{
-        CacheHitStarvation, ContextWindowSaturation, MegaSessions, ModelOverreliance,
-        ReasoningEffortOveruse, RunawayContextGrowth,
+        CacheDeadZone, CacheHitStarvation, ContextWindowSaturation, MegaSessions,
+        ModelOverreliance, ReasoningEffortOveruse, RunawayContextGrowth,
     },
-    Finding, Severity, WasteRule,
 };
 
 fn entry(model: &str, input: u64, cache_creation: u64, cache_read: u64) -> UsageEntry {
@@ -102,9 +101,11 @@ fn healthy_cache_rate_is_not_flagged() {
         .map(|_| entry("claude-sonnet-4-6", 500, 0, 9_500))
         .collect();
 
-    assert!(test_rule()
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        test_rule()
+            .evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]
@@ -114,9 +115,11 @@ fn below_sample_threshold_is_not_flagged() {
         .map(|_| entry("claude-sonnet-4-6", 8_000, 0, 0))
         .collect();
 
-    assert!(test_rule()
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        test_rule()
+            .evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]
@@ -126,9 +129,11 @@ fn small_prompts_are_ignored() {
         .map(|_| entry("claude-sonnet-4-6", 1_000, 0, 0))
         .collect();
 
-    assert!(test_rule()
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        test_rule()
+            .evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]
@@ -140,9 +145,11 @@ fn unknown_model_contributes_no_waste() {
         .map(|_| entry("claude-imaginary-9000", 8_000, 0, 0))
         .collect();
 
-    assert!(test_rule()
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        test_rule()
+            .evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]
@@ -150,6 +157,96 @@ fn empty_input_yields_no_findings() {
     let findings = waste::analyze(&[]);
     assert!(findings.is_empty());
     assert_eq!(waste::total_waste_usd(&findings), 0.0);
+}
+
+// ───────────────── Cache dead-zone (#8) ─────────────────
+
+/// A dead-zone rule with low thresholds so tests don't need 20 entries.
+fn deadzone_rule() -> CacheDeadZone {
+    CacheDeadZone {
+        min_creation_tokens: 20_000,
+        min_sample: 3,
+        max_read_write_ratio: 0.05,
+    }
+}
+
+#[test]
+fn flags_cache_writes_that_are_never_read() {
+    // The dead-zone signature: every turn pays to WRITE the cache (8k creation
+    // tokens) but reads almost nothing back — a loop rebuilding context just
+    // slower than the cache lifetime, so the cache expires before reuse.
+    let entries: Vec<UsageEntry> = (0..5)
+        .map(|_| entry("claude-sonnet-4-6", 500, 8_000, 50))
+        .collect();
+
+    let f = deadzone_rule()
+        .evaluate(&waste::WasteContext { entries: &entries })
+        .expect("should flag cache dead-zone");
+    assert_eq!(f.rule_id, "cache-dead-zone");
+    assert_eq!(f.count, 5);
+    // Sonnet: cache_write $3.75, input $3.00 → premium $0.75/MTok.
+    // 5 × 8000 creation × 0.75 / 1e6 = $0.030.
+    assert!(
+        (f.observed_waste_usd - 0.030).abs() < 1e-6,
+        "waste = {}",
+        f.observed_waste_usd
+    );
+}
+
+#[test]
+fn healthy_cache_reuse_is_not_a_dead_zone() {
+    // Writes the cache once-ish but READS it heavily — the cache is paying off,
+    // so the read:write ratio is high and the rule stays quiet.
+    let entries: Vec<UsageEntry> = (0..5)
+        .map(|_| entry("claude-sonnet-4-6", 500, 8_000, 40_000))
+        .collect();
+    assert!(
+        deadzone_rule()
+            .evaluate(&waste::WasteContext { entries: &entries })
+            .is_none(),
+        "a workload that reuses its cache must not be flagged"
+    );
+}
+
+#[test]
+fn no_cache_writes_is_not_a_dead_zone() {
+    // No cache creation at all — this is plain uncached traffic (cache-hit
+    // starvation's territory), not a dead zone. The dead-zone rule only fires
+    // when money is actually being spent writing the cache.
+    let entries: Vec<UsageEntry> = (0..10)
+        .map(|_| entry("claude-sonnet-4-6", 8_000, 0, 0))
+        .collect();
+    assert!(
+        deadzone_rule()
+            .evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
+}
+
+#[test]
+fn dead_zone_below_sample_threshold_is_not_flagged() {
+    let entries: Vec<UsageEntry> = (0..2)
+        .map(|_| entry("claude-sonnet-4-6", 500, 8_000, 0))
+        .collect();
+    assert!(
+        deadzone_rule()
+            .evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
+}
+
+#[test]
+fn dead_zone_below_creation_volume_is_not_flagged() {
+    // Three qualifying entries but tiny total cache writes — under the
+    // min_creation_tokens floor, so it's not worth surfacing.
+    let entries: Vec<UsageEntry> = (0..3)
+        .map(|_| entry("claude-sonnet-4-6", 500, 100, 0))
+        .collect();
+    assert!(
+        deadzone_rule()
+            .evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 fn small_entry(model: &str) -> UsageEntry {
@@ -186,9 +283,10 @@ fn mid_tier_model_is_not_flagged_as_overreliance() {
         min_sample: 3,
     };
     let entries: Vec<UsageEntry> = (0..10).map(|_| small_entry("claude-sonnet-4-6")).collect();
-    assert!(rule
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        rule.evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]
@@ -202,9 +300,10 @@ fn large_requests_are_not_overreliance() {
     let entries: Vec<UsageEntry> = (0..10)
         .map(|_| entry_out("claude-opus-4-7", 50_000, 0, 0, 4_000))
         .collect();
-    assert!(rule
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        rule.evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]
@@ -224,8 +323,8 @@ fn flags_heavy_reasoning_on_routine_requests() {
         .expect("should flag reasoning overuse");
     assert_eq!(finding.rule_id, "reasoning-effort-overuse");
     assert_eq!(finding.count, 12);
-    // gpt-5.5 output $10/MTok: 1200 reasoning × 10 / 1e6 = $0.012 each × 12 = $0.144.
-    assert!((finding.observed_waste_usd - 0.144).abs() < 1e-6);
+    // gpt-5.5 output $30/MTok: 1200 reasoning × 30 / 1e6 = $0.036 each × 12 = $0.432.
+    assert!((finding.observed_waste_usd - 0.432).abs() < 1e-6);
 }
 
 #[test]
@@ -239,9 +338,10 @@ fn light_reasoning_is_not_flagged() {
     let entries: Vec<UsageEntry> = (0..10)
         .map(|_| reasoning_entry("gpt-5.5", 800, 400, 200))
         .collect();
-    assert!(rule
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        rule.evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]
@@ -255,9 +355,10 @@ fn heavy_reasoning_on_large_prompts_is_not_flagged() {
     let entries: Vec<UsageEntry> = (0..10)
         .map(|_| reasoning_entry("gpt-5.5", 50_000, 3_000, 2_000))
         .collect();
-    assert!(rule
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        rule.evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]
@@ -270,9 +371,10 @@ fn tools_without_reasoning_counts_never_trip() {
         min_sample: 3,
     };
     let entries: Vec<UsageEntry> = (0..20).map(|_| small_entry("claude-opus-4-7")).collect();
-    assert!(rule
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        rule.evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]
@@ -290,8 +392,8 @@ fn flags_context_window_saturation() {
         .expect("should flag saturation");
     assert_eq!(f.rule_id, "context-window-saturation");
     assert_eq!(f.count, 12);
-    // gpt-5.5 input $2/MTok: 240000 × 2 / 1e6 = $0.48 each × 12 = $5.76.
-    assert!((f.observed_waste_usd - 5.76).abs() < 1e-6);
+    // gpt-5.5 input $5/MTok: 240000 × 5 / 1e6 = $1.20 each × 12 = $14.40.
+    assert!((f.observed_waste_usd - 14.40).abs() < 1e-6);
 }
 
 #[test]
@@ -304,9 +406,10 @@ fn entries_without_a_window_are_not_saturation() {
     let entries: Vec<UsageEntry> = (0..10)
         .map(|_| entry_out("claude-opus-4-7", 240_000, 0, 0, 0))
         .collect();
-    assert!(rule
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        rule.evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]
@@ -342,9 +445,10 @@ fn stable_session_is_not_runaway() {
     let entries: Vec<UsageEntry> = (0..9)
         .map(|i| session_entry("s1", "claude-sonnet-4-6", 5_000, i))
         .collect();
-    assert!(rule
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        rule.evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]
@@ -360,9 +464,10 @@ fn short_session_is_not_runaway() {
         .enumerate()
         .map(|(i, &v)| session_entry("s1", "claude-sonnet-4-6", v, i as i64))
         .collect();
-    assert!(rule
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        rule.evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]
@@ -393,9 +498,10 @@ fn small_session_is_not_mega() {
     let entries: Vec<UsageEntry> = (0..10)
         .map(|i| session_entry("s1", "claude-opus-4-7", 15_000, i))
         .collect();
-    assert!(rule
-        .evaluate(&waste::WasteContext { entries: &entries })
-        .is_none());
+    assert!(
+        rule.evaluate(&waste::WasteContext { entries: &entries })
+            .is_none()
+    );
 }
 
 #[test]

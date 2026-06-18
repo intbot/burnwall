@@ -39,8 +39,8 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tracing::warn;
 
-use super::secrets::SecretPattern;
 use super::Ruleset;
+use super::secrets::SecretPattern;
 
 /// SHA-256 of a pack's bytes, hex-encoded — the content pin used for
 /// Trust-On-First-Use (invariant I6: any byte change re-flags the pack, so a
@@ -74,6 +74,10 @@ const FORBIDDEN_KEYS: &[&str] = &[
 // keys to the most recent header — so the format is deliberately flat.)
 #[derive(Debug, Deserialize)]
 struct RawPack {
+    // Defaulted so a missing `id` deserializes (to "") instead of failing the
+    // whole parse — `parse` still rejects an empty id (I3), and the registry
+    // linter can then report it as the specific `missing-id`, not `malformed-toml`.
+    #[serde(default)]
     id: String,
     #[serde(default)]
     name: String,
@@ -183,6 +187,240 @@ impl RulePack {
     }
 }
 
+// ── Registry-acceptance lint (stricter than runtime parse) ───────────────────
+
+/// Top-level keys a pack may carry. The runtime ignores unknown keys; the
+/// *registry* rejects them (a pack with surprise keys is a pack we don't
+/// understand — and the place to catch a future loosening field).
+const ALLOWED_KEYS: &[&str] = &[
+    "id",
+    "name",
+    "version",
+    "deny_paths",
+    "deny_commands",
+    "secret_patterns",
+];
+
+/// Deny-path values too broad to accept — they'd block routine safe reads
+/// (e.g. `/.env` also trips `.env.example`) and erode trust in the corpus.
+const OVERBROAD_PATHS: &[&str] = &["", "/", "~", "~/", ".", "/.", "/.env", "/.git", "~/."];
+
+/// Bare common commands that would over-block normal development if denied.
+const OVERBROAD_COMMANDS: &[&str] = &[
+    "",
+    "rm",
+    "delete",
+    "git",
+    "kubectl",
+    "helm",
+    "npm",
+    "yarn",
+    "go",
+    "cat",
+    "ls",
+    "curl",
+    "wget",
+    "sudo",
+    "docker",
+    "terraform",
+    "python",
+    "python3",
+    "node",
+    "pip",
+];
+
+/// Regexes that match (nearly) everything — a secret pattern this broad would
+/// flood false positives.
+const OVERBROAD_REGEXES: &[&str] = &[
+    "", ".", ".*", ".+", ".*?", r"\S+", r"\S*", r"\w+", r"\w*", "(?s).*", r"[\s\S]*",
+];
+
+/// Severity of a [`LintFinding`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LintSeverity {
+    Error,
+    Warning,
+}
+
+impl LintSeverity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LintSeverity::Error => "error",
+            LintSeverity::Warning => "warning",
+        }
+    }
+}
+
+/// One finding from [`lint`]. `code` is a stable machine token (e.g.
+/// `forbidden-key`, `overbroad-path`) for CI/JSON consumers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LintFinding {
+    pub severity: LintSeverity,
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl LintFinding {
+    fn error(code: &'static str, message: impl Into<String>) -> Self {
+        LintFinding {
+            severity: LintSeverity::Error,
+            code,
+            message: message.into(),
+        }
+    }
+    fn warn(code: &'static str, message: impl Into<String>) -> Self {
+        LintFinding {
+            severity: LintSeverity::Warning,
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+/// `true` when there are no error-severity findings (warnings are acceptable).
+pub fn lint_is_clean(findings: &[LintFinding]) -> bool {
+    !findings.iter().any(|f| f.severity == LintSeverity::Error)
+}
+
+/// Registry-acceptance lint for a pack's TOML. **Stricter than
+/// [`RulePack::parse`]:** forbidden/unknown keys, uncompilable regexes, and
+/// over-broad rules are *errors* (the runtime only warns or silently skips),
+/// plus a false-positive quality gate. Returns every finding; [`lint_is_clean`]
+/// decides acceptance. Pure + offline, so the CI validator and unit tests call
+/// it directly — and it is *the product's own parser*, which is what makes
+/// "valid in the registry" ≡ "the binary accepts it".
+pub fn lint(content: &str) -> Vec<LintFinding> {
+    let mut out = Vec::new();
+
+    if content.len() > MAX_PACK_BYTES {
+        out.push(LintFinding::error(
+            "too-large",
+            format!("pack is {} bytes (cap {MAX_PACK_BYTES})", content.len()),
+        ));
+        return out;
+    }
+
+    // Key inventory needs the raw table — RawPack silently ignores unknowns.
+    let value: toml::Value = match content.parse() {
+        Ok(v) => v,
+        Err(e) => {
+            out.push(LintFinding::error("malformed-toml", format!("{e}")));
+            return out;
+        }
+    };
+    let Some(table) = value.as_table() else {
+        out.push(LintFinding::error(
+            "not-a-table",
+            "pack must be a TOML table",
+        ));
+        return out;
+    };
+    for key in table.keys() {
+        if FORBIDDEN_KEYS.contains(&key.as_str()) {
+            out.push(LintFinding::error(
+                "forbidden-key",
+                format!("key `{key}` would loosen security — packs are deny-only (I2)"),
+            ));
+        } else if !ALLOWED_KEYS.contains(&key.as_str()) {
+            out.push(LintFinding::error(
+                "unknown-key",
+                format!("key `{key}` is not an allowed pack field"),
+            ));
+        }
+    }
+
+    // Typed content — a type error (e.g. `deny_paths` not an array) is a hard fail.
+    let raw: RawPack = match toml::from_str(content) {
+        Ok(r) => r,
+        Err(e) => {
+            out.push(LintFinding::error("malformed-toml", format!("{e}")));
+            return out;
+        }
+    };
+
+    if raw.id.trim().is_empty() {
+        out.push(LintFinding::error(
+            "missing-id",
+            "pack must declare a non-empty `id`",
+        ));
+    }
+    if raw.name.trim().is_empty() {
+        out.push(LintFinding::warn("missing-name", "pack has no `name`"));
+    }
+    if raw.version.trim().is_empty() {
+        out.push(LintFinding::warn(
+            "missing-version",
+            "pack has no `version`",
+        ));
+    } else if !is_semverish(&raw.version) {
+        out.push(LintFinding::warn(
+            "version-format",
+            format!("`version` \"{}\" is not semver (x.y.z)", raw.version),
+        ));
+    }
+
+    let total = raw.deny_paths.len() + raw.deny_commands.len() + raw.secret_patterns.len();
+    if total == 0 {
+        out.push(LintFinding::error("empty-pack", "pack carries no rules"));
+    }
+    if total > MAX_RULES_PER_PACK {
+        out.push(LintFinding::error(
+            "too-many-rules",
+            format!("{total} rules exceeds cap {MAX_RULES_PER_PACK}"),
+        ));
+    }
+
+    for p in &raw.deny_paths {
+        if OVERBROAD_PATHS.contains(&p.trim()) {
+            out.push(LintFinding::error(
+                "overbroad-path",
+                format!("deny_path `{p}` is too broad — it would block safe reads"),
+            ));
+        }
+    }
+    for c in &raw.deny_commands {
+        if OVERBROAD_COMMANDS.contains(&c.trim()) {
+            out.push(LintFinding::error(
+                "overbroad-command",
+                format!("deny_command `{c}` is a bare common command — too broad"),
+            ));
+        }
+    }
+    for s in &raw.secret_patterns {
+        if s.name.trim().is_empty() {
+            out.push(LintFinding::error(
+                "unnamed-pattern",
+                "a secret_pattern has no `name`",
+            ));
+        }
+        if OVERBROAD_REGEXES.contains(&s.regex.trim()) {
+            out.push(LintFinding::error(
+                "overbroad-regex",
+                format!("secret_pattern `{}` matches (nearly) everything", s.name),
+            ));
+        } else if SecretPattern::compile(&s.name, &s.regex).is_none() {
+            out.push(LintFinding::error(
+                "bad-regex",
+                format!(
+                    "secret_pattern `{}` does not compile or exceeds size caps",
+                    s.name
+                ),
+            ));
+        }
+    }
+
+    out
+}
+
+/// Loose semver gate: three dot-separated numeric components (`1.0.0`).
+fn is_semverish(v: &str) -> bool {
+    let parts: Vec<&str> = v.trim().split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// Official rule packs compiled into the binary — inherently trusted, part of
 /// the signed release (invariant I4: trust comes from being bundled here, never
 /// from a pack's self-declared metadata). `id` → bundled TOML. These are vetted
@@ -196,6 +434,10 @@ pub const OFFICIAL_PACKS: &[(&str, &str)] = &[
         include_str!("official/infrastructure.toml"),
     ),
     ("data-science", include_str!("official/data-science.toml")),
+    ("node", include_str!("official/node.toml")),
+    ("python", include_str!("official/python.toml")),
+    ("go", include_str!("official/go.toml")),
+    ("kubernetes", include_str!("official/kubernetes.toml")),
 ];
 
 /// Ids of all bundled official packs.

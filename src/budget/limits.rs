@@ -5,12 +5,41 @@
 
 /// Daily / monthly USD limits and the warning threshold. A limit of `0.0`
 /// means unlimited — matches the TOML config convention in SPEC.md.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BudgetConfig {
     pub daily_usd: f64,
     pub monthly_usd: f64,
     /// Print ⚠️ once spend reaches this percent of the daily limit (0–100).
     pub warn_percent: u8,
+    /// Hard cap on spend for a single session/swarm (USD), keyed on an opt-in
+    /// `x-burnwall-session` request header. `0.0` = unlimited (off). Lets agents
+    /// in a fan-out that share a session id share one blast-radius ceiling.
+    pub per_session_usd: f64,
+    /// Rolling 1-hour USD ceiling — the emergency brake (feature #2). `0.0` =
+    /// off (the default), so the speedometer surfaces a burn rate but nothing
+    /// blocks. When set, the rolling spend over the last hour is enforced on
+    /// the same plan-aware gate as the daily/monthly caps: metered API traffic
+    /// is blocked once the hour's spend reaches the ceiling; plan traffic only
+    /// warns unless `enforce_on_plan` is set.
+    pub per_hour_usd: f64,
+    /// Enforce the dollar caps (daily/monthly/session/hourly) on subscription
+    /// traffic too. Off by default: a flat-rate plan (Claude Pro/Max via OAuth)
+    /// is not metered per token, so the calculated API-equivalent dollar figure
+    /// is notional — blocking on it walls the user off from money they are not
+    /// spending. With `false`, subscription requests are tracked and *warned*
+    /// but never blocked on the dollar cap; metered API-key traffic is always
+    /// enforced. The loop detector / cost spiral still apply to both. See B-H4.
+    pub enforce_on_plan: bool,
+    /// Cheaper-model fallback (feature #18). When a dollar cap WOULD block (a
+    /// daily/monthly/hourly cap is exceeded AND enforcement applies) and this is
+    /// non-empty, the outbound request's JSON `model` field is rewritten to this
+    /// value and forwarded — a downgrade that keeps work moving past the cap
+    /// instead of returning 429. Empty (the default) = off, so the cap blocks as
+    /// before. Modifies the request body, so it is opt-in and logged like cache
+    /// injection. CAVEAT: an aggressive downgrade can cost *more* via rework
+    /// (the cheaper model produces worse output that needs redoing) — set a
+    /// model whose quality is acceptable for the over-budget tail of your work.
+    pub fallback_model: String,
 }
 
 impl Default for BudgetConfig {
@@ -19,6 +48,10 @@ impl Default for BudgetConfig {
             daily_usd: 50.0,
             monthly_usd: 0.0, // unlimited per SPEC default
             warn_percent: 80,
+            per_session_usd: 0.0, // off by default
+            per_hour_usd: 0.0,    // off by default (brake disarmed)
+            enforce_on_plan: false,
+            fallback_model: String::new(), // off by default
         }
     }
 }
@@ -63,6 +96,57 @@ pub fn check_daily(spent_usd: f64, config: &BudgetConfig) -> BudgetStatus {
             spent: spent_usd,
             limit: config.daily_usd,
             percent: pct,
+        };
+    }
+    BudgetStatus::Ok
+}
+
+/// Pure: classify `spent_usd` (month-to-date) against the monthly limit.
+///
+/// Mirrors [`check_daily`] but against `monthly_usd` and with no warn tier —
+/// the monthly cap is a hard backstop, and the daily warn already nudges.
+/// `0.0` monthly limit = unlimited.
+pub fn check_monthly(spent_usd: f64, config: &BudgetConfig) -> BudgetStatus {
+    if config.monthly_usd <= 0.0 {
+        return BudgetStatus::Ok;
+    }
+    if spent_usd >= config.monthly_usd {
+        return BudgetStatus::Exceeded {
+            spent: spent_usd,
+            limit: config.monthly_usd,
+        };
+    }
+    BudgetStatus::Ok
+}
+
+/// Pure: classify a session's `spent_usd` against the per-session cap. Returns
+/// `Exceeded` once spend reaches the cap; no warn tier (a swarm ceiling is a
+/// hard stop). `0.0` cap = unlimited.
+pub fn check_session(spent_usd: f64, config: &BudgetConfig) -> BudgetStatus {
+    if config.per_session_usd <= 0.0 {
+        return BudgetStatus::Ok;
+    }
+    if spent_usd >= config.per_session_usd {
+        return BudgetStatus::Exceeded {
+            spent: spent_usd,
+            limit: config.per_session_usd,
+        };
+    }
+    BudgetStatus::Ok
+}
+
+/// Pure: classify rolling-hour `spent_usd` against the hourly brake
+/// (`per_hour_usd`). Mirrors [`check_monthly`] — a hard stop, no warn tier (the
+/// speedometer already nudges via a separate burn-rate warning). `0.0` ceiling
+/// = the brake is disarmed (the default), which is the speedometer-only mode.
+pub fn check_hourly(spent_usd: f64, config: &BudgetConfig) -> BudgetStatus {
+    if config.per_hour_usd <= 0.0 {
+        return BudgetStatus::Ok;
+    }
+    if spent_usd >= config.per_hour_usd {
+        return BudgetStatus::Exceeded {
+            spent: spent_usd,
+            limit: config.per_hour_usd,
         };
     }
     BudgetStatus::Ok

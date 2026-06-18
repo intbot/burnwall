@@ -13,6 +13,7 @@ pub mod firewall;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::BodyExt as _;
@@ -56,6 +57,22 @@ pub struct WatchState {
     pub auto_approve: Vec<String>,
     /// Auto-deny globs (v0.9.1): a match is always blocked, before approval.
     pub auto_deny: Vec<String>,
+    /// Per-project MCP server allowlist from a discovered `.burnwall.yaml`
+    /// (`mcp_allowed_servers`). Empty = no per-project restriction (the
+    /// default, so a user who never sets it is unaffected). When non-empty,
+    /// deny-by-omission: a `tools/call` routed to a server *not* on the list
+    /// is blocked (403). Checked *after* `auto_deny` — auto_deny still wins.
+    pub allowed_servers: Vec<String>,
+    /// Last description seen per advertised tool, keyed by `<server>/<tool>`.
+    /// Per-watcher (not a process-global): two watcher instances must never
+    /// see each other's sightings — a global keyed by upstream URL could
+    /// collide when an ephemeral port is reused by a different server (and did,
+    /// as cross-test leakage). In-memory on purpose: the *persisted* state is
+    /// the schema fingerprint in `mcp_tools`, which drives enforce-mode
+    /// re-pending; this map only powers the advisory description-drift warning
+    /// (M-C2), so losing it on restart costs one missed warning, never an
+    /// enforcement change.
+    pub seen_descriptions: Arc<dashmap::DashMap<String, String>>,
 }
 
 impl WatchState {
@@ -77,6 +94,8 @@ impl WatchState {
             security,
             auto_approve: Vec::new(),
             auto_deny: Vec::new(),
+            allowed_servers: Vec::new(),
+            seen_descriptions: Arc::new(dashmap::DashMap::new()),
         }
     }
 
@@ -316,6 +335,15 @@ async fn handle(
         route.forward_path,
         query
     );
+    // M-H2: never persist or log the query string — an upstream URI like
+    // `...?api_key=...` must not reach the database (mcp_events.upstream_uri
+    // is exported by `burnwall mcp export`). The full URI is still used for
+    // the forward itself; only the recorded copy is stripped.
+    let logged_uri = upstream_uri
+        .split('?')
+        .next()
+        .unwrap_or(&upstream_uri)
+        .to_string();
 
     let (parts, body) = req.into_parts();
     let body_bytes = match body.collect().await {
@@ -338,13 +366,14 @@ async fn handle(
     let is_tools_list =
         method == Method::POST && parse_rpc_method(&body_bytes).as_deref() == Some("tools/list");
 
-    // Security scan: the same engine the LLM proxy uses, applied to the
-    // raw JSON-RPC body. Walks every string leaf — that means `tools/call`
-    // arguments get the path / command / mount / secret denylist for free.
-    // A violation returns 403 and never forwards (mirrors the LLM proxy's
-    // 403 path); the `security_events` row gets `provider="mcp"` and the
-    // tool name when we have one, so `burnwall security` shows the source.
-    if let Some(violation) = state.security.scan(&body_bytes) {
+    // Security scan: the same engine the LLM proxy uses, but with MCP-aware
+    // scoping (M-C1). Command-shaped checks apply only to a `tools/call`'s
+    // `params.arguments`; the rest of the JSON-RPC envelope (and other methods)
+    // is treated as prose, so a memory note or issue title that merely mentions
+    // `rm -rf` / `~/.ssh` is not blocked. Data checks (secrets, DLP) still run
+    // everywhere. A violation returns 403 and never forwards; the
+    // `security_events` row gets `provider="mcp"` and the tool name.
+    if let Some(violation) = state.security.scan_mcp(&body_bytes) {
         warn!("🛡️ MCP BLOCKED: {}", violation.message());
         let redact = state.security.rules().log_redact_details;
         let stored_details = if redact {
@@ -376,7 +405,58 @@ async fn handle(
             if let Err(e) = state.storage.insert_security_event(&event) {
                 error!("mcp security_event insert failed: {}", e);
             }
-            return Ok(error_response(StatusCode::FORBIDDEN, "auto_denied"));
+            // M-C2: a JSON-RPC error (not a bare body) so MCP clients render
+            // the reason instead of a generic transport failure.
+            return Ok(jsonrpc_error_response(
+                StatusCode::FORBIDDEN,
+                "auto_denied",
+                raw_rpc_id(&body_bytes),
+                format!(
+                    "Burnwall: tool '{}' on '{}' is blocked by [mcp].auto_deny policy. \
+                     Remove the matching glob from [mcp].auto_deny in config.toml to allow it.",
+                    call.name, route.server
+                ),
+            ));
+        }
+    }
+
+    // Per-project MCP allowlist (`.burnwall.yaml` → `mcp_allowed_servers`): a
+    // `tools/call` routed to a server NOT on this repo's allowlist is blocked,
+    // regardless of enforce mode. Checked AFTER `auto_deny` (which still wins)
+    // and applied only when the list is non-empty, so a user who never sets it
+    // is never blocked. It is ALSO skipped unless named multi-server routing is
+    // configured (`[[mcp.servers]]`, i.e. `state.servers` non-empty): in
+    // single-upstream mode every call routes to the synthetic `"default"`, so a
+    // list of real server names would block everything (FP-review Part 2). The
+    // gate composes with — does not replace — the approval gate.
+    if let Some(call) = tool_call.as_ref() {
+        if firewall::server_blocked(
+            &state.allowed_servers,
+            &route.server,
+            !state.servers.is_empty(),
+        ) {
+            warn!(
+                "🛡️ MCP tools/call '{}' on server '{}' blocked — not in this project's \
+                 .burnwall.yaml mcp_allowed_servers",
+                call.name, route.server
+            );
+            let event = SecurityEvent::new("mcp_server_not_allowed", &route.server)
+                .with_provider("mcp", &call.name);
+            if let Err(e) = state.storage.insert_security_event(&event) {
+                error!("mcp security_event insert failed: {}", e);
+            }
+            // M-C2 shape: a proper JSON-RPC error so MCP clients render the
+            // reason (and the fix) instead of a generic transport failure.
+            return Ok(jsonrpc_error_response(
+                StatusCode::FORBIDDEN,
+                "server_not_allowed",
+                raw_rpc_id(&body_bytes),
+                format!(
+                    "Burnwall: MCP server '{}' is not in this project's allowlist. \
+                     Add '{}' to mcp_allowed_servers in .burnwall.yaml to allow it.",
+                    route.server, route.server
+                ),
+            ));
         }
     }
 
@@ -405,16 +485,35 @@ async fn handle(
                 if let Err(e) = state.storage.insert_security_event(&event) {
                     error!("mcp security_event insert failed: {}", e);
                 }
-                return Ok(error_response(StatusCode::FORBIDDEN, "approval_required"));
+                // M-C2: a proper JSON-RPC error naming the exact remediation
+                // command, so the client surfaces it instead of a generic
+                // transport failure.
+                return Ok(jsonrpc_error_response(
+                    StatusCode::FORBIDDEN,
+                    "approval_required",
+                    raw_rpc_id(&body_bytes),
+                    format!(
+                        "Burnwall: tool '{}' on '{}' awaits approval. Run: burnwall mcp approve {}",
+                        call.name, route.server, route.server
+                    ),
+                ));
             }
         }
     }
 
+    // Strip hop-by-hop headers AND `accept-encoding` (M-C4). The watcher
+    // inspects `tools/list` bodies for poisoning/rug-pull, and its HTTP client
+    // is built without decompression — so a forwarded `accept-encoding` lets
+    // the upstream gzip the body, blinding the firewall (and, in enforce mode,
+    // bricking it: nothing registers, so every call 403s with nothing to
+    // approve). Dropping it makes the upstream reply in identity encoding; the
+    // response still passes through byte-for-byte. Mirrors the LLM proxy fix.
     let mut outbound_headers = HeaderMap::new();
     for (name, value) in parts.headers.iter() {
-        if !is_hop_by_hop(name.as_str()) {
-            outbound_headers.append(name.clone(), value.clone());
+        if is_hop_by_hop(name.as_str()) || name.as_str().eq_ignore_ascii_case("accept-encoding") {
+            continue;
         }
+        outbound_headers.append(name.clone(), value.clone());
     }
 
     let mut builder = state
@@ -428,12 +527,12 @@ async fn handle(
     let upstream_resp = match builder.send().await {
         Ok(r) => r,
         Err(e) => {
-            warn!("mcp-watch upstream error for {}: {}", upstream_uri, e);
+            warn!("mcp-watch upstream error for {}: {}", logged_uri, e);
             // We still record the tool_call attempt with status 0 so
             // operators can spot upstream connectivity issues in the log.
             if let Some(call) = tool_call {
-                let event = McpEvent::new(&call.name, call.id.as_deref(), 0)
-                    .with_upstream_uri(&upstream_uri);
+                let event =
+                    McpEvent::new(&call.name, call.id.as_deref(), 0).with_upstream_uri(&logged_uri);
                 if let Err(e) = state.storage.insert_mcp_event(&event) {
                     error!("mcp_event insert failed: {}", e);
                 }
@@ -444,11 +543,11 @@ async fn handle(
 
     let status = upstream_resp.status();
     let resp_headers = upstream_resp.headers().clone();
-    debug!("mcp-watch ← {} {}", status.as_u16(), upstream_uri);
+    debug!("mcp-watch ← {} {}", status.as_u16(), logged_uri);
 
     if let Some(call) = tool_call {
         let event = McpEvent::new(&call.name, call.id.as_deref(), status.as_u16() as i64)
-            .with_upstream_uri(&upstream_uri);
+            .with_upstream_uri(&logged_uri);
         if let Err(e) = state.storage.insert_mcp_event(&event) {
             error!("mcp_event insert failed: {}", e);
         }
@@ -457,15 +556,30 @@ async fn handle(
     // For `tools/list` we buffer the (small JSON) reply, run the firewall
     // inspection, then forward the exact same bytes — read-only, the response
     // is never altered. Every other shape streams straight through unbuffered.
+    // M-C3: the buffering is bounded by a hard 20s timeout so a stalled
+    // upstream (e.g. an SSE stream that never completes) cannot freeze the
+    // client's session init forever. The bytes are partially consumed by then,
+    // so pass-through is no longer possible — answer 504 instead of hanging.
     let body = if is_tools_list {
-        match upstream_resp.bytes().await {
-            Ok(bytes) => {
+        match tokio::time::timeout(Duration::from_secs(20), upstream_resp.bytes()).await {
+            Ok(Ok(bytes)) => {
                 inspect_tools_list(&bytes, &state, &route.server);
                 streaming::full(bytes)
             }
-            Err(e) => {
-                warn!("mcp-watch upstream body error for {}: {}", upstream_uri, e);
+            Ok(Err(e)) => {
+                warn!("mcp-watch upstream body error for {}: {}", logged_uri, e);
                 return Ok(error_response(StatusCode::BAD_GATEWAY, "upstream_error"));
+            }
+            Err(_) => {
+                warn!(
+                    "mcp-watch: tools/list body from {} did not complete within 20s — \
+                     answering 504 (body was partially consumed; pass-through impossible)",
+                    logged_uri
+                );
+                return Ok(error_response(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "upstream_timeout",
+                ));
             }
         }
     } else {
@@ -516,20 +630,48 @@ fn inspect_tools_list(body: &[u8], state: &WatchState, server: &str) {
             }
         }
 
-        // 3. Rug pull — definition changed since we last fingerprinted it.
-        match state
-            .storage
-            .observe_mcp_tool(server, &tool.name, &tool.fingerprint)
+        // 3. Rug pull — the persisted fingerprint (name + inputSchema, M-C2)
+        //    changed since we last saw this tool. Only a schema change resets
+        //    an approved tool to 'pending' (via the storage layer): the schema
+        //    is what the tool can actually be asked to do.
+        let schema_changed =
+            match state
+                .storage
+                .observe_mcp_tool(server, &tool.name, &tool.schema_fingerprint)
+            {
+                Ok(McpToolObservation::Changed) => {
+                    warn!(
+                        "🛡️ MCP tool '{}' on server '{}' changed its input schema since last seen \
+                     (possible rug pull) — approval reset to pending",
+                        tool.name, server
+                    );
+                    record_mcp_security(state, "mcp_tool_changed", &tool.name, &tool.name);
+                    true
+                }
+                Ok(_) => false,
+                Err(e) => {
+                    error!("mcp_tools observe failed: {}", e);
+                    false
+                }
+            };
+
+        // 4. Description drift (M-C2): a description-only change is recorded
+        //    and warned about — descriptions are prompt-visible, so a swap is
+        //    worth an operator's eyes — but it does NOT revoke approval. A
+        //    routine version bump in prose must not re-pend every tool.
+        let desc_key = format!("{server}/{}", tool.name);
+        if let Some(prev) = state
+            .seen_descriptions
+            .insert(desc_key, tool.description.clone())
         {
-            Ok(McpToolObservation::Changed) => {
+            if prev != tool.description && !schema_changed {
                 warn!(
-                    "🛡️ MCP tool '{}' definition changed since last seen (possible rug pull)",
-                    tool.name
+                    "MCP tool '{}' on server '{}' changed its description \
+                     (schema unchanged — approval kept)",
+                    tool.name, server
                 );
                 record_mcp_security(state, "mcp_tool_changed", &tool.name, &tool.name);
             }
-            Ok(_) => {}
-            Err(e) => error!("mcp_tools observe failed: {}", e),
         }
     }
 }
@@ -555,6 +697,44 @@ fn error_response(status: StatusCode, kind: &str) -> Response<ProxyBody> {
         .header("content-type", "application/json")
         .body(streaming::full(Bytes::from(body)))
         .expect("error_response: response builder failed")
+}
+
+/// The raw JSON-RPC `id` of a request body (string, number, or null),
+/// preserved as-is so an error response can echo it. `Null` when the body is
+/// not parseable JSON or carries no id (a notification).
+fn raw_rpc_id(body: &[u8]) -> Value {
+    let body = body.strip_prefix(b"\xef\xbb\xbf").unwrap_or(body);
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|v| v.get("id").cloned())
+        .unwrap_or(Value::Null)
+}
+
+/// A blocked `tools/call` answered as a *proper JSON-RPC error* (M-C2), so MCP
+/// clients show the message — which names the exact remediation command —
+/// instead of a generic transport failure. The legacy `"type"` discriminator is
+/// kept inside the error object for existing consumers of the 403 body.
+fn jsonrpc_error_response(
+    status: StatusCode,
+    kind: &str,
+    id: Value,
+    message: String,
+) -> Response<ProxyBody> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": -32000,
+            "message": message,
+            "type": kind,
+        },
+    });
+    let bytes = serde_json::to_vec(&body).unwrap_or_default();
+    Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(streaming::full(Bytes::from(bytes)))
+        .expect("jsonrpc_error_response: response builder failed")
 }
 
 #[cfg(test)]

@@ -129,15 +129,34 @@ pub async fn run_cmd(args: McpWatchArgs) -> anyhow::Result<()> {
         );
     }
 
+    // M-C3: bounded timeouts so a hung upstream can never freeze the watcher
+    // (a fully-buffered `tools/list` against an un-timed client froze session
+    // init). No total-request timeout: tool calls can legitimately stream for
+    // a long time; `read_timeout` only fires when the connection goes silent.
+    let http_client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .read_timeout(std::time::Duration::from_secs(60))
+        .build()
+        .context("building upstream HTTP client")?;
+
+    // Per-project MCP server allowlist (`.burnwall.yaml` → mcp_allowed_servers).
+    // Empty when no profile / field is set, which means "no restriction".
+    let allowed_servers = project_profile
+        .as_ref()
+        .map(|(_, p)| p.mcp_allowed_servers.clone())
+        .unwrap_or_default();
+
     let state = WatchState {
         upstream: args.upstream.clone().unwrap_or_default(),
         servers,
         require_approval,
-        http_client: reqwest::Client::new(),
+        http_client,
         storage,
         security,
         auto_approve: user_config.mcp.auto_approve.clone(),
         auto_deny: user_config.mcp.auto_deny.clone(),
+        allowed_servers,
+        seen_descriptions: Arc::new(dashmap::DashMap::new()),
     };
 
     let listener = tokio::net::TcpListener::bind(addr)
