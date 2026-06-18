@@ -152,8 +152,12 @@ fn write_table(w: &mut impl Write, r: &AccuracyReport) -> std::io::Result<()> {
     let cards = [
         Card::new("On-wire", &format!("${:.2}", r.total_real), "cache-aware")
             .with_value_color(Color::Green),
-        Card::new("Naive tally", &format!("${:.2}", r.total_naive), "sticker rate")
-            .with_value_color(Color::Yellow),
+        Card::new(
+            "Naive tally",
+            &format!("${:.2}", r.total_naive),
+            "sticker rate",
+        )
+        .with_value_color(Color::Yellow),
         Card::new(
             "Overstated",
             &format!("{:.0}%", pct),

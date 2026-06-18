@@ -1018,7 +1018,9 @@ const MAX_TAG_LEN: usize = 64;
 /// fail-open: a malformed pair is skipped, an absent/empty/all-invalid header
 /// yields `None` — it never errors and never blocks a request.
 pub fn tags_from_headers(headers: &hyper::HeaderMap) -> Option<String> {
-    let raw = headers.get("x-burnwall-tags").and_then(|v| v.to_str().ok())?;
+    let raw = headers
+        .get("x-burnwall-tags")
+        .and_then(|v| v.to_str().ok())?;
     let mut map = serde_json::Map::new();
     for pair in raw.split(',') {
         if map.len() >= MAX_TAGS {
@@ -1159,7 +1161,10 @@ mod tag_header_tests {
 
     #[test]
     fn tags_parse_normalises_into_json_object() {
-        let h = headers(&[("x-burnwall-tags", "feature=auth, Client=Acme , agent-run=run42")]);
+        let h = headers(&[(
+            "x-burnwall-tags",
+            "feature=auth, Client=Acme , agent-run=run42",
+        )]);
         let json = tags_from_headers(&h).expect("tags");
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["feature"], "auth");
@@ -1179,7 +1184,10 @@ mod tag_header_tests {
     #[test]
     fn tags_are_bounded() {
         // More than MAX_TAGS keys -> capped; over-long values truncated.
-        let many = (0..20).map(|i| format!("k{i}=v{i}")).collect::<Vec<_>>().join(",");
+        let many = (0..20)
+            .map(|i| format!("k{i}=v{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
         let json = tags_from_headers(&headers(&[("x-burnwall-tags", &many)])).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v.as_object().unwrap().len(), MAX_TAGS);

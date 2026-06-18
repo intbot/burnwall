@@ -103,12 +103,23 @@ pub fn run_cmd(args: SecurityArgs) -> anyhow::Result<()> {
         }
     });
     let cards = [
-        Card::new("Blocked", &blocked.to_string(), "stopped")
-            .with_value_color(if blocked > 0 { Color::Red } else { Color::Green }),
-        Card::new("Alerts", &alerts.to_string(), "advisory")
-            .with_value_color(if alerts > 0 { Color::Yellow } else { Color::Green }),
-        Card::new("Canaries", &canaries_armed.to_string(), "armed")
-            .with_value_color(if canaries_armed > 0 { Color::Green } else { Color::Blue }),
+        Card::new("Blocked", &blocked.to_string(), "stopped").with_value_color(if blocked > 0 {
+            Color::Red
+        } else {
+            Color::Green
+        }),
+        Card::new("Alerts", &alerts.to_string(), "advisory").with_value_color(if alerts > 0 {
+            Color::Yellow
+        } else {
+            Color::Green
+        }),
+        Card::new("Canaries", &canaries_armed.to_string(), "armed").with_value_color(
+            if canaries_armed > 0 {
+                Color::Green
+            } else {
+                Color::Blue
+            },
+        ),
     ];
     writeln!(out, "{}", render_cards(&cards, 11, 2, &sty))?;
     writeln!(out)?;

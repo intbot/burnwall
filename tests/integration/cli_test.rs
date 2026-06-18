@@ -58,7 +58,9 @@ fn status_table_shows_seeded_data() {
         .stdout(predicate::str::contains("Today ("))
         .stdout(predicate::str::contains("anthropic/claude-sonnet-4-6"))
         .stdout(predicate::str::contains("$0.01"))
-        .stdout(predicate::str::contains("Security: 1 request blocked · 1 alert"));
+        .stdout(predicate::str::contains(
+            "Security: 1 request blocked · 1 alert",
+        ));
 }
 
 #[test]

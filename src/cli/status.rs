@@ -227,12 +227,20 @@ fn maybe_emit_nudge(
     today: &str,
 ) -> std::io::Result<()> {
     // Already nudged today → stay quiet.
-    if storage.meta_get("nudge_last_date").ok().flatten().as_deref() == Some(today) {
+    if storage
+        .meta_get("nudge_last_date")
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some(today)
+    {
         return Ok(());
     }
 
     const WINDOW_DAYS: i64 = 7;
-    let win = storage.breakdown_since_days(WINDOW_DAYS).unwrap_or_default();
+    let win = storage
+        .breakdown_since_days(WINDOW_DAYS)
+        .unwrap_or_default();
     let prompt_tokens: u64 = win
         .iter()
         .map(|b| b.input_tokens + b.cache_creation_tokens + b.cache_read_tokens)
@@ -491,10 +499,18 @@ fn write_table(
         Card::new("Budget", "no cap", &format!("${:.2}", today_cost))
     });
     cards.push(
-        Card::new("Cache", &format!("{:.0}%", cache_hit), &fill_bar(cache_hit, 8))
-            .with_value_color(Color::Green)
-            .with_sub_color(Color::Green)
-            .with_delta(delta_chip_pct(cache_hit, prev.cache_hit_pct, Trend::HigherBetter)),
+        Card::new(
+            "Cache",
+            &format!("{:.0}%", cache_hit),
+            &fill_bar(cache_hit, 8),
+        )
+        .with_value_color(Color::Green)
+        .with_sub_color(Color::Green)
+        .with_delta(delta_chip_pct(
+            cache_hit,
+            prev.cache_hit_pct,
+            Trend::HigherBetter,
+        )),
     );
     cards.push({
         let sub = if security_alerts > 0 {
@@ -525,7 +541,10 @@ fn write_table(
     // the week. Quiet when the whole week was idle.
     if spend_spark.iter().any(|&v| v > 0.0) {
         let lo = spend_spark.iter().cloned().fold(f64::INFINITY, f64::min);
-        let hi = spend_spark.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let hi = spend_spark
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
         writeln!(
             w,
             "  {} {}  ${:.2}–${:.2}",
@@ -981,7 +1000,11 @@ fn compute_prev_day(storage: &Storage, date: &str) -> PrevDay {
 /// A dense `len`-day spend series ending today (oldest → newest, one entry per
 /// local day, zero-filled for idle days). Powers the status sparkline and the
 /// panel's SVG chart. Best-effort: an error yields an all-zero series.
-fn spend_series(storage: &Storage, now_local: chrono::DateTime<chrono::Local>, len: i64) -> Vec<f64> {
+fn spend_series(
+    storage: &Storage,
+    now_local: chrono::DateTime<chrono::Local>,
+    len: i64,
+) -> Vec<f64> {
     let by_date: std::collections::HashMap<String, f64> = storage
         .daily_totals(len)
         .unwrap_or_default()

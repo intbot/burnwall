@@ -108,9 +108,15 @@ pub async fn run_cmd(args: DoctorArgs) -> anyhow::Result<()> {
     std::fs::write(&path, &report).with_context(|| format!("writing {}", path.display()))?;
 
     let issues = format!("{}/issues/new", env!("CARGO_PKG_REPOSITORY"));
-    writeln!(out, "🩺  Wrote a redacted diagnostic bundle (metadata only, nothing sent):")?;
+    writeln!(
+        out,
+        "🩺  Wrote a redacted diagnostic bundle (metadata only, nothing sent):"
+    )?;
     writeln!(out, "      {}", path.display())?;
-    writeln!(out, "   ✓ no secrets or prompt content in this file (self-scanned)")?;
+    writeln!(
+        out,
+        "   ✓ no secrets or prompt content in this file (self-scanned)"
+    )?;
     writeln!(out)?;
     writeln!(out, "   Review it, then attach it to a bug report:")?;
     writeln!(out, "      {issues}")?;
@@ -285,21 +291,20 @@ fn gather(storage: &Storage, days: i64) -> anyhow::Result<DoctorInput> {
     let env_contents = crate::cli::init::Shell::detect()
         .and_then(crate::cli::routing::env_file_path)
         .and_then(|p| std::fs::read_to_string(p).ok());
-    let env_file_state = env_contents.as_deref().map(|c| {
-        match crate::cli::routing::classify_env_contents(c) {
-            crate::cli::routing::EnvFileState::Active => "active",
-            crate::cli::routing::EnvFileState::Paused => "paused",
-            crate::cli::routing::EnvFileState::Disabled => "disabled",
-        }
-    });
+    let env_file_state =
+        env_contents
+            .as_deref()
+            .map(|c| match crate::cli::routing::classify_env_contents(c) {
+                crate::cli::routing::EnvFileState::Active => "active",
+                crate::cli::routing::EnvFileState::Paused => "paused",
+                crate::cli::routing::EnvFileState::Disabled => "disabled",
+            });
     let probe_port = env_contents
         .as_deref()
         .and_then(crate::cli::routing::active_env_port)
         .unwrap_or(4100);
-    let proxy_listening = crate::cli::routing::proxy_port_alive(
-        probe_port,
-        std::time::Duration::from_millis(80),
-    );
+    let proxy_listening =
+        crate::cli::routing::proxy_port_alive(probe_port, std::time::Duration::from_millis(80));
 
     let cfg_path = crate::config::default_path()?;
     let cfg = crate::config::load_or_default(&cfg_path).context("loading config")?;
@@ -470,7 +475,9 @@ pub fn assess_protection(i: &DoctorInput) -> Protection {
             Some("paused") => Protection {
                 ok: false,
                 headline: "routing was paused when the proxy stopped — traffic goes direct".into(),
-                fix: Some("run `burnwall start` to bring the proxy up and re-enable routing".into()),
+                fix: Some(
+                    "run `burnwall start` to bring the proxy up and re-enable routing".into(),
+                ),
                 chosen: true,
             },
             Some("disabled") => Protection {
@@ -552,9 +559,7 @@ fn print_health(out: &mut impl Write, i: &DoctorInput) -> anyhow::Result<()> {
         ("proxied", _) => {
             Card::new("Routing", "routed", "this shell").with_value_color(Color::Green)
         }
-        ("direct", _) => {
-            Card::new("Routing", "direct", "unprotected").with_value_color(Color::Red)
-        }
+        ("direct", _) => Card::new("Routing", "direct", "unprotected").with_value_color(Color::Red),
         ("bypassed", _) => {
             Card::new("Routing", "bypass", "no scan").with_value_color(Color::Yellow)
         }
@@ -610,7 +615,11 @@ fn print_health(out: &mut impl Write, i: &DoctorInput) -> anyhow::Result<()> {
         i.alert_events,
         bs(i.alert_events)
     )?;
-    writeln!(out, "  {:<14}{} ({}/{})", "Version", i.version, i.os, i.arch)?;
+    writeln!(
+        out,
+        "  {:<14}{} ({}/{})",
+        "Version", i.version, i.os, i.arch
+    )?;
     writeln!(out)?;
     writeln!(
         out,
@@ -759,9 +768,17 @@ fn redact_config(toml_text: &str) -> String {
 fn key_is_secretish(key: &str) -> bool {
     let k = key.to_ascii_lowercase();
     // "canar" catches both `canary` and `canaries`.
-    ["key", "token", "secret", "password", "passwd", "canar", "credential"]
-        .iter()
-        .any(|needle| k.contains(needle))
+    [
+        "key",
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "canar",
+        "credential",
+    ]
+    .iter()
+    .any(|needle| k.contains(needle))
 }
 
 /// Redact one `key = value` line by key-name, then mask any secret-shaped token.
@@ -777,7 +794,11 @@ fn redact_kv_line(line: &str) -> String {
 /// Blank the literal values on an array-element line (`  "AKIA…",`).
 fn blank_value(line: &str) -> String {
     let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
-    let suffix = if line.trim_end().ends_with(',') { "," } else { "" };
+    let suffix = if line.trim_end().ends_with(',') {
+        ","
+    } else {
+        ""
+    };
     format!("{indent}\"[redacted]\"{suffix}")
 }
 
@@ -834,7 +855,10 @@ fn harden(report: String) -> String {
 fn host_of(uri: &str) -> Option<String> {
     let after = uri.split_once("://").map(|(_, r)| r).unwrap_or(uri);
     let host_port = after.split(['/', '?', '#']).next().unwrap_or(after);
-    let host = host_port.rsplit_once('@').map(|(_, h)| h).unwrap_or(host_port);
+    let host = host_port
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(host_port);
     let host = host.split(':').next().unwrap_or(host);
     if host.is_empty() {
         None
@@ -933,7 +957,10 @@ mod tests {
         // self-scan must neutralize it. Assembled by concat so this source file
         // stays clean under the pre-push secret guard, and chosen so it matches
         // the detector (not the filtered AWS doc example).
-        let leaked = format!("note: {} appeared\n", "AKIA".to_string() + "QQQQRRRRSSSSTTTT");
+        let leaked = format!(
+            "note: {} appeared\n",
+            "AKIA".to_string() + "QQQQRRRRSSSSTTTT"
+        );
         let hardened = harden(leaked);
         assert!(!hardened.contains("QQQQRRRRSSSS")); // masked middle is gone
         // And the canonical self-scan agrees it is clean.
@@ -942,8 +969,14 @@ mod tests {
 
     #[test]
     fn host_of_extracts_bare_host() {
-        assert_eq!(host_of("https://api.example.com:443/mcp?x=1").as_deref(), Some("api.example.com"));
-        assert_eq!(host_of("http://user@10.0.0.1/rpc").as_deref(), Some("10.0.0.1"));
+        assert_eq!(
+            host_of("https://api.example.com:443/mcp?x=1").as_deref(),
+            Some("api.example.com")
+        );
+        assert_eq!(
+            host_of("http://user@10.0.0.1/rpc").as_deref(),
+            Some("10.0.0.1")
+        );
         assert_eq!(host_of("").as_deref(), None);
     }
 
@@ -981,7 +1014,10 @@ mod tests {
         // Routing configured (active env) but the proxy is down: unintended,
         // not chosen → `--fix` is allowed to act. This is the user's case.
         let p = assess_protection(&direct_input(Some("active"), false));
-        assert!(!p.ok && !p.chosen, "must be unintended, not a choice: {p:?}");
+        assert!(
+            !p.ok && !p.chosen,
+            "must be unintended, not a choice: {p:?}"
+        );
         let fix = p.fix.unwrap();
         assert!(fix.contains("burnwall start"), "fix: {fix}");
     }
@@ -994,13 +1030,19 @@ mod tests {
         assert!(!p.ok && !p.chosen, "{p:?}");
         let fix = p.fix.unwrap();
         assert!(fix.contains("new shell"), "fix: {fix}");
-        assert!(!fix.contains("burnwall start"), "must not tell them to start: {fix}");
+        assert!(
+            !fix.contains("burnwall start"),
+            "must not tell them to start: {fix}"
+        );
     }
 
     #[test]
     fn disabled_routing_is_a_respected_choice() {
         let p = assess_protection(&direct_input(Some("disabled"), false));
-        assert!(!p.ok && p.chosen, "a deliberate disable must be `chosen`: {p:?}");
+        assert!(
+            !p.ok && p.chosen,
+            "a deliberate disable must be `chosen`: {p:?}"
+        );
         assert!(p.fix.unwrap().contains("enable-routing"));
     }
 
@@ -1013,9 +1055,15 @@ mod tests {
 
     #[test]
     fn pause_and_bypass_are_chosen_not_alarms() {
-        let paused = DoctorInput { paused: true, ..sample_input() };
+        let paused = DoctorInput {
+            paused: true,
+            ..sample_input()
+        };
         assert!(assess_protection(&paused).chosen);
-        let bypass = DoctorInput { routing: "bypassed", ..sample_input() };
+        let bypass = DoctorInput {
+            routing: "bypassed",
+            ..sample_input()
+        };
         assert!(assess_protection(&bypass).chosen);
     }
 

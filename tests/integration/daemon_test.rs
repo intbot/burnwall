@@ -252,7 +252,11 @@ fn soft_stop_leaves_the_proxy_draining_so_running_tools_dont_wedge() {
         .stdout(predicate::str::contains("Watchdog: guard running").not());
 
     let _cleanup = DaemonCleanup(pid_file.clone());
-    let pid: u32 = fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+    let pid: u32 = fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
 
     // Default (soft) stop: the proxy stays UP as a pass-through relay so an
     // already-running tool doesn't hit a dead port. This is the wedge fix.

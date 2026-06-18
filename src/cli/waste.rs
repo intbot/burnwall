@@ -89,8 +89,12 @@ fn write_table(
     // Headline tiles: total avoidable, its per-day rate, and how many patterns.
     let per_day = total / days.max(1) as f64;
     let cards = [
-        Card::new("Avoidable", &format!("${:.2}", total), &format!("over {days}d"))
-            .with_value_color(Color::Yellow),
+        Card::new(
+            "Avoidable",
+            &format!("${:.2}", total),
+            &format!("over {days}d"),
+        )
+        .with_value_color(Color::Yellow),
         Card::new("Per day", &format!("${:.2}", per_day), "avg"),
         Card::new("Findings", &findings.len().to_string(), "patterns"),
     ];

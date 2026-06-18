@@ -206,7 +206,11 @@ mod tests {
         s.security_blocked_window = 2;
         s.security_alerts_window = 153;
         let n = select(&s, None).expect("a finding");
-        assert!(n.message.contains("blocked 2 request(s)"), "got: {}", n.message);
+        assert!(
+            n.message.contains("blocked 2 request(s)"),
+            "got: {}",
+            n.message
+        );
         assert!(
             !n.message.contains("155"),
             "alerts must not inflate the blocked count: {}",

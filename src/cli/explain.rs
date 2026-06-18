@@ -94,7 +94,11 @@ pub fn run_cmd(args: ExplainArgs) -> anyhow::Result<()> {
     // The recorded detail, in full — terminal-only, the user's own machine
     // (same disclosure level as `burnwall security`). What was matched:
     writeln!(out, "   {}", sty.bold("What matched"))?;
-    writeln!(out, "     {}", strip_type_prefix(&event.event_type, &event.details))?;
+    writeln!(
+        out,
+        "     {}",
+        strip_type_prefix(&event.event_type, &event.details)
+    )?;
     writeln!(out)?;
 
     writeln!(out, "   {}", sty.bold("Why this is blocked"))?;
@@ -155,9 +159,15 @@ mod tests {
             "~/.ssh/id_rsa"
         );
         // No prefix: returned unchanged.
-        assert_eq!(strip_type_prefix("path_blocked", "~/.aws/credentials"), "~/.aws/credentials");
+        assert_eq!(
+            strip_type_prefix("path_blocked", "~/.aws/credentials"),
+            "~/.aws/credentials"
+        );
         // A label-only detail (secret_detected stores the pattern name).
-        assert_eq!(strip_type_prefix("secret_detected", "AWS access key ID"), "AWS access key ID");
+        assert_eq!(
+            strip_type_prefix("secret_detected", "AWS access key ID"),
+            "AWS access key ID"
+        );
     }
 
     #[test]

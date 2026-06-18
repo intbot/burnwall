@@ -263,7 +263,10 @@ mod tests {
             assert!(!is_advisory(et), "{et} blocks; must not classify advisory");
         }
         for et in advisory {
-            assert!(is_advisory(et), "{et} is alert-only; must classify advisory");
+            assert!(
+                is_advisory(et),
+                "{et} is alert-only; must classify advisory"
+            );
         }
         // Unknown / pack-authored types are enforcement by default.
         assert!(!is_advisory("pack_authored_future_rule"));

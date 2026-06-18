@@ -170,16 +170,14 @@ mod tests {
         // (1) A scoped `rm -rf` after an unrelated `$()` (a PID capture). The
         //     subshell belongs to `netstat`, not the rm; the rm target is an
         //     explicit project artifact dir.
-        let scoped_rm_after_subshell =
-            "PID=$(netstat -ano | grep ':3210' | awk '{print $NF}')\n\
+        let scoped_rm_after_subshell = "PID=$(netstat -ano | grep ':3210' | awk '{print $NF}')\n\
              rm -rf \"C:/Code/ng2-pdfjs-viewer/.playwright-mcp\"";
         assert_eq!(first_match(scoped_rm_after_subshell), None);
 
         // (2) Searching source FOR the literal: `rm` lives in a grep pattern, and
         //     a bare `/` lives in an unrelated echo on another line. Neither
         //     segment is a delete. This exact shape blocked the session fixing it.
-        let grep_for_the_pattern =
-            "echo \"=== destructive_blocked / rules ===\"\n\
+        let grep_for_the_pattern = "echo \"=== destructive_blocked / rules ===\"\n\
              grep -rn \"rm -rf|disk wipe\" src/security/ | head";
         assert_eq!(first_match(grep_for_the_pattern), None);
     }

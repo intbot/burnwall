@@ -351,7 +351,11 @@ pub fn sparkline(values: &[f64]) -> String {
     let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
     let range = max - min;
     if range <= f64::EPSILON {
-        let c = if max > 0.0 { LEVELS[LEVELS.len() / 2] } else { LEVELS[0] };
+        let c = if max > 0.0 {
+            LEVELS[LEVELS.len() / 2]
+        } else {
+            LEVELS[0]
+        };
         return std::iter::repeat_n(c, values.len()).collect();
     }
     values
@@ -441,8 +445,11 @@ mod tests {
     fn delta_row_appears_when_any_card_has_one_and_stays_aligned() {
         let sty = Styler::with_enabled(false);
         let cards = [
-            Card::new("Spend", "$4.20", "37 req")
-                .with_delta(delta_chip_pct(4.2, 3.0, Trend::HigherWorse)),
+            Card::new("Spend", "$4.20", "37 req").with_delta(delta_chip_pct(
+                4.2,
+                3.0,
+                Trend::HigherWorse,
+            )),
             // A card with no delta still reserves the row (blank), keeping height.
             Card::new("Cache", "88%", &fill_bar(88.0, 8)),
         ];

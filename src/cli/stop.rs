@@ -95,7 +95,10 @@ fn soft_stop(pid: u32) -> anyhow::Result<()> {
         "   Free the port now (cuts in-flight requests):  {}",
         sty.bold("burnwall stop --hard")
     );
-    println!("   Turn protection back on:  {}", sty.bold("burnwall start"));
+    println!(
+        "   Turn protection back on:  {}",
+        sty.bold("burnwall start")
+    );
     Ok(())
 }
 
@@ -189,7 +192,9 @@ pub(crate) fn pause_and_report() {
     println!();
     println!(
         "   {}",
-        sty.yellow("⚠  AI tools already running still point at the stopped proxy and will fail to connect.")
+        sty.yellow(
+            "⚠  AI tools already running still point at the stopped proxy and will fail to connect."
+        )
     );
     println!(
         "      Bring it back —  {}  — and they recover instantly,",
