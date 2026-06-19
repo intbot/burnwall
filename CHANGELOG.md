@@ -2,6 +2,19 @@
 
 All notable changes to Burnwall.
 
+## [0.12.0] — Unreleased
+
+### Fixed
+
+- **`burnwall status` now tells you when the Claude Code status line isn't
+  wired.** If Claude Code is in use but its Burnwall ribbon was never set up —
+  the state a fresh install or a prior `burnwall uninstall` leaves behind, since
+  neither `start` nor `upgrade` touch the editor integration — `status` now says
+  so and points at `burnwall init --apply`. The same one-line nudge appears in
+  the `burnwall start` banner and in `burnwall doctor`, and the state is exposed
+  as `claude_statusline` in `status --json` for the editor extension. Quiet for
+  users who don't run Claude Code or who set their own status line.
+
 ## [0.11.1] — 2026-06-18
 
 A resilience release for the proxy lifecycle: stopping Burnwall can no longer

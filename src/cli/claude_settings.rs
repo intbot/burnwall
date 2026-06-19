@@ -56,6 +56,75 @@ fn is_ours(statusline: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
+/// The Burnwall ↔ Claude Code status-line wiring, as seen by read-only surfaces
+/// (`burnwall status`, `doctor`, the start banner). Lets them nudge
+/// `burnwall init` when Claude Code is in use but the ribbon was never wired —
+/// the gap a fresh install or a prior `uninstall` leaves, since `start` /
+/// `upgrade` only manage the proxy and never touch `settings.json`. Stays quiet
+/// for users who don't run Claude Code or who chose their own status line.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum StatuslineState {
+    /// No `~/.claude` directory — Claude Code isn't in use here. Say nothing.
+    NoClaudeCode,
+    /// Our `burnwall statusline` is wired up. All good.
+    Wired,
+    /// Claude Code is present but no Burnwall status line is configured — what a
+    /// fresh install or a prior `uninstall` leaves behind. Nudge `init`.
+    Missing,
+    /// A *different* `statusLine` is configured. The user's choice — leave it,
+    /// and don't nudge.
+    Foreign,
+}
+
+impl StatuslineState {
+    /// Stable lowercase tag for JSON / the IDE extension.
+    pub fn tag(self) -> &'static str {
+        match self {
+            StatuslineState::NoClaudeCode => "none",
+            StatuslineState::Wired => "wired",
+            StatuslineState::Missing => "missing",
+            StatuslineState::Foreign => "foreign",
+        }
+    }
+}
+
+/// Inspect the Claude Code status-line wiring. `settings` is
+/// `~/.claude/settings.json`; its parent (`~/.claude`) existing is how we tell
+/// Claude Code is in use at all. Read-only and best-effort: an unreadable or
+/// unparseable settings file is reported as [`StatuslineState::Foreign`], so we
+/// neither nudge into nor offer to rewrite a file we can't understand.
+pub fn statusline_state(settings: &Path) -> StatuslineState {
+    let claude_present = settings.parent().map(|d| d.is_dir()).unwrap_or(false);
+    if !claude_present {
+        return StatuslineState::NoClaudeCode;
+    }
+    match std::fs::read_to_string(settings) {
+        // Claude Code is here, but settings are empty/absent → not wired yet.
+        Ok(s) if s.trim().is_empty() => StatuslineState::Missing,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => StatuslineState::Missing,
+        Ok(s) => match serde_json::from_str::<serde_json::Value>(&s) {
+            Ok(v) => match v.get("statusLine") {
+                Some(sl) if is_ours(sl) => StatuslineState::Wired,
+                Some(_) => StatuslineState::Foreign,
+                None => StatuslineState::Missing,
+            },
+            // Unparseable: stay quiet rather than nudge into a file `install`
+            // would refuse to touch.
+            Err(_) => StatuslineState::Foreign,
+        },
+        Err(_) => StatuslineState::Foreign,
+    }
+}
+
+/// [`statusline_state`] at the default `~/.claude/settings.json`. Returns
+/// [`StatuslineState::NoClaudeCode`] when the home directory can't be resolved.
+pub fn statusline_state_default() -> StatuslineState {
+    match settings_path() {
+        Some(p) => statusline_state(&p),
+        None => StatuslineState::NoClaudeCode,
+    }
+}
+
 /// Outcome of [`install`], so the caller can print an honest status line.
 #[derive(Debug, PartialEq, Eq)]
 pub enum InstallOutcome {
@@ -261,5 +330,67 @@ mod tests {
     fn remove_on_missing_file_is_false() {
         let (_d, path) = tmp();
         assert!(!remove(&path).unwrap());
+    }
+
+    // ----- statusline_state (the read-only discoverability primitive) -----
+
+    #[test]
+    fn statusline_state_no_claude_dir_is_silent() {
+        // Parent `.claude` directory absent → Claude Code isn't in use → never
+        // nudge.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude").join("settings.json");
+        assert_eq!(statusline_state(&path), StatuslineState::NoClaudeCode);
+    }
+
+    #[test]
+    fn statusline_state_missing_when_claude_present_but_unwired() {
+        // The post-`uninstall` / fresh-install gap: Claude Code dir + settings
+        // exist, but no `statusLine`.
+        let (_d, path) = tmp();
+        std::fs::write(&path, r#"{"theme":"dark"}"#).unwrap();
+        assert_eq!(statusline_state(&path), StatuslineState::Missing);
+    }
+
+    #[test]
+    fn statusline_state_missing_when_settings_file_absent() {
+        // `~/.claude` exists (tempdir is the parent) but settings.json doesn't:
+        // Claude Code present, nothing wired → Missing, not NoClaudeCode.
+        let (_d, path) = tmp();
+        assert_eq!(statusline_state(&path), StatuslineState::Missing);
+    }
+
+    #[test]
+    fn statusline_state_wired_after_install() {
+        let (_d, path) = tmp();
+        install(&path).unwrap();
+        assert_eq!(statusline_state(&path), StatuslineState::Wired);
+    }
+
+    #[test]
+    fn statusline_state_foreign_is_left_alone() {
+        let (_d, path) = tmp();
+        std::fs::write(
+            &path,
+            r#"{"statusLine":{"type":"command","command":"my-custom-bar.sh"}}"#,
+        )
+        .unwrap();
+        assert_eq!(statusline_state(&path), StatuslineState::Foreign);
+    }
+
+    #[test]
+    fn statusline_state_malformed_json_stays_quiet() {
+        // We won't nudge into (or offer to rewrite) a file we can't parse.
+        let (_d, path) = tmp();
+        std::fs::write(&path, "{not json").unwrap();
+        assert_eq!(statusline_state(&path), StatuslineState::Foreign);
+    }
+
+    #[test]
+    fn statusline_state_tags_are_stable() {
+        assert_eq!(StatuslineState::NoClaudeCode.tag(), "none");
+        assert_eq!(StatuslineState::Wired.tag(), "wired");
+        assert_eq!(StatuslineState::Missing.tag(), "missing");
+        assert_eq!(StatuslineState::Foreign.tag(), "foreign");
     }
 }
