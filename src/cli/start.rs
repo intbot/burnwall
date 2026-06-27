@@ -451,6 +451,21 @@ pub(crate) fn resume_and_report(proxy_url: &str) {
             left.join(", ")
         );
     }
+    print_statusline_hint();
+}
+
+/// One-line start-banner nudge when Claude Code is installed but its Burnwall
+/// status line isn't wired (a fresh install, or a prior `uninstall` that
+/// stripped it — neither `start` nor `upgrade` re-adds it). Mirrors the
+/// `burnwall status` readout so the same fix surfaces at both first-run
+/// touchpoints. Quiet for non-Claude-Code users and a user's own status line.
+fn print_statusline_hint() {
+    use crate::cli::claude_settings::{StatuslineState, statusline_state_default};
+    if statusline_state_default() == StatuslineState::Missing {
+        println!(
+            "   Status line: Claude Code detected, but its Burnwall ribbon isn't wired — `burnwall init --apply` to show cost + protection in the editor."
+        );
+    }
 }
 
 /// Resolve `logging.file` (with `~/` expansion) to a concrete path. Empty

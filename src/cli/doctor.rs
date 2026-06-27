@@ -233,6 +233,10 @@ pub struct DoctorInput {
     pub security_enabled: bool,
     pub canaries_armed: usize,
     pub pricing_age_days: Option<i64>,
+    /// Claude Code status-line wiring: `wired`, `missing` (Claude Code present
+    /// but the ribbon isn't set up — `burnwall init` fixes it), `foreign` (a
+    /// custom status line we leave alone), or `none` (Claude Code not in use).
+    pub claude_statusline: &'static str,
     pub total_cost: f64,
     pub total_requests: i64,
     /// Enforcement blocks in the window (requests actually stopped) — kept
@@ -381,6 +385,7 @@ fn gather(storage: &Storage, days: i64) -> anyhow::Result<DoctorInput> {
         security_enabled: cfg.security.enabled,
         canaries_armed,
         pricing_age_days: crate::pricing::pricing_age_days(chrono::Local::now().date_naive()),
+        claude_statusline: crate::cli::claude_settings::statusline_state_default().tag(),
         total_cost,
         total_requests,
         blocked_events,
@@ -602,6 +607,18 @@ fn print_health(out: &mut impl Write, i: &DoctorInput) -> anyhow::Result<()> {
         writeln!(out)?;
     }
 
+    // Editor integration: Claude Code is in use but the Burnwall ribbon isn't
+    // wired (a fresh install / a prior `uninstall` left it off). Informational,
+    // not an alarm — protection is unaffected; the user just loses the glance.
+    if i.claude_statusline == "missing" {
+        writeln!(
+            out,
+            "  {} Claude Code status line not wired — `burnwall init --apply` shows cost + protection in the editor.",
+            sty.orange("ℹ")
+        )?;
+        writeln!(out)?;
+    }
+
     let bs = |n: i64| if n == 1 { "" } else { "s" };
     let window = format!("Last {} day{}", i.days, bs(i.days));
     writeln!(
@@ -674,6 +691,10 @@ pub fn build_report(i: &DoctorInput) -> String {
     }
     s.push_str(&format!("- security enabled: {}\n", i.security_enabled));
     s.push_str(&format!("- canary tripwires armed: {}\n", i.canaries_armed));
+    s.push_str(&format!(
+        "- claude code status line: {}\n",
+        i.claude_statusline
+    ));
     if let Some(age) = i.pricing_age_days {
         s.push_str(&format!("- pricing data age (days): {age}\n"));
     }
@@ -888,6 +909,7 @@ mod tests {
             security_enabled: true,
             canaries_armed: 1,
             pricing_age_days: Some(3),
+            claude_statusline: "wired",
             total_cost: 1.23,
             total_requests: 10,
             blocked_events: 1,
@@ -1074,5 +1096,45 @@ mod tests {
         let r = build_report(&direct_input(Some("active"), false));
         assert!(r.contains("UNPROTECTED"), "{r}");
         assert!(r.contains("routing configured (env file): active"), "{r}");
+    }
+
+    #[test]
+    fn health_nudges_when_claude_statusline_missing() {
+        let i = DoctorInput {
+            claude_statusline: "missing",
+            ..sample_input()
+        };
+        let mut buf = Vec::new();
+        print_health(&mut buf, &i).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("status line not wired"), "{out}");
+        assert!(out.contains("burnwall init --apply"), "{out}");
+    }
+
+    #[test]
+    fn health_quiet_when_statusline_wired_or_foreign() {
+        for state in ["wired", "foreign", "none"] {
+            let i = DoctorInput {
+                claude_statusline: state,
+                ..sample_input()
+            };
+            let mut buf = Vec::new();
+            print_health(&mut buf, &i).unwrap();
+            let out = String::from_utf8(buf).unwrap();
+            assert!(
+                !out.contains("status line not wired"),
+                "state {state} must not nudge: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn export_records_claude_statusline_state() {
+        let i = DoctorInput {
+            claude_statusline: "missing",
+            ..sample_input()
+        };
+        let r = build_report(&i);
+        assert!(r.contains("claude code status line: missing"), "{r}");
     }
 }

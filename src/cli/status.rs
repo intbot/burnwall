@@ -208,6 +208,12 @@ pub fn run_cmd(args: StatusArgs) -> anyhow::Result<()> {
 
         write_coverage(&mut out, &coverage, &sty)?;
 
+        // Editor integration: nudge when Claude Code is in use but its Burnwall
+        // status line was never wired (a fresh install, or a prior `uninstall`
+        // that stripped it — `start`/`upgrade` never re-add it). Silent for
+        // non-Claude-Code users and for a user's own custom status line.
+        write_statusline_hint(&mut out, &sty)?;
+
         // Contextual usage nudge (v0.11): at most one data-driven line, gated
         // to once/day. Drawn from the user's own data; quiet when there's no
         // real finding. Never on the glanceable status line.
@@ -427,6 +433,29 @@ fn write_routing(w: &mut impl Write, sty: &Styler) -> std::io::Result<()> {
             sty.yellow("⚠  Bypass active —")
         ),
     }
+}
+
+/// Nudge when Claude Code is installed but its Burnwall status line isn't wired.
+/// The ribbon is set up by `burnwall init`, never by `start`/`upgrade`, so a
+/// fresh install or a prior `uninstall` leaves it off with nothing to say so —
+/// this is that missing signal. Quiet for non-Claude-Code users (`NoClaudeCode`)
+/// and for a user's own custom status line (`Foreign`).
+fn write_statusline_hint(w: &mut impl Write, sty: &Styler) -> std::io::Result<()> {
+    use crate::cli::claude_settings::{StatuslineState, statusline_state_default};
+    if statusline_state_default() == StatuslineState::Missing {
+        writeln!(w)?;
+        writeln!(
+            w,
+            "   {} Claude Code is set up here, but its Burnwall status line isn't wired.",
+            sty.orange("ℹ  No status line —")
+        )?;
+        writeln!(
+            w,
+            "      Show live cost + protection in the editor:  {}",
+            sty.bold("burnwall init --apply")
+        )?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -842,6 +871,11 @@ fn write_json(
     // retiring when idle — surfaces should show it as stopped, not green.
     let protection_draining = matches!(bypass_now, crate::bypass::Bypass::Draining);
 
+    // Claude Code editor-integration state for the IDE extension / scripts:
+    // `wired`, `missing` (Claude Code present but the ribbon isn't set up —
+    // run `burnwall init`), `foreign` (a custom status line), or `none`.
+    let claude_statusline = crate::cli::claude_settings::statusline_state_default().tag();
+
     // De-duplicated cross-tool total (X4): excludes log rows of tools whose
     // provider flowed through the proxy today, so proxied Claude Code isn't
     // counted twice in the headline figure.
@@ -859,6 +893,7 @@ fn write_json(
         "protection_paused": protection_paused,
         "pause_resumes_in_secs": pause_resumes_in_secs,
         "protection_draining": protection_draining,
+        "claude_statusline": claude_statusline,
         "total_cost_usd": today_cost,
         "total_requests": total_requests,
         "blocked_requests": blocked,
