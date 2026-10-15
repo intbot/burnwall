@@ -1,0 +1,71 @@
+{
+  "name": "cursor-usage",
+  "displayName": "Cursor Usage",
+  "description": "Your Cursor spend, pace and biggest costs, inside the editor.",
+  "version": "0.1.0",
+  "publisher": "intbot",
+  "license": "FSL-1.1-MIT",
+  "repository": { "type": "git", "url": "https://github.com/intbot/burnwall", "directory": "team/cursor/extension" },
+  "engines": { "vscode": "^1.105.0" },
+  "categories": ["Other"],
+  "main": "./out/extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "commands": [
+      { "command": "cursorUsage.showBreakdown", "title": "Show Usage Breakdown", "category": "Cursor Usage" },
+      { "command": "cursorUsage.refresh", "title": "Refresh", "category": "Cursor Usage", "icon": "$(refresh)" },
+      { "command": "cursorUsage.signIn", "title": "Sign In", "category": "Cursor Usage" },
+      { "command": "cursorUsage.signOut", "title": "Sign Out", "category": "Cursor Usage" },
+      { "command": "cursorUsage.openSidebar", "title": "Open Sidebar", "category": "Cursor Usage" },
+      { "command": "cursorUsage.postNotice", "title": "Post Notice (admins)", "category": "Cursor Usage" },
+      { "command": "cursorUsage.removeNotice", "title": "Remove Notice (admins)", "category": "Cursor Usage" }
+    ],
+    "viewsContainers": {
+      "activitybar": [{ "id": "cursorUsage", "title": "Cursor Usage", "icon": "media/gauge.svg" }]
+    },
+    "views": {
+      "cursorUsage": [{ "type": "webview", "id": "cursorUsage.sidebar", "name": "Usage" }]
+    },
+    "menus": {
+      "view/title": [{ "command": "cursorUsage.refresh", "when": "view == cursorUsage.sidebar", "group": "navigation" }]
+    },
+    "configuration": {
+      "title": "Cursor Usage",
+      "properties": {
+        "cursorUsage.apiBaseUrl": { "type": "string", "default": "http://127.0.0.1:8787", "description": "Base URL of the Cursor Usage API." },
+        "cursorUsage.refreshMinutes": { "type": "number", "default": 10, "minimum": 2, "description": "How often to refresh, in minutes." },
+        "cursorUsage.notifications": { "type": "boolean", "default": true, "description": "Show alerts when your pace or spend crosses a threshold." },
+        "cursorUsage.auth.provider": {
+          "type": "string", "enum": ["auto", "none", "microsoft", "oidc"], "default": "auto",
+          "enumDescriptions": [
+            "microsoft when the entra settings are filled in, oidc when the oidc settings are, otherwise none",
+            "No sign-in: the API runs in dev mode",
+            "The Microsoft sign-in built into the editor (Entra ID)",
+            "Any OpenID Connect provider, signing in with a code in the browser (device code)"
+          ],
+          "description": "How to sign in to the Cursor Usage API."
+        },
+        "cursorUsage.entra.tenantId": { "type": "string", "default": "", "description": "Entra tenant ID (microsoft sign-in)." },
+        "cursorUsage.entra.clientId": { "type": "string", "default": "", "description": "Entra client (app) ID used to sign in (microsoft sign-in)." },
+        "cursorUsage.entra.scope": { "type": "string", "default": "", "description": "API scope, e.g. api://<api-client-id>/access_as_user (microsoft sign-in)." },
+        "cursorUsage.oidc.issuer": { "type": "string", "default": "", "description": "OpenID Connect issuer URL, e.g. https://example.okta.com/oauth2/default (oidc sign-in)." },
+        "cursorUsage.oidc.clientId": { "type": "string", "default": "", "description": "Client ID of a public app with the device authorization grant turned on (oidc sign-in)." },
+        "cursorUsage.oidc.scopes": { "type": "string", "default": "openid email profile offline_access", "description": "Scopes to ask for, space-separated. offline_access gives a refresh token on most providers; leave it out for Google." },
+        "cursorUsage.oidc.audience": { "type": "string", "default": "", "description": "Audience to ask for, for providers that need one to issue a JWT access token (Auth0). Usually empty." },
+        "cursorUsage.oidc.tokenType": { "type": "string", "enum": ["access", "id"], "default": "access", "description": "Which token to send to the API: the access token, or the ID token for providers whose access tokens aren't JWTs (Google)." },
+        "cursorUsage.oidc.clientSecret": { "type": "string", "default": "", "description": "Only for providers that require one for device sign-in even though it isn't secret (Google's 'TVs and limited input' clients). Leave empty otherwise." }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -watch -p .",
+    "package": "npm run compile && node -e \"require('fs').mkdirSync('dist',{recursive:true})\" && vsce package --skip-license -o dist/"
+  },
+  "devDependencies": {
+    "@types/node": "~22.15.0",
+    "@types/vscode": "~1.105.0",
+    "@vscode/vsce": "~4.0.0",
+    "typescript": "~5.9.3"
+  }
+}

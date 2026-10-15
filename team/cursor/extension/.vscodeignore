@@ -1,0 +1,7 @@
+src/**
+node_modules/**
+dist/**
+**/*.map
+tsconfig.json
+design/**
+*.md

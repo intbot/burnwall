@@ -1,0 +1,716 @@
+<title>Cursor Usage Concepts</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: a design-review sheet. Page chrome is quiet paper; each concept is a full editor-window mock with notes beside it. */
+:root {
+  --bg: #f3f4f6; --fg: #17191f; --muted: #5d6270; --line: #d9dce3; --panel: #ffffff; --accent: #2f5bd3;
+  --ok: #1f8a4c; --warn: #b86e00; --crit: #c23a2b;
+  --ok-soft: #e3f3e9; --warn-soft: #fbefd9; --crit-soft: #f9e2df;
+  --ed-bg: #ffffff; --ed-side: #f6f7f9; --ed-act: #eceef2; --ed-title: #e6e8ed; --ed-fg: #23262d; --ed-muted: #6c7180;
+  --ed-line: #dfe2e8; --ed-hover: #e8ebf1; --ed-status: #2f5bd3; --ed-status-fg: #ffffff; --ed-toast: #ffffff;
+  --ed-gutter: #a3a8b4; --syn-kw: #a626a4; --syn-str: #2b8a3e; --syn-fn: #2f5bd3; --syn-num: #b05a00; --syn-cm: #8a909c;
+  --shadow: 0 1px 2px rgba(20,24,36,.06), 0 12px 32px rgba(20,24,36,.10);
+  --tk-in: #2f5bd3; --tk-cw: #7a5bd0; --tk-cr: #c77a00; --tk-out: #1f8a7a; --tip-bg: #eef2fd;
+  --f-display: "Schibsted Grotesk", "Segoe UI", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", Consolas, "Courier New", monospace;
+  --f-ui: "Segoe UI", -apple-system, system-ui, sans-serif;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #111318; --fg: #e8eaf0; --muted: #9aa0ad; --line: #2a2e38; --panel: #181b22; --accent: #7c9bff;
+  --ok: #4cc27f; --warn: #f0a83a; --crit: #ff7a6b;
+  --ok-soft: #173325; --warn-soft: #3a2a10; --crit-soft: #3d1c19;
+  --ed-bg: #1b1d23; --ed-side: #16181d; --ed-act: #121418; --ed-title: #121418; --ed-fg: #d6d9e0; --ed-muted: #8b91a0;
+  --ed-line: #2a2d35; --ed-hover: #262a33; --ed-status: #1f3b8f; --ed-status-fg: #e8ecff; --ed-toast: #23262e;
+  --ed-gutter: #555b68; --syn-kw: #d68bf0; --syn-str: #8fd18f; --syn-fn: #82aaff; --syn-num: #f5a35c; --syn-cm: #6b7280;
+  --tk-in: #7c9bff; --tk-cw: #b39cff; --tk-cr: #f0a83a; --tk-out: #4cc2b0; --tip-bg: #1d2333;
+  --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 32px rgba(0,0,0,.45); color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #111318; --fg: #e8eaf0; --muted: #9aa0ad; --line: #2a2e38; --panel: #181b22; --accent: #7c9bff;
+  --ok: #4cc27f; --warn: #f0a83a; --crit: #ff7a6b;
+  --ok-soft: #173325; --warn-soft: #3a2a10; --crit-soft: #3d1c19;
+  --ed-bg: #1b1d23; --ed-side: #16181d; --ed-act: #121418; --ed-title: #121418; --ed-fg: #d6d9e0; --ed-muted: #8b91a0;
+  --ed-line: #2a2d35; --ed-hover: #262a33; --ed-status: #1f3b8f; --ed-status-fg: #e8ecff; --ed-toast: #23262e;
+  --ed-gutter: #555b68; --syn-kw: #d68bf0; --syn-str: #8fd18f; --syn-fn: #82aaff; --syn-num: #f5a35c; --syn-cm: #6b7280;
+  --tk-in: #7c9bff; --tk-cw: #b39cff; --tk-cr: #f0a83a; --tk-out: #4cc2b0; --tip-bg: #1d2333;
+  --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 32px rgba(0,0,0,.45); color-scheme: dark; }
+
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: var(--f-body); font-size: 15px; line-height: 1.55; }
+.page { max-width: 1240px; margin: 0 auto; padding-inline: 24px; padding-block: 40px 64px; display: grid; gap: 28px; }
+@media (max-width: 600px) { .page { padding-inline: 16px; padding-block: 24px 48px; } }
+
+header { display: grid; gap: 10px; }
+.eyebrow { font-family: var(--f-mono); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+h1 { font-family: var(--f-display); font-weight: 800; font-size: clamp(28px, 4vw, 42px); line-height: 1.08; margin: 0; text-wrap: balance; letter-spacing: -.01em; }
+.lede { margin: 0; max-width: 68ch; color: var(--muted); }
+.sample { display: inline-flex; gap: 8px; align-items: center; font-size: 13px; padding: 4px 10px; border: 1px dashed var(--line); border-radius: 999px; color: var(--muted); width: fit-content; }
+
+.tabs { display: flex; gap: 8px; flex-wrap: wrap; border-bottom: 1px solid var(--line); }
+.tab { appearance: none; background: none; border: 0; border-bottom: 3px solid transparent; padding: 10px 4px 12px; margin-right: 18px; cursor: pointer;
+  color: var(--muted); font: 600 15px var(--f-body); display: flex; gap: 10px; align-items: baseline; }
+.tab b { font-family: var(--f-display); font-size: 20px; color: var(--fg); font-weight: 700; }
+.tab[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.concept { display: grid; gap: 20px; }
+.concept-head { display: grid; gap: 4px; }
+.concept-head h2 { font-family: var(--f-display); font-size: 26px; margin: 0; font-weight: 700; }
+.concept-head p { margin: 0; color: var(--muted); max-width: 70ch; }
+
+.notes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
+@media (max-width: 860px) { .notes { grid-template-columns: 1fr; } }
+.notes h3 { font: 600 12px var(--f-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 6px; }
+.notes ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+
+/* ---------- editor window mock ---------- */
+.win { background: var(--ed-bg); color: var(--ed-fg); border: 1px solid var(--ed-line); border-radius: 10px; box-shadow: var(--shadow);
+  overflow: hidden; font-family: var(--f-ui); font-size: 13px; line-height: 1.45; display: grid; grid-template-rows: 32px 1fr 24px; height: 600px; }
+.titlebar { background: var(--ed-title); display: flex; align-items: center; justify-content: center; position: relative; color: var(--ed-muted); font-size: 12px; border-bottom: 1px solid var(--ed-line); }
+.titlebar .menu { position: absolute; left: 12px; display: flex; gap: 14px; }
+.titlebar .ctl { position: absolute; right: 12px; display: flex; gap: 18px; letter-spacing: .1em; }
+.wbody { display: grid; grid-template-columns: 44px 300px minmax(0, 1fr); min-height: 0; position: relative; }
+.act { background: var(--ed-act); display: flex; flex-direction: column; align-items: center; gap: 6px; padding-top: 8px; border-right: 1px solid var(--ed-line); }
+.act span { width: 44px; height: 40px; display: grid; place-items: center; color: var(--ed-muted); border-left: 2px solid transparent; }
+.act span.on { color: var(--ed-fg); border-left-color: var(--accent); }
+.act svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+.side { background: var(--ed-side); border-right: 1px solid var(--ed-line); overflow: auto; min-width: 0; }
+.side-title { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; padding: 10px 16px 6px; color: var(--ed-muted); display: flex; justify-content: space-between; }
+.sec { padding: 6px 16px 14px; display: grid; gap: 8px; }
+.sec-h { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--ed-fg); display: flex; justify-content: space-between; align-items: center; padding-top: 6px; }
+.sec-h small { font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--ed-muted); }
+.tree { padding: 2px 0; font-size: 13px; }
+.tree div { padding: 2px 16px; white-space: nowrap; }
+.tree .sel { background: var(--ed-hover); }
+.editor { display: grid; grid-template-rows: 35px 1fr; min-width: 0; position: relative; }
+.etabs { display: flex; background: var(--ed-side); border-bottom: 1px solid var(--ed-line); }
+.etab { padding: 0 14px; display: flex; align-items: center; gap: 6px; border-right: 1px solid var(--ed-line); color: var(--ed-muted); font-size: 13px; }
+.etab.on { background: var(--ed-bg); color: var(--ed-fg); }
+.code { font-family: var(--f-mono); font-size: 12.5px; line-height: 1.7; padding: 10px 0; overflow: hidden; white-space: pre; }
+.code .ln { display: inline-block; width: 44px; text-align: right; padding-right: 16px; color: var(--ed-gutter); }
+.kw { color: var(--syn-kw); } .str { color: var(--syn-str); } .fn { color: var(--syn-fn); } .num { color: var(--syn-num); } .cm { color: var(--syn-cm); font-style: italic; }
+.status { background: var(--ed-status); color: var(--ed-status-fg); display: flex; align-items: center; font-size: 12px; padding: 0 6px; gap: 2px; }
+.status span { padding: 0 8px; height: 24px; display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+.status .grow { flex: 1; }
+.status .ours { background: var(--warn); color: #1d1300; font-weight: 600; }
+.status .ours.quiet { background: transparent; color: var(--ed-status-fg); font-weight: 400; }
+.tnum { font-variant-numeric: tabular-nums; }
+
+/* toast (VS Code notification) */
+.toast { position: absolute; right: 14px; bottom: 14px; width: 380px; max-width: calc(100% - 28px); background: var(--ed-toast); color: var(--ed-fg);
+  border: 1px solid var(--ed-line); border-radius: 6px; box-shadow: var(--shadow); padding: 12px 14px 10px; display: grid; gap: 10px; font-size: 13px; z-index: 3; }
+.toast .t-row { display: flex; gap: 10px; align-items: flex-start; }
+.toast .ico { flex: none; width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; font-weight: 700; color: var(--ed-bg); margin-top: 1px; }
+.ico.warn { background: var(--warn); } .ico.info { background: var(--accent); } .ico.crit { background: var(--crit); }
+.toast .src { font-size: 11px; color: var(--ed-muted); }
+.toast .btns { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+.btn { font: 12px var(--f-ui); padding: 3px 10px; border-radius: 3px; border: 1px solid var(--ed-line); background: var(--ed-hover); color: var(--ed-fg); cursor: pointer; }
+.btn.primary { background: var(--accent); color: var(--ed-bg); border-color: var(--accent); }
+
+/* shared bits */
+.meter { height: 8px; border-radius: 4px; background: var(--ed-hover); position: relative; overflow: visible; }
+.meter i { position: absolute; inset: 0 auto 0 0; border-radius: 4px; background: var(--warn); }
+.meter b { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--ed-fg); }
+.big { font-size: 28px; font-weight: 600; letter-spacing: -.01em; }
+.big small { font-size: 14px; color: var(--ed-muted); font-weight: 400; }
+.muted { color: var(--ed-muted); }
+.kv { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; font-size: 12.5px; }
+.kv span:nth-child(even) { text-align: right; font-variant-numeric: tabular-nums; }
+.pill { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px; }
+.pill.warn { background: var(--warn-soft); color: var(--warn); } .pill.crit { background: var(--crit-soft); color: var(--crit); } .pill.ok { background: var(--ok-soft); color: var(--ok); }
+.mono { font-family: var(--f-mono); font-size: 12px; }
+
+/* A: hover card */
+.hover { position: absolute; right: 10px; bottom: 6px; width: 360px; max-width: calc(100% - 20px); background: var(--ed-toast); border: 1px solid var(--ed-line); border-radius: 4px;
+  box-shadow: var(--shadow); padding: 12px 14px; display: grid; gap: 8px; z-index: 4; font-size: 13px; }
+.hover hr { border: 0; border-top: 1px solid var(--ed-line); margin: 2px 0; width: 100%; }
+.hover .blocks { font-family: var(--f-mono); font-size: 14px; letter-spacing: 1px; }
+.hover a { color: var(--accent); text-decoration: none; }
+.hover .links { display: flex; gap: 14px; flex-wrap: wrap; }
+
+/* B: lists */
+.bars { display: grid; gap: 6px; }
+.bar-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 2px 8px; font-size: 12px; }
+.bar-row .track { grid-column: 1 / -1; height: 5px; background: var(--ed-hover); border-radius: 3px; }
+.bar-row .track i { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
+.bar-row .track i.hot { background: var(--warn); }
+.chat { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 0 8px; padding: 6px 8px; margin: 0 -8px; border-radius: 4px; font-size: 12.5px; }
+.chat:hover { background: var(--ed-hover); }
+.chat .sub { grid-column: 1 / -1; font-size: 11.5px; color: var(--ed-muted); }
+svg text { font-family: var(--f-ui); }
+
+/* C: coach cards */
+.card { border: 1px solid var(--ed-line); border-radius: 6px; background: var(--ed-bg); padding: 10px 12px; display: grid; gap: 6px; position: relative; overflow: hidden; font-size: 12.5px; }
+.card::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--stripe, var(--accent)); }
+.card.crit { --stripe: var(--crit); } .card.warn { --stripe: var(--warn); } .card.ok { --stripe: var(--ok); }
+.card h4 { margin: 0; font-size: 13px; display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.card p { margin: 0; color: var(--ed-fg); }
+.card .acts { display: flex; gap: 6px; flex-wrap: wrap; }
+.notice { font-size: 12.5px; display: grid; gap: 2px; padding-bottom: 8px; border-bottom: 1px solid var(--ed-line); }
+.notice:last-child { border-bottom: 0; }
+.notice .when { font-size: 11px; color: var(--ed-muted); }
+
+/* narrow screens: drop activity bar + code, keep the extension surfaces */
+@media (max-width: 820px) {
+  .win { height: auto; grid-template-rows: 32px auto 24px; }
+  .titlebar .menu, .titlebar .ctl { display: none; }
+  .wbody { grid-template-columns: minmax(0, 1fr); }
+  .act { display: none; }
+  .side { border-right: 0; max-height: none; }
+  .editor { grid-template-rows: 35px auto; min-height: 260px; }
+  .code { display: none; }
+  .toast, .hover { position: static; width: auto; max-width: none; margin: 12px; }
+  .status .hide-n { display: none; }
+  .concept[data-c="a"] .side { display: none; }
+}
+
+/* D: editor-tab webview */
+.editor { container-type: inline-size; }
+.wv { overflow: auto; padding: 18px 22px 24px; display: grid; gap: 18px; align-content: start; background: var(--ed-bg); min-height: 0; }
+.wv-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.wv-head h3 { margin: 0; font-size: 18px; font-weight: 600; }
+.wv-sec { display: grid; gap: 8px; align-content: start; min-width: 0; }
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--ed-line); border-radius: 6px; }
+.stats > div { padding: 10px 12px; border-left: 1px solid var(--ed-line); display: grid; gap: 1px; font-size: 12px; min-width: 0; }
+.stats > div:first-child { border-left: 0; }
+.stats .lbl { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--ed-muted); }
+.stats .val { font-size: 20px; font-weight: 600; }
+.wv-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 24px; }
+.tbl-wrap { overflow-x: auto; }
+.wv table, .frame table { min-width: 520px; font-size: 12.5px; }
+.wv th, .wv td, .frame th, .frame td { padding: 6px 8px; border-bottom: 1px solid var(--ed-line); }
+.wv th, .frame th { color: var(--ed-muted); font: 600 10.5px var(--f-ui); letter-spacing: .06em; }
+.wv .r, .frame .r { text-align: right; }
+.wv tr.hl td { background: var(--crit-soft); }
+.tipno { display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; background: var(--ed-fg); color: var(--ed-bg); font-size: 10px; font-weight: 700; margin-right: 6px; vertical-align: 1px; }
+@container (max-width: 640px) {
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stats > div:nth-child(3) { border-left: 0; }
+  .stats > div:nth-child(n+3) { border-top: 1px solid var(--ed-line); }
+  .wv-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 820px) { .wv { padding: 14px; } }
+
+/* D: where your money goes, by token type */
+.tok-mix { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 10px; align-items: center; font-size: 11.5px; }
+.tok-mix .lbl { color: var(--ed-muted); }
+.tok-bar { display: flex; height: 12px; border-radius: 3px; overflow: hidden; background: var(--ed-hover); }
+.tok-bar i { display: block; height: 100%; }
+.tok-bar i + i { box-shadow: -1px 0 0 var(--ed-bg); }
+.sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: 0; }
+.sw.in, .tok-bar .in { background: var(--tk-in); } .sw.cw, .tok-bar .cw { background: var(--tk-cw); }
+.sw.cr, .tok-bar .cr { background: var(--tk-cr); } .sw.out, .tok-bar .out { background: var(--tk-out); }
+.tok-tbl td.desc { color: var(--ed-muted); max-width: 46ch; }
+.tok-tbl tr.total td { border-bottom: 0; font-weight: 600; }
+.tok-tbl { min-width: 640px; }
+.wv tr.hl-warn td, .frame tr.hl-warn td { background: var(--warn-soft); }
+.read { border: 1px solid var(--ed-line); border-left: 3px solid var(--accent); border-radius: 6px; background: var(--tip-bg);
+  padding: 12px 14px; display: grid; gap: 8px; font-size: 12.5px; }
+.read h5 { margin: 0; font-size: 13.5px; font-weight: 600; text-wrap: balance; }
+.read p { margin: 0; max-width: 78ch; }
+.read ul { margin: 0; padding-left: 18px; display: grid; gap: 3px; max-width: 78ch; }
+.read .src { font-size: 11px; color: var(--ed-muted); }
+.closeup { display: grid; gap: 10px; }
+.closeup-h { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.closeup-h h3 { font-family: var(--f-display); font-size: 18px; margin: 0; }
+.closeup-h span { color: var(--muted); font-size: 13px; }
+.closeup .frame { background: var(--ed-bg); color: var(--ed-fg); border: 1px solid var(--ed-line); border-radius: 10px; box-shadow: var(--shadow);
+  font-family: var(--f-ui); font-size: 13px; line-height: 1.45; padding: 18px 22px 22px; display: grid; gap: 12px; }
+@media (max-width: 820px) { .closeup .frame { padding: 14px; } }
+.whatif { display: flex; gap: 10px 16px; align-items: baseline; flex-wrap: wrap; padding: 8px 12px; border: 1px dashed var(--ed-line);
+  border-radius: 6px; font-size: 12.5px; }
+.whatif strong { font-variant-numeric: tabular-nums; }
+.whatif .save { color: var(--ok); font-weight: 600; }
+.closeups { display: grid; gap: 28px; }
+.dlg { max-width: 560px; background: var(--ed-toast); color: var(--ed-fg); border: 1px solid var(--ed-line); border-radius: 8px; box-shadow: var(--shadow);
+  font-family: var(--f-ui); font-size: 13px; line-height: 1.5; padding: 16px 18px 14px; display: grid; gap: 12px; }
+.dlg h4 { margin: 0; font-size: 14px; display: flex; gap: 10px; align-items: center; }
+.dlg ol { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
+.dlg li b { font-weight: 600; }
+.dlg kbd { font-family: var(--f-mono); font-size: 12px; padding: 0 5px; border: 1px solid var(--ed-line); border-bottom-width: 2px; border-radius: 4px; background: var(--ed-bg); }
+.dlg .btns { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+.new-tag { font: 600 10px var(--f-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--accent); border: 1px solid var(--accent);
+  border-radius: 3px; padding: 0 5px; margin-left: 6px; vertical-align: 1px; }
+.changed { font-size: 13px; color: var(--muted); border-left: 2px solid var(--accent); padding-left: 10px; max-width: 80ch; }
+
+/* summary */
+.compare { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: 14px; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 600 12px var(--f-mono); letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+tr:last-child td { border-bottom: 0; }
+.shared { display: grid; gap: 8px; }
+.shared h2 { font-family: var(--f-display); font-size: 22px; margin: 0; }
+.shared ul { margin: 0; padding-left: 18px; display: grid; gap: 6px; max-width: 80ch; }
+code { font-family: var(--f-mono); font-size: .9em; }
+@media (prefers-reduced-motion: no-preference) { .concept:not([hidden]) .toast, .concept:not([hidden]) .hover { animation: rise .35s ease-out; } }
+@keyframes rise { from { transform: translateY(6px); opacity: .6; } to { transform: none; opacity: 1; } }
+</style>
+
+<div class="page">
+  <header>
+    <div class="eyebrow">cursor-usage · extension design concepts</div>
+    <h1>Three ways to show usage inside Cursor</h1>
+    <p class="lede">Each concept puts the same backend data into the editor in a different way. A is a glance in the status bar, B is a detailed panel, C is coaching first, and D combines B and C.</p>
+    <div class="sample">Sample data for a made-up user on the default $200 limit, viewed on Oct 14</div>
+  </header>
+
+  <div class="tabs" role="tablist" aria-label="Design concepts">
+    <button class="tab" role="tab" id="tab-a" aria-controls="c-a" aria-selected="true"><b>A</b> Meter</button>
+    <button class="tab" role="tab" id="tab-b" aria-controls="c-b" aria-selected="false"><b>B</b> Ledger</button>
+    <button class="tab" role="tab" id="tab-c" aria-controls="c-c" aria-selected="false"><b>C</b> Coach</button>
+    <button class="tab" role="tab" id="tab-d" aria-controls="c-d" aria-selected="false"><b>D</b> Ledger + Coach</button>
+  </div>
+
+  <!-- ============ A: METER ============ -->
+  <section class="concept" id="c-a" data-c="a" role="tabpanel" aria-labelledby="tab-a">
+    <div class="concept-head">
+      <h2>A · Meter</h2>
+      <p>Lives in the status bar. You see one number all day. Hovering shows the month at a glance, and an alert appears only when your pace changes.</p>
+    </div>
+    <div class="win">
+      <div class="titlebar"><div class="menu"><span>File</span><span>Edit</span><span>View</span><span>Go</span></div>pricing-service — Cursor<div class="ctl"><span>—</span><span>☐</span><span>✕</span></div></div>
+      <div class="wbody">
+        <div class="act" data-act="files"></div>
+        <div class="side">
+          <div class="side-title"><span>Explorer</span><span>···</span></div>
+          <div class="tree">
+            <div>▾ PRICING-SERVICE</div><div>&nbsp;&nbsp;▾ src</div><div>&nbsp;&nbsp;&nbsp;&nbsp;▸ billing</div><div class="sel">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;export.ts</div>
+            <div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;rates.ts</div><div>&nbsp;&nbsp;&nbsp;&nbsp;▸ tests</div><div>&nbsp;&nbsp;package.json</div><div>&nbsp;&nbsp;README.md</div>
+          </div>
+        </div>
+        <div class="editor">
+          <div class="etabs"><div class="etab on">export.ts</div><div class="etab">rates.ts</div></div>
+          <div class="code" data-code></div>
+          <div class="hover" role="tooltip">
+            <div><strong>Cursor usage · October</strong> <span class="muted">· updated 6 min ago</span></div>
+            <div class="big tnum">$142.60 <small>of $200</small></div>
+            <div class="blocks" aria-label="71% used">▰▰▰▰▰▰▰▱▱▱ <span class="tnum">71%</span></div>
+            <div>On pace for <strong>$316</strong>. You'd reach your limit around <strong>Oct 19</strong>.</div>
+            <div class="muted">Daily, Oct 1–14 &nbsp;<span class="blocks" style="font-size:13px">▁▁▂▁▁▃▃▅▆▄▁▁█▆</span></div>
+            <hr>
+            <div><strong>Biggest cost:</strong> one chat started Oct 7: 61 prompts, <span class="tnum">$88.40</span></div>
+            <div><strong>Top model:</strong> grok-4.7-xhigh-fast (67%)</div>
+            <hr>
+            <div class="links"><a href="#c-a">Open details</a><a href="#c-a">Tips to stretch $200</a><a href="#c-a">Snooze alerts for a week</a></div>
+          </div>
+        </div>
+      </div>
+      <div class="status">
+        <span>⎇ main</span><span class="hide-n">⊘ 0 ⚠ 2</span><span class="grow"></span>
+        <span class="hide-n">Ln 42, Col 18</span><span class="hide-n">TypeScript</span>
+        <span class="ours tnum" title="Cursor usage">◔ $142 / $200 · pace $316</span>
+      </div>
+    </div>
+    <div class="notes">
+      <div><h3>Shows</h3><ul><li>Spend against your limit, always visible</li><li>The item changes colour as your pace rises: none, then amber, then red</li><li>On hover: projected month total, the date you'd reach your limit, and your biggest cost</li><li>An alert only when something changes (for example "you'll pass $200 this week")</li></ul></div>
+      <div><h3>Best for</h3><ul><li>The ~100 General users who spend $15 a month and only need a quiet warning</li><li>A fast first release: smallest build, nothing to learn</li></ul></div>
+      <div><h3>Trade-offs</h3><ul><li>The real hover card is Markdown, so the meter is drawn with text blocks (as shown), not a custom chart</li><li>No room to explain <em>why</em>. "Open details" needs a panel such as B or C</li></ul></div>
+    </div>
+  </section>
+
+  <!-- ============ B: LEDGER ============ -->
+  <section class="concept" id="c-b" data-c="b" role="tabpanel" aria-labelledby="tab-b" hidden>
+    <div class="concept-head">
+      <h2>B · Ledger</h2>
+      <p>A sidebar panel showing your own data in the same detail as the analysis reports: daily spend with your projected total, spend by model, your most expensive chats and your most expensive prompt.</p>
+    </div>
+    <div class="win">
+      <div class="titlebar"><div class="menu"><span>File</span><span>Edit</span><span>View</span><span>Go</span></div>pricing-service — Cursor<div class="ctl"><span>—</span><span>☐</span><span>✕</span></div></div>
+      <div class="wbody">
+        <div class="act" data-act="usage"></div>
+        <div class="side">
+          <div class="side-title"><span>Cursor Usage</span><span>⟳ 6 min ago</span></div>
+          <div class="sec">
+            <div class="sec-h">October <small>day 14 of 31</small></div>
+            <div class="big tnum">$142.60 <small>of $200</small></div>
+            <div class="meter" aria-label="71% of limit used; expected by today is 45%"><i style="width:71.3%"></i><b style="left:45.2%"></b></div>
+            <div class="muted" style="font-size:12px">Bar = used · line = where an even pace would be today ($90)</div>
+            <div class="kv"><span>Projected month</span><span><span class="pill crit">$316</span></span><span>Reaches $200 on</span><span>~Oct 19</span><span>Cost per prompt (7 days)</span><span>$1.12 <span class="muted">· team $0.31</span></span></div>
+          </div>
+          <div class="sec">
+            <div class="sec-h">Spend so far <small>dashed = projection</small></div>
+            <svg id="cum" viewBox="0 0 268 150" role="img" aria-label="Cumulative spend: $142.60 by Oct 14, projected $316 by Oct 31, crossing the $200 limit around Oct 19"></svg>
+          </div>
+          <div class="sec">
+            <div class="sec-h">By model</div>
+            <div class="bars" id="models"></div>
+          </div>
+          <div class="sec">
+            <div class="sec-h">Most expensive chats</div>
+            <div class="chat"><span>Chat started Oct 7</span><strong class="tnum">$88.40</strong><span class="sub">8 days open · 61 prompts · 2 models · 62% of your month</span></div>
+            <div class="chat"><span>Chat started Oct 13</span><strong class="tnum">$24.10</strong><span class="sub">2 days · 23 prompts · grok-4.7-xhigh-fast</span></div>
+            <div class="chat"><span>Chat started Oct 9</span><strong class="tnum">$9.70</strong><span class="sub">1 day · 14 prompts · claude-opus-5-5-high</span></div>
+          </div>
+          <div class="sec">
+            <div class="sec-h">Most expensive prompt</div>
+            <div class="kv"><span>Oct 13, 16:42 · in the Oct 7 chat</span><span><strong>$8.63</strong></span><span class="muted">Re-read 15.7M tokens of history</span><span></span></div>
+          </div>
+        </div>
+        <div class="editor">
+          <div class="etabs"><div class="etab on">export.ts</div><div class="etab">rates.ts</div></div>
+          <div class="code" data-code></div>
+          <div class="toast">
+            <div class="t-row"><div class="ico warn">!</div><div>You've used <strong>71%</strong> of your $200 with 17 days to go. At this pace you'll reach the limit around <strong>Oct 19</strong>.</div></div>
+            <div class="src">Source: Cursor Usage</div>
+            <div class="btns"><button class="btn">Don't show this month</button><button class="btn primary">Show breakdown</button></div>
+          </div>
+        </div>
+      </div>
+      <div class="status">
+        <span>⎇ main</span><span class="hide-n">⊘ 0 ⚠ 2</span><span class="grow"></span>
+        <span class="hide-n">Ln 42, Col 18</span><span class="hide-n">TypeScript</span>
+        <span class="ours tnum">◔ $142 / $200</span>
+      </div>
+    </div>
+    <div class="notes">
+      <div><h3>Shows</h3><ul><li>Month-to-date spend, projected total and the date you'd reach your limit</li><li>Spend so far against your limit, with the projection drawn to scale</li><li>Spend by model, with the expensive variant highlighted</li><li>Your top chats and your most expensive prompt</li></ul></div>
+      <div><h3>Best for</h3><ul><li>People with raised limits (I&amp;R, Approved Exceptions) who want to manage their own spend</li><li>One-to-one conversations: you and the person are looking at the same numbers</li></ul></div>
+      <div><h3>Trade-offs</h3><ul><li>Numbers without advice. People have to work out the fix themselves</li><li>The usage data has no chat titles, so chats are named by start date (matching them to local chat history is a possible later step)</li></ul></div>
+    </div>
+  </section>
+
+  <!-- ============ C: COACH ============ -->
+  <section class="concept" id="c-c" data-c="c" role="tabpanel" aria-labelledby="tab-c" hidden>
+    <div class="concept-head">
+      <h2>C · Coach</h2>
+      <p>Leads with what to change, in plain words with your own numbers: the same habit checks as the outreach cards, shown privately to each person, plus messages from you.</p>
+    </div>
+    <div class="win">
+      <div class="titlebar"><div class="menu"><span>File</span><span>Edit</span><span>View</span><span>Go</span></div>pricing-service — Cursor<div class="ctl"><span>—</span><span>☐</span><span>✕</span></div></div>
+      <div class="wbody">
+        <div class="act" data-act="usage"></div>
+        <div class="side">
+          <div class="side-title"><span>Cursor Coach</span><span>⟳ 6 min ago</span></div>
+          <div class="sec">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px"><strong class="tnum" style="font-size:16px">$142.60 <span class="muted" style="font-weight:400;font-size:13px">of $200</span></strong><span class="pill crit">pace $316</span></div>
+            <div class="meter"><i style="width:71.3%"></i><b style="left:45.2%"></b></div>
+          </div>
+          <div class="sec">
+            <div class="sec-h">This week: 2 things to change <small>saves about $95/mo</small></div>
+            <div class="card crit">
+              <h4>One chat is costing you the most <span class="pill crit">$88</span></h4>
+              <p>Your chat from Oct 7 is 8 days old with 61 prompts, 62% of your month. Every new prompt makes the agent re-read all of them.</p>
+              <div class="acts"><button class="btn primary">Copy "summarise &amp; restart" prompt</button><button class="btn">Why?</button></div>
+            </div>
+            <div class="card warn">
+              <h4>You're paying for <code>-fast</code> <span class="pill warn">~$48</span></h4>
+              <p>67% of your spend is on grok-4.7-xhigh-fast. grok-4.7-high does the same work for about half the price.</p>
+              <div class="acts"><button class="btn">How to change model</button><button class="btn">Not for me</button></div>
+            </div>
+          </div>
+          <div class="sec">
+            <div class="sec-h">Keep doing</div>
+            <div class="card ok"><h4>Auto for small edits</h4><p>41 prompts on Auto this month at $0.35 each on average. That's the cheapest way to work.</p></div>
+          </div>
+          <div class="sec">
+            <div class="sec-h">From your Cursor admin</div>
+            <div class="notice"><span class="when">Oct 2</span><span>Grok is no longer free. <code>xhigh-fast</code> costs about twice as much as <code>high</code>.</span></div>
+            <div class="notice"><span class="when">Sep 22</span><span>Opus 5.5 is available. It's about 35% cheaper than Opus 5, so switch if you use Opus.</span></div>
+          </div>
+        </div>
+        <div class="editor">
+          <div class="etabs"><div class="etab on">export.ts</div><div class="etab">rates.ts</div></div>
+          <div class="code" data-code></div>
+          <div class="toast">
+            <div class="t-row"><div class="ico crit">$</div><div>Your chat from <strong>Oct 7</strong> has cost <strong>$88</strong>. That's 61 prompts, each one re-reading all the earlier ones. Summarise it and start a new chat?</div></div>
+            <div class="src">Source: Cursor Usage</div>
+            <div class="btns"><button class="btn">Remind me tomorrow</button><button class="btn primary">Copy summary prompt</button></div>
+          </div>
+        </div>
+      </div>
+      <div class="status">
+        <span>⎇ main</span><span class="hide-n">⊘ 0 ⚠ 2</span><span class="grow"></span>
+        <span class="hide-n">Ln 42, Col 18</span><span class="hide-n">TypeScript</span>
+        <span class="ours tnum">◔ $142 · 2 tips</span>
+      </div>
+    </div>
+    <div class="notes">
+      <div><h3>Shows</h3><ul><li>Up to 3 changes ranked by money saved, each with the person's own evidence</li><li>One action per tip, for example copying a ready-made restart prompt</li><li>A "keep doing" section so it isn't only criticism</li><li>Your messages, targeted to everyone, a segment or one person</li></ul></div>
+      <div><h3>Best for</h3><ul><li>Changing habits at scale without one-to-one calls</li><li>The Approved Exceptions coaching plan, and General users heading past $200</li></ul></div>
+      <div><h3>Trade-offs</h3><ul><li>The most backend work: the habit checks and savings estimates have to be right</li><li>Tone matters, and you'd write or approve the wording</li><li>The extension can't open a new Cursor chat for the person, so it copies the prompt for them</li></ul></div>
+    </div>
+  </section>
+
+  <!-- ============ D: LEDGER + COACH ============ -->
+  <section class="concept" id="c-d" data-c="d" role="tabpanel" aria-labelledby="tab-d" hidden>
+    <div class="concept-head">
+      <h2>D · Ledger + Coach</h2>
+      <p>The sidebar is the Coach: where you stand, what to change, and messages from you. "Show breakdown" opens the Ledger as a full tab in the editor, where each tip is marked on the chat or model it's about.</p>
+      <p class="changed"><strong>Updated Oct 14.</strong> "Show breakdown" is the main button again, with admin notices and model updates below it. The breakdown tab gains <strong>Where your money goes</strong>: the token-type table sent with limit-raise replies, worked out per person, with a note on how to read it, what the same tokens would cost without <code>-fast</code>, and how to shrink a long chat with Cursor's <code>/summarize</code>. Tip 1's main action is now <strong>How to compact</strong>.</p>
+    </div>
+    <div class="win">
+      <div class="titlebar"><div class="menu"><span>File</span><span>Edit</span><span>View</span><span>Go</span></div>Cursor Usage — pricing-service — Cursor<div class="ctl"><span>—</span><span>☐</span><span>✕</span></div></div>
+      <div class="wbody">
+        <div class="act" data-act="usage"></div>
+        <div class="side">
+          <div class="side-title"><span>Cursor Usage</span><span>⟳ 6 min ago</span></div>
+          <div class="sec">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px"><strong class="tnum" style="font-size:16px">$142.60 <span class="muted" style="font-weight:400;font-size:13px">of $200</span></strong><span class="pill crit">pace $316</span></div>
+            <div class="meter"><i style="width:71.3%"></i><b style="left:45.2%"></b></div>
+            <div class="muted" style="font-size:12px">You'd reach your limit around Oct 19.</div>
+          </div>
+          <div class="sec">
+            <div class="sec-h">2 things to change <small>saves about $95/mo</small></div>
+            <div class="card crit">
+              <h4><span><span class="tipno">1</span>One chat is costing you the most</span> <span class="pill crit">$88</span></h4>
+              <p>Your chat from Oct 7 is 8 days old with 61 prompts. Every new prompt re-reads all of them. Type <code>/summarize</code> in it, or start a new chat for the next task.</p>
+              <div class="acts"><button class="btn primary">How to compact</button><button class="btn">See in breakdown</button></div>
+            </div>
+            <div class="card warn">
+              <h4><span><span class="tipno">2</span>You're paying for <code>-fast</code></span> <span class="pill warn">~$48</span></h4>
+              <p>67% of your spend is grok-4.7-xhigh-fast. grok-4.7-high costs about half.</p>
+              <div class="acts"><button class="btn">How to change model</button><button class="btn">See in breakdown</button></div>
+            </div>
+          </div>
+          <div class="sec">
+            <div class="sec-h">Keep doing</div>
+            <div class="card ok"><h4>Auto for small edits</h4><p>41 prompts at $0.35 average.</p></div>
+          </div>
+          <div class="sec"><button class="btn primary" style="width:100%;padding:6px">Show breakdown</button></div>
+          <div class="sec">
+            <div class="sec-h">From your Cursor admin</div>
+            <div class="notice"><span class="when">Oct 2</span><span>Grok is no longer free. <code>xhigh-fast</code> costs about twice as much as <code>high</code>.</span></div>
+            <div class="notice"><span class="when">Sep 22</span><span>Opus 5.5 is available. It's about 35% cheaper than Opus 5, so switch if you use Opus.</span></div>
+          </div>
+          <div class="sec">
+            <div class="sec-h">Model updates <small>from your organization's usage</small></div>
+            <div class="notice"><span class="when">Oct 6</span><span>New at your organization: <code>claude-sonnet-5-5</code>. It costs about the same as <code>claude-sonnet-5</code>.</span></div>
+          </div>
+        </div>
+        <div class="editor">
+          <div class="etabs"><div class="etab">export.ts</div><div class="etab on">◔ Cursor Usage</div></div>
+          <div class="wv">
+            <div class="wv-head"><h3>October usage</h3><span class="muted">Updated 6 min ago · Oct 1–14</span></div>
+            <div class="stats">
+              <div><span class="lbl">Spent</span><span class="val tnum">$142.60</span><span class="muted">of $200 · 71%</span></div>
+              <div><span class="lbl">Projected</span><span class="val tnum" style="color:var(--crit)">$316</span><span class="muted">if this pace continues</span></div>
+              <div><span class="lbl">Reaches limit</span><span class="val">~Oct 19</span><span class="muted">17 days left in month</span></div>
+              <div><span class="lbl">Per prompt</span><span class="val tnum">$1.12</span><span class="muted">team median $0.31</span></div>
+            </div>
+            <div class="wv-grid">
+              <div class="wv-sec">
+                <div class="sec-h">Spend so far <small>dashed = projection</small></div>
+                <svg id="cum-d" viewBox="0 0 440 190" role="img" aria-label="Cumulative spend: $142.60 by Oct 14, projected $316 by Oct 31, crossing the $200 limit around Oct 19"></svg>
+              </div>
+              <div class="wv-sec">
+                <div class="sec-h">By model</div>
+                <div class="bars" id="models-d"></div>
+              </div>
+            </div>
+            <div class="wv-sec">
+              <div class="sec-h">Most expensive chats</div>
+              <div class="tbl-wrap">
+                <table>
+                  <thead><tr><th>Chat started</th><th>Open</th><th>Prompts</th><th>Models</th><th class="r">Cost</th><th class="r">Of month</th></tr></thead>
+                  <tbody>
+                    <tr class="hl"><td><span class="tipno">1</span>Oct 7, 09:12</td><td>8 days</td><td class="tnum">61</td><td>grok-4.7-xhigh-fast, auto</td><td class="r tnum"><strong>$88.40</strong></td><td class="r tnum">62%</td></tr>
+                    <tr><td>Oct 13, 14:05</td><td>2 days</td><td class="tnum">23</td><td>grok-4.7-xhigh-fast</td><td class="r tnum">$24.10</td><td class="r tnum">17%</td></tr>
+                    <tr><td>Oct 9, 10:31</td><td>1 day</td><td class="tnum">14</td><td>claude-opus-5-5-high</td><td class="r tnum">$9.70</td><td class="r tnum">7%</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="muted" style="font-size:12px">Most expensive prompt: <strong style="color:var(--ed-fg)">$8.63</strong> on Oct 13 at 16:42, in the Oct 7 chat. It re-read 15.7M tokens of history.</div>
+            </div>
+            <div class="wv-sec" data-tokens></div>
+          </div>
+        </div>
+      </div>
+      <div class="status">
+        <span>⎇ main</span><span class="hide-n">⊘ 0 ⚠ 2</span><span class="grow"></span>
+        <span class="hide-n">Ln 42, Col 18</span><span class="hide-n">TypeScript</span>
+        <span class="ours tnum">◔ $142 / $200 · 2 tips</span>
+      </div>
+    </div>
+    <div class="notes">
+      <div><h3>Shows</h3><ul><li>Sidebar: where you stand, up to 3 tips, "keep doing", then "Show breakdown", your messages and model updates. This is the daily view</li><li>Editor tab: the full breakdown, opened from "Show breakdown", a tip or the status bar</li><li>Tips and data are linked: tip 1 is marked on the chat it's about and on the cache-read row, and tip 2 on the model</li><li>Where your money goes: tokens and cost by type, what the same tokens cost without <code>-fast</code>, and how to read it</li><li>How to compact: Cursor's own <code>/summarize</code> and <code>@</code> → Chats, with the restart prompt as a fallback</li></ul></div>
+      <div><h3>Best for</h3><ul><li>Everyone: most people only need the sidebar</li><li>Raised-limit users and one-to-one conversations use the breakdown tab</li></ul></div>
+      <div><h3>Trade-offs</h3><ul><li>Two views to build (a sidebar view and an editor tab), but they share the same data and components</li><li>Backend work is the same as C. B adds no extra backend work</li><li>The token table needs per-model rates. Cursor's API doesn't list prices, so they're fitted from what your organization was charged</li></ul></div>
+    </div>
+    <div class="closeups">
+      <div class="closeup">
+        <div class="closeup-h"><h3>Close-up: Where your money goes</h3><span>In the breakdown tab, below "Most expensive chats"</span></div>
+        <div class="frame" data-tokens data-full></div>
+      </div>
+      <div class="closeup">
+        <div class="closeup-h"><h3>Close-up: How to compact</h3><span>Opens from tip 1 in the sidebar, as a Cursor dialog</span></div>
+        <div class="dlg" role="img" aria-label="Dialog: Shrink a long chat">
+          <h4><span class="ico info" style="flex:none;width:16px;height:16px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:700;color:var(--ed-bg)">i</span>Shrink a long chat</h4>
+          <ol>
+            <li><b>Same task, carrying on:</b> type <kbd>/summarize</kbd> in that chat. Cursor compresses the earlier conversation into a summary, so later prompts re-send the summary instead of all 61 prompts.</li>
+            <li><b>New task:</b> start a new chat. If you need the old one, type <kbd>@</kbd>, choose <b>Chats</b> and pick it.</li>
+            <li><b>Keep an eye on it:</b> the context ring next to the chat input shows how full the chat is. Cursor only summarizes on its own when it's close to full, so summarize at about 20 prompts instead of waiting.</li>
+          </ol>
+          <span class="muted" style="font-size:12px">Summarizing reads the whole chat once, so it costs about one big prompt. It pays for itself within a few prompts.</span>
+          <div class="btns"><button class="btn">Copy restart prompt</button><button class="btn primary">OK</button></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="compare">
+    <table>
+      <thead><tr><th>&nbsp;</th><th>A · Meter</th><th>B · Ledger</th><th>C · Coach</th><th>D · Ledger + Coach</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Main question it answers</strong></td><td>Am I OK this month?</td><td>Where did my money go?</td><td>What should I change?</td><td>What should I change, and why?</td></tr>
+        <tr><td><strong>Where it lives</strong></td><td>Status bar and hover card</td><td>Sidebar panel</td><td>Sidebar panel and alerts</td><td>Sidebar, alerts and an editor tab</td></tr>
+        <tr><td><strong>Backend needs</strong></td><td>Spend, limit, pace</td><td>+ per-day, per-model and per-chat totals</td><td>+ habit checks, savings estimates, messages</td><td>Same as C</td></tr>
+        <tr><td><strong>Build size</strong></td><td>Small</td><td>Medium</td><td>Medium–large</td><td>Large</td></tr>
+        <tr><td><strong>Suggested order</strong></td><td>Release 1</td><td>Release 1–2 (behind "Open details")</td><td>Release 2</td><td>Release 1: status bar + breakdown tab. Release 2: coaching sidebar</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="shared">
+    <h2>True for all three</h2>
+    <ul>
+      <li>Data comes from the backend, which polls the Cursor Admin API. Numbers are a few minutes behind live, and the panel shows "updated X min ago".</li>
+      <li>Sign in once with your work account. Each person sees only their own usage, and admins see everyone.</li>
+      <li>The extension is read-only. It never changes limits or settings, and it can't see your chat content.</li>
+      <li>Combining them is natural: A's status bar item, with "Open details" opening a panel that has C's tips at the top and B's numbers below.</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+(function () {
+  // tabs
+  const tabs = [...document.querySelectorAll('.tab')];
+  function show(id) {
+    tabs.forEach(t => { const on = t.getAttribute('aria-controls') === id; t.setAttribute('aria-selected', on); t.tabIndex = on ? 0 : -1;
+      document.getElementById(t.getAttribute('aria-controls')).hidden = !on; });
+    try { localStorage.setItem('concept', id); } catch (e) {}
+  }
+  tabs.forEach((t, i) => {
+    t.addEventListener('click', () => show(t.getAttribute('aria-controls')));
+    t.addEventListener('keydown', e => { if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+      const n = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length]; n.focus(); show(n.getAttribute('aria-controls')); } });
+  });
+  try { const s = localStorage.getItem('concept'); if (s && document.getElementById(s)) show(s); } catch (e) {}
+
+  // activity bar icons
+  const ic = {
+    files: '<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/>',
+    search: '<circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5 5"/>',
+    git: '<circle cx="7" cy="6" r="2.2"/><circle cx="7" cy="18" r="2.2"/><circle cx="17" cy="9" r="2.2"/><path d="M7 8.2v7.6M17 11.2c0 3-4 3.5-8.5 5.5"/>',
+    ext: '<rect x="4" y="4" width="7" height="7"/><rect x="13" y="13" width="7" height="7"/><rect x="4" y="13" width="7" height="7"/><path d="M15 4l5 5-5 0z"/>',
+    usage: '<path d="M4 17a8 8 0 1 1 16 0"/><path d="M12 17l4-5"/><circle cx="12" cy="17" r="1.2"/>'
+  };
+  document.querySelectorAll('.act').forEach(a => {
+    const on = a.dataset.act;
+    a.innerHTML = ['files', 'search', 'git', 'ext', 'usage'].map(k =>
+      `<span class="${k === on ? 'on' : ''}"><svg viewBox="0 0 24 24" aria-hidden="true">${ic[k]}</svg></span>`).join('');
+  });
+
+  // code
+  const lines = [
+    '<span class="kw">import</span> { <span class="fn">rateFor</span> } <span class="kw">from</span> <span class="str">"./rates"</span>;',
+    '<span class="kw">import type</span> { Invoice, Lease } <span class="kw">from</span> <span class="str">"../types"</span>;',
+    '',
+    '<span class="cm">// Build the monthly billing export for a portfolio</span>',
+    '<span class="kw">export async function</span> <span class="fn">buildExport</span>(leases: Lease[], month: <span class="kw">string</span>) {',
+    '  <span class="kw">const</span> rows: Invoice[] = [];',
+    '  <span class="kw">for</span> (<span class="kw">const</span> lease <span class="kw">of</span> leases) {',
+    '    <span class="kw">if</span> (!lease.active) <span class="kw">continue</span>;',
+    '    <span class="kw">const</span> rate = <span class="kw">await</span> <span class="fn">rateFor</span>(lease.buildingId, month);',
+    '    rows.<span class="fn">push</span>({',
+    '      leaseId: lease.id,',
+    '      amount: <span class="fn">round</span>(lease.sqft * rate / <span class="num">12</span>, <span class="num">2</span>),',
+    '      currency: <span class="str">"USD"</span>,',
+    '    });',
+    '  }',
+    '  <span class="kw">return</span> rows;',
+    '}',
+    '',
+    '<span class="kw">function</span> <span class="fn">round</span>(n: <span class="kw">number</span>, dp: <span class="kw">number</span>) {',
+    '  <span class="kw">const</span> f = <span class="num">10</span> ** dp;',
+    '  <span class="kw">return</span> Math.<span class="fn">round</span>(n * f) / f;',
+    '}'
+  ];
+  document.querySelectorAll('[data-code]').forEach(c => {
+    c.innerHTML = lines.map((l, i) => `<span class="ln">${i + 1}</span>${l}`).join('\n');
+  });
+
+  // models (B)
+  const models = [['grok-4.7-xhigh-fast', 96.10, true], ['grok-4.7-high', 21.40], ['auto', 14.30], ['claude-opus-5-5-high', 10.80]];
+  const total = 142.60;
+  const modelRows = tip => models.map(([m, v, hot]) =>
+    `<div class="bar-row"><span class="mono" style="overflow:hidden;text-overflow:ellipsis">${hot && tip ? '<span class="tipno">2</span>' : ''}${m}</span><span class="tnum">$${v.toFixed(2)} · ${Math.round(v / total * 100)}%</span>` +
+    `<div class="track"><i class="${hot ? 'hot' : ''}" style="width:${(v / models[0][1] * 100).toFixed(1)}%"></i></div></div>`).join('');
+  document.getElementById('models').innerHTML = modelRows(false);
+  document.getElementById('models-d').innerHTML = modelRows(true);
+
+  // cumulative chart (B, D)
+  const daily = [0.8, 3.2, 6.5, 0, 0, 9.4, 12.1, 18.6, 22.3, 15.8, 0, 0, 31.2, 22.7];
+  function drawCum(el, W, H, fs) {
+    let c = 0; const cum = daily.map(d => (c += d));
+    const perDay = c / daily.length, proj = c + perDay * (31 - daily.length);
+    const L = 30 * fs / 9, R = 8, T = 10, B = 22 * fs / 9, ymax = 350;
+    const x = d => L + (d - 1) / 30 * (W - L - R), y = v => T + (1 - v / ymax) * (H - T - B);
+    const cross = daily.length + (200 - c) / perDay;
+    let s = '';
+    [0, 100, 200, 300].forEach(v => {
+      s += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--ed-line)" stroke-width="1"/>`;
+      s += `<text x="${L - 5}" y="${y(v) + fs * .4}" text-anchor="end" font-size="${fs}" fill="var(--ed-muted)">$${v}</text>`;
+    });
+    [1, 8, 15, 22, 29].forEach(d => s += `<text x="${x(d)}" y="${H - 6}" text-anchor="middle" font-size="${fs}" fill="var(--ed-muted)">Oct ${d}</text>`);
+    s += `<line x1="${L}" x2="${W - R}" y1="${y(200)}" y2="${y(200)}" stroke="var(--crit)" stroke-width="1.2"/>`;
+    s += `<text x="${L + 4}" y="${y(200) - 4}" font-size="${fs}" fill="var(--crit)">limit $200</text>`;
+    const pts = cum.map((v, i) => `${x(i + 1).toFixed(1)},${y(v).toFixed(1)}`);
+    s += `<polygon points="${x(1)},${y(0)} ${pts.join(' ')} ${x(daily.length)},${y(0)}" fill="var(--warn)" opacity=".16"/>`;
+    s += `<polyline points="${pts.join(' ')}" fill="none" stroke="var(--warn)" stroke-width="2" stroke-linejoin="round"/>`;
+    s += `<line x1="${x(daily.length)}" y1="${y(c)}" x2="${x(31)}" y2="${y(proj)}" stroke="var(--warn)" stroke-width="1.6" stroke-dasharray="4 3"/>`;
+    s += `<circle cx="${x(daily.length)}" cy="${y(c)}" r="3.2" fill="var(--warn)"/>`;
+    s += `<circle cx="${x(cross)}" cy="${y(200)}" r="3" fill="var(--crit)"/>`;
+    s += `<text x="${x(cross)}" y="${y(200) + fs * 1.45}" text-anchor="middle" font-size="${fs}" fill="var(--crit)">~Oct ${Math.floor(cross)}</text>`;
+    s += `<text x="${x(31)}" y="${y(proj) - 6}" text-anchor="end" font-size="${fs + .5}" font-weight="600" fill="var(--ed-fg)">$${Math.round(proj)}</text>`;
+    s += `<text x="${x(daily.length) - 4}" y="${y(c) - 7}" text-anchor="end" font-size="${fs + .5}" font-weight="600" fill="var(--ed-fg)">$${c.toFixed(0)}</text>`;
+    el.innerHTML = s;
+  }
+  // where your money goes (D). Same sample user: $142.60 across the four models above.
+  const tok = [
+    { k: 'in', name: 'Input', desc: 'New text sent to the model: your message, attached files and tool results that aren\u2019t cached yet.', m: 9.69, usd: 27.40 },
+    { k: 'cw', name: 'Cache writes', desc: 'New context saved so later prompts can reuse it. <code>claude-opus-5-5</code> charges for it.', m: 0.90, usd: 4.65 },
+    { k: 'cr', name: 'Cache reads', desc: 'The whole chat so far, sent again with every prompt. Cheaper per token than input, but it grows with every prompt.', m: 130.23, usd: 101.82, tip: 1 },
+    { k: 'out', name: 'Output', desc: 'What the model writes back, including its thinking. Max and xhigh effort write more.', m: 1.07, usd: 8.73 },
+  ];
+  const tm = tok.reduce((a, r) => a + r.m, 0), tu = tok.reduce((a, r) => a + r.usd, 0);
+  const pc = (v, of) => Math.round(v / of * 100);
+  const vol = m => m >= 10 ? `${m.toFixed(0)}M` : `${m.toFixed(1)}M`;
+  const bar = key => `<div class="tok-bar" role="img" aria-label="${tok.map(r => `${r.name} ${pc(r[key], key === 'm' ? tm : tu)}%`).join(', ')}">` +
+    tok.map(r => `<i class="${r.k}" style="width:${(r[key] / (key === 'm' ? tm : tu) * 100).toFixed(2)}%"></i>`).join('') + '</div>';
+  const rows = tok.map(r => `<tr class="${r.tip ? 'hl-warn' : ''}"><td style="white-space:nowrap">${r.tip ? `<span class="tipno">${r.tip}</span>` : ''}<span class="sw ${r.k}"></span>${r.name}</td>` +
+    `<td class="desc">${r.desc}</td><td class="r tnum">${vol(r.m)}</td><td class="r tnum">$${(r.usd / r.m).toFixed(2)}/M</td>` +
+    `<td class="r tnum"><strong>$${r.usd.toFixed(2)}</strong></td><td class="r tnum">${pc(r.usd, tu)}%</td></tr>`).join('');
+  const crShare = pc(tok[2].m, tm), crCost = pc(tok[2].usd, tu);
+  const section = `
+    <div class="sec-h">Where your money goes <small>by token type · October</small></div>
+    <div class="tok-mix">
+      <span class="lbl">Tokens</span>${bar('m')}
+      <span class="lbl">Cost</span>${bar('usd')}
+    </div>
+    <div class="tbl-wrap"><table class="tok-tbl">
+      <thead><tr><th>Token type</th><th>What it is</th><th class="r">Tokens</th><th class="r">Your rate</th><th class="r">Cost</th><th class="r">Of month</th></tr></thead>
+      <tbody>${rows}<tr class="total"><td>Total</td><td></td><td class="r tnum">${vol(tm)}</td><td></td><td class="r tnum">$${tu.toFixed(2)}</td><td class="r tnum">100%</td></tr></tbody>
+    </table></div>
+    <div class="whatif"><span><span class="tipno">2</span>Same tokens on <code>grok-4.7-high</code> instead of <code>grok-4.7-xhigh-fast</code></span>
+      <span><strong>$48.40</strong> <span class="muted">instead of $96.10</span></span><span class="save">$47.70 less this month</span></div>
+    <div class="read">
+      <h5>${crShare}% of your tokens are your chats re-reading themselves, and they're ${crCost}% of your cost</h5>
+      <p>Every prompt sends the whole chat so far back to the model, and those tokens are billed as cache reads. Each one is cheap, but they add up: prompt 61 in your Oct 7 chat re-sent everything from the 60 prompts before it. This row grows with how long your chats run, not with how much new work you ask for.</p>
+      <ul>
+        <li><span class="tipno">1</span><strong>Shrink this row.</strong> In a long chat on the same task, type <code>/summarize</code>. Later prompts then re-send the summary instead of every earlier prompt. For a new task, start a new chat, and type <code>@</code> and choose <b>Chats</b> if you need the old one.</li>
+        <li>Do it at about 20 prompts. The context ring next to the chat input shows how full the chat is. Cursor only summarizes on its own when the chat is close to full, and by then each prompt re-sends hundreds of thousands of tokens.</li>
+        <li><span class="tipno">2</span><strong>Lower the rate.</strong> Every row costs about twice as much on <code>-fast</code> models: cache reads are $1.00/M on <code>grok-4.7-xhigh-fast</code> and $0.50/M on <code>grok-4.7-high</code>.</li>
+        <li>A large output share points to effort, not chat length. Max and xhigh write more thinking for each answer.</li>
+      </ul>
+      <span class="src">Your rate is the average across the models you used, worked out from what your organization was charged, including any per-token fee Cursor adds. The cost column adds up to your actual spend.</span>
+    </div>`;
+  document.querySelectorAll('[data-tokens]').forEach(el => { el.innerHTML = section; });
+
+  drawCum(document.getElementById('cum'), 268, 150, 9);
+  drawCum(document.getElementById('cum-d'), 440, 190, 10);
+})();
+</script>
