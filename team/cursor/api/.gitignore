@@ -1,0 +1,7 @@
+.env
+.venv/
+data/
+__pycache__/
+.pytest_cache/
+# the root ignores .env.*; the example is meant to be committed
+!.env.example

@@ -11,6 +11,8 @@ repository = "https://github.com/intbot/burnwall"
 homepage = "https://github.com/intbot/burnwall"
 authors = ["intbot"]
 readme = "README.md"
+# The self-hosted team tools (Python API, Cursor extension) aren't part of the crate.
+exclude = ["team/"]
 keywords = ["ai", "llm", "security", "proxy", "cost-tracking"]
 categories = ["command-line-utilities", "network-programming"]
 
